@@ -30,6 +30,7 @@ role toolchain
       | tp_missing=()
       | export DEBIAN_FRONTEND=noninteractive
       | if [ "$rc" -eq 0 ]; then
+      |   :
       |   if ! find /var/lib/apt/lists -maxdepth 1 -type f ! -name lock 2>/dev/null | grep -q .; then apt-get -q update || rc=$?; fi
       | fi
       | if [ "$rc" -eq 0 ]; then

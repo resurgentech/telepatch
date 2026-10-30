@@ -37,3 +37,8 @@ os-fixtures:
 # transport, compare with the committed fixtures. Needs docker; may pull.
 test-live-os:
     cargo test -p telepatch --test live -- --ignored os_
+
+# Live: the package playbook through the executor on ubuntu:24.04 and
+# rockylinux/rockylinux:10 via docker exec; second run must change nothing.
+test-live-pkg:
+    cargo test -p telepatch --test live -- --ignored --nocapture pkg_

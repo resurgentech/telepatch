@@ -2,6 +2,7 @@
 //! run with `just test-live-os`.
 
 mod container;
+mod pkg;
 
 use std::path::Path;
 

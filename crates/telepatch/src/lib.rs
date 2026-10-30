@@ -7,6 +7,7 @@
 //! whose builder methods edit the node in place. Nothing executes.
 
 pub mod engine;
+pub mod executor;
 pub mod facts;
 pub mod host;
 pub mod key;
@@ -14,6 +15,8 @@ pub mod ops;
 pub mod optimize;
 pub mod plan;
 pub mod pool;
+pub mod prepare;
+pub mod report;
 pub mod resolver;
 pub mod role;
 pub mod sh;

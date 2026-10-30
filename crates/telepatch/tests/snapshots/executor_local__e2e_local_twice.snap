@@ -1,0 +1,28 @@
+---
+source: crates/telepatch/tests/executor_local.rs
+expression: "format!(\"-- run 1 table --\\n{}\\n-- run 1 stream --\\n{}\\n-- run 2 table --\\n{}\\n-- run 2 stream --\\n{}\",\nscrub(&r1.render(), d.path()), scrub(&out1, d.path()),\nscrub(&r2.render(), d.path()), scrub(&out2, d.path()),)"
+---
+-- run 1 table --
+HOST   STATUS    OK CHANGED FAILED NOT RUN  DETAIL
+local  changed    0       3      0       0
+
+-- run 1 stream --
+== local [files] #1 file $TMP/x.conf content ==
+-> changed
+== local [files] #2 file $TMP/y.conf lines ==
+-> changed
+== local [files] #3 sh echo building; touch '$TMP/made' ==
+local | building
+-> changed
+
+-- run 2 table --
+HOST   STATUS    OK CHANGED FAILED NOT RUN  DETAIL
+local  ok         3       0      0       0
+
+-- run 2 stream --
+== local [files] #1 file $TMP/x.conf content ==
+-> ok
+== local [files] #2 file $TMP/y.conf lines ==
+-> ok
+== local [files] #3 sh echo building; touch '$TMP/made' ==
+-> ok (skipped)

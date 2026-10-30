@@ -137,7 +137,7 @@ impl PkgSpec {
     fn apt_build_dep(&self, o: &mut String) {
         o.push_str("export DEBIAN_FRONTEND=noninteractive\n");
         self.apt_update_block(o);
-        o.push_str("if [ \"$rc\" -eq 0 ]; then\n");
+        o.push_str("if [ \"$rc\" -eq 0 ]; then\n  :\n");
         if !self.update_cache {
             o.push_str(APT_LISTS_GUARD);
         }
