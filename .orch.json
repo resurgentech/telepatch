@@ -1,0 +1,4 @@
+{
+  "project": "telepatch",
+  "gate": "cargo test --workspace"
+}
