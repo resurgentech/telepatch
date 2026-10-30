@@ -32,6 +32,9 @@ fn op_line(out: &mut String, id: usize, op: &OpNode, os: &Os) {
     if let Some(g) = &op.guard {
         let _ = write!(out, " when {}", guard(g));
     }
+    if op.allow_fail {
+        out.push_str(" allow_fail");
+    }
     if !op.post.is_empty() {
         let p: Vec<String> = op.post.iter().map(|(k, v)| format!("{k}={v}")).collect();
         let _ = write!(out, " post [{}]", p.join(", "));

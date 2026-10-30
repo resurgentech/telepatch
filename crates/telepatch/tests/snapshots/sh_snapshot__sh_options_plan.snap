@@ -1,0 +1,45 @@
+---
+source: crates/telepatch/tests/sh_snapshot.rs
+expression: "trace(&Playbook { name: \"demo\", run }, &host)"
+---
+host h1 (os: Debian/Debian 12)
+blocking reads: 0
+
+role demo
+  #1 sh as shell:root reads [] writes [*]
+      | rc=0; changed=0; skipped=0
+      | echo plain
+      | rc=$?
+      | if [ "$rc" -eq 0 ]; then changed=1; fi
+  #2 sh as shell:root reads [] writes [*]
+      | rc=0; changed=0; skipped=0
+      | if { rustup target list --installed | grep -qx 'x86_64-unknown-linux-musl'; } >/dev/null 2>&1; then
+      |   skipped=1
+      | else
+      | rustup target add 'x86_64-unknown-linux-musl'
+      | rc=$?
+      | if [ "$rc" -eq 0 ]; then changed=1; fi
+      | fi
+  #3 sh as login:deploy reads [] writes [*]
+      | rc=0; changed=0; skipped=0
+      | if [ -e ~/.cargo/bin/'ripgrep' ]; then
+      |   skipped=1
+      | else
+      | cargo install 'ripgrep'
+      | rc=$?
+      | if [ "$rc" -eq 0 ]; then changed=1; fi
+      | fi
+  #4 sh as shell:root reads [] writes [pkg:ripgrep]
+      | rc=0; changed=0; skipped=0
+      | tp_out=$(mktemp)
+      | {
+      | apt-get install -y 'ripgrep'
+      | } 2>&1 | tee "$tp_out"
+      | rc=${PIPESTATUS[0]}
+      | if [ "$rc" -eq 0 ] && grep -Eq '[1-9][0-9]* newly installed' "$tp_out"; then changed=1; fi
+      | rm -f "$tp_out"
+  #5 sh as shell:root reads [] writes [*] allow_fail
+      | rc=0; changed=0; skipped=0
+      | systemctl stop {maybe}
+      | rc=$?
+      | if [ "$rc" -eq 0 ]; then changed=1; fi

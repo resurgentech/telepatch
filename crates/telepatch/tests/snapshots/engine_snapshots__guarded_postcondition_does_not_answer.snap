@@ -1,0 +1,14 @@
+---
+source: crates/telepatch/tests/engine_snapshots.rs
+expression: "go(run, FakeExecutor::new())"
+---
+host web1
+window 1
+  -- implicit barrier: read of file:/f needs pending writes --
+  apply (implicit barrier):
+    #0 sh as shell:root: touch /a
+    #1 sh as shell:root: touch /f
+  round trip:
+    read exists(/f) as shell:root = Exists(false) [Block]
+
+blocking reads: 1

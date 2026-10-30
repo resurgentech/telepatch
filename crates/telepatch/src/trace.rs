@@ -17,7 +17,7 @@ impl fmt::Display for NodeId {
 }
 
 /// Who an op's shell is. Mirrors the design's `Principal`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Principal {
     Root,
     User(String),
@@ -27,7 +27,7 @@ pub enum Principal {
 /// (`login: false`). Ops issued through `h.as_user(u)` run in a fresh login
 /// environment of `u` (`login: true`), including `as_user("root")`: no
 /// privilege change, but the login environment.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct RunAs {
     pub principal: Principal,
     pub login: bool,
@@ -72,13 +72,15 @@ impl fmt::Display for RunAs {
 pub enum OpSpec {
     /// A placeholder shell line; replaced by `sh!` in a later step.
     Raw { script: String },
+    /// A shell command from `sh!`.
+    Shell(crate::sh::ShellSpec),
 }
 
 impl OpSpec {
     /// Short kind name used in plans.
     pub fn kind(&self) -> &'static str {
         match self {
-            OpSpec::Raw { .. } => "sh",
+            OpSpec::Raw { .. } | OpSpec::Shell(_) => "sh",
         }
     }
 
@@ -86,13 +88,14 @@ impl OpSpec {
     pub fn script(&self, _os: &Os) -> String {
         match self {
             OpSpec::Raw { script } => script.clone(),
+            OpSpec::Shell(s) => s.render(),
         }
     }
 
     /// Effects of an op of this kind before the caller narrows them.
     pub fn default_writes(&self) -> BTreeSet<Key> {
         match self {
-            OpSpec::Raw { .. } => BTreeSet::from([Key::Any]),
+            OpSpec::Raw { .. } | OpSpec::Shell(_) => BTreeSet::from([Key::Any]),
         }
     }
 }
@@ -126,6 +129,8 @@ pub struct OpNode {
     pub writes: BTreeSet<Key>,
     pub guard: Option<Guard>,
     pub post: BTreeMap<Key, Value>,
+    /// A failure of this op does not abort the run (honoured by the executor).
+    pub allow_fail: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

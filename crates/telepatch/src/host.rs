@@ -8,8 +8,9 @@ use std::rc::Rc;
 
 use crate::facts::os::Os;
 use crate::key::{Key, Value};
+use crate::resolver::Resolver;
 use crate::role::RoleGuard;
-use crate::trace::{Node, NodeId, OpNode, OpSpec, RunAs, Trace};
+use crate::trace::{Guard, Node, NodeId, OpNode, OpSpec, RunAs, Trace};
 
 /// A playbook bug found while tracing (not a host failure).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -38,6 +39,7 @@ pub struct Host<V> {
     /// Playbook variables.
     pub vars: Rc<V>,
     trace: Rc<RefCell<Trace>>,
+    resolver: Rc<RefCell<Resolver>>,
     run_as: RunAs,
 }
 
@@ -48,6 +50,7 @@ impl<V> Clone for Host<V> {
             os: self.os.clone(),
             vars: self.vars.clone(),
             trace: self.trace.clone(),
+            resolver: self.resolver.clone(),
             run_as: self.run_as.clone(),
         }
     }
@@ -61,12 +64,26 @@ impl<V> Host<V> {
             os: Rc::new(os),
             vars,
             trace: Rc::new(RefCell::new(Trace::default())),
+            resolver: Rc::new(RefCell::new(Resolver::default())),
             run_as: RunAs::root_shell(),
         }
     }
 
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    /// The shell this handle's ops and facts run in.
+    pub fn run_as(&self) -> &RunAs {
+        &self.run_as
+    }
+
+    pub(crate) fn trace_cell(&self) -> &Rc<RefCell<Trace>> {
+        &self.trace
+    }
+
+    pub(crate) fn resolver_cell(&self) -> &Rc<RefCell<Resolver>> {
+        &self.resolver
     }
 
     /// A copy of the trace recorded so far.
@@ -84,6 +101,7 @@ impl<V> Host<V> {
             reads: Default::default(),
             guard: None,
             post: BTreeMap::new(),
+            allow_fail: false,
         };
         let id = self.trace.borrow_mut().push(Node::Op(node));
         OpHandle {
@@ -159,6 +177,16 @@ impl OpHandle {
     /// Replace the declared write set (narrowing the default).
     pub fn writes(&self, keys: impl IntoIterator<Item = Key>) -> &Self {
         self.edit(|op| op.writes = keys.into_iter().collect())
+    }
+
+    /// A non-zero exit of this op does not fail the run.
+    pub fn allow_fail(&self) -> &Self {
+        self.edit(|op| op.allow_fail = true)
+    }
+
+    /// Run this op only when `guard` holds.
+    pub fn when(&self, guard: Guard) -> &Self {
+        self.edit(|op| op.guard = Some(guard))
     }
 
     /// Declare a postcondition: after this op, `key` has `value`.

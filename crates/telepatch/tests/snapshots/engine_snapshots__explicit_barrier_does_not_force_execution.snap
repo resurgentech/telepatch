@@ -1,0 +1,14 @@
+---
+source: crates/telepatch/tests/engine_snapshots.rs
+expression: "go(run, FakeExecutor::new())"
+---
+host web1
+window 1
+  round trip:
+    read exists(/etc/flag) as shell:root = Exists(false) [Block]
+window 2
+  apply (final):
+    #0 sh as shell:root: echo a
+    #3 sh as shell:root: echo b
+
+blocking reads: 1

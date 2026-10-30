@@ -6,11 +6,14 @@
 //! host appends a node to that host's [`Trace`] and returns an [`OpHandle`]
 //! whose builder methods edit the node in place. Nothing executes.
 
+pub mod engine;
 pub mod facts;
 pub mod host;
 pub mod key;
 pub mod plan;
+pub mod resolver;
 pub mod role;
+pub mod sh;
 pub mod testing;
 pub mod trace;
 

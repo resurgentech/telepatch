@@ -1,0 +1,17 @@
+---
+source: crates/telepatch/tests/engine_snapshots.rs
+expression: "go(run, fake)"
+---
+host web1
+window 1
+  -- implicit barrier: read of bin:mc needs pending writes --
+  apply (implicit barrier):
+    #0 sh as shell:root: echo before
+    #1 sh as shell:root: curl -o /usr/local/bin/mc https://x
+  round trip:
+    read bin_exists(mc) as shell:root = Exists(true) [Block]
+window 2
+  apply (final):
+    #3 sh as shell:root: echo after
+
+blocking reads: 1

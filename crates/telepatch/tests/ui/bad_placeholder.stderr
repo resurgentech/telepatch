@@ -1,0 +1,5 @@
+error: unsupported placeholder `{x:?}`: only `{identifier}` is allowed (write `{{` for a literal brace)
+ --> tests/ui/bad_placeholder.rs:4:12
+  |
+4 |     sh!(h, "echo {x:?}");
+  |            ^^^^^^^^^^^^

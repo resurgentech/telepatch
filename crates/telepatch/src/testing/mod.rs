@@ -9,6 +9,10 @@ use crate::host::Host;
 use crate::plan::render_host;
 use crate::role::Playbook;
 
+pub mod fake;
+
+pub use fake::{FakeExecutor, run_engine};
+
 /// A host description for tests: a name, an `Os` and variables.
 pub struct FixtureHost<V> {
     pub name: String,
@@ -51,4 +55,15 @@ pub fn trace_all<V>(playbook: &Playbook<V>, hosts: &[FixtureHost<V>]) -> String 
         .map(|h| trace(playbook, h))
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// Poll `fut` to completion on this thread. The futures the fake executor
+/// produces are always ready, so a `Pending` means a bug and panics.
+pub fn block_on<F: std::future::Future>(fut: F) -> F::Output {
+    let mut fut = std::pin::pin!(fut);
+    let mut cx = Context::from_waker(Waker::noop());
+    match fut.as_mut().poll(&mut cx) {
+        Poll::Ready(v) => v,
+        Poll::Pending => panic!("block_on: future returned Pending with nothing to wake it"),
+    }
 }

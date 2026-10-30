@@ -1,0 +1,5 @@
+error: the sh! command (format string) must be a string literal
+ --> tests/ui/nonliteral_fmt.rs:4:12
+  |
+4 |     sh!(h, cmd);
+  |            ^^^

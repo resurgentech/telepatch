@@ -1,0 +1,40 @@
+//! Plan snapshot of `sh!` with each option.
+
+use std::rc::Rc;
+
+use telepatch::facts::os::Os;
+use telepatch::testing::{FixtureHost, trace};
+use telepatch::{Host, Key, Playbook, PlaybookFuture, TraceError, role, sh};
+
+#[role]
+async fn demo(h: &Host<()>) -> Result<(), TraceError> {
+    let target = "x86_64-unknown-linux-musl";
+    let tool = "ripgrep";
+    sh!(h, "echo plain");
+    sh!(
+        h,
+        "rustup target add {target}",
+        unless = "rustup target list --installed | grep -qx {target}"
+    );
+    let s = h.as_user("deploy");
+    sh!(s, "cargo install {tool}", creates = "~/.cargo/bin/{tool}");
+    sh!(
+        h,
+        "apt-get install -y {tool}",
+        changed_if = "[1-9][0-9]* newly installed"
+    )
+    .writes([Key::pkg("ripgrep")]);
+    sh!(h, "systemctl stop {{maybe}}").allow_fail();
+    Ok(())
+}
+
+fn run(h: Host<()>) -> PlaybookFuture {
+    Box::pin(async move { demo(&h).await })
+}
+
+#[test]
+fn sh_options_plan() {
+    let os = Os::parse("ID=debian\nVERSION_ID=12\n").unwrap();
+    let host = FixtureHost::new("h1", os, Rc::new(()));
+    insta::assert_snapshot!(trace(&Playbook { name: "demo", run }, &host));
+}

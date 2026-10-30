@@ -1,0 +1,18 @@
+---
+source: crates/telepatch/tests/engine_snapshots.rs
+expression: "go(run, fake)"
+---
+host web1
+window 1
+  round trip:
+    read bin_version(cargo) as shell:root = Absent [Block]
+window 2
+  round trip:
+    read bin_version(cargo) as login:deploy = "cargo 1.90.0" [Block]
+window 3
+  round trip:
+    read bin_version(cargo) as login:root = Absent [Block]
+window 4
+  read bin_version(cargo) as login:deploy = "cargo 1.90.0" [Confirmed] (no round trip)
+
+blocking reads: 3

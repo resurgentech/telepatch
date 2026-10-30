@@ -1,0 +1,12 @@
+---
+source: crates/telepatch/tests/engine_snapshots.rs
+expression: "go(run, FakeExecutor::new())"
+---
+host web1
+window 1
+  round trip:
+    read bin_exists(git) as shell:root = Exists(false) [Block]
+window 2
+  read bin_exists(git) as shell:root = Exists(false) [Confirmed] (no round trip)
+
+blocking reads: 1

@@ -1,0 +1,5 @@
+error[E0425]: cannot find value `nope` in this scope
+ --> tests/ui/unknown_ident.rs:3:12
+  |
+3 |     sh!(h, "echo {nope}");
+  |            ^^^^^^^^^^^^^ not found in this scope

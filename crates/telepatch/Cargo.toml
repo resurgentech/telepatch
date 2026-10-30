@@ -11,3 +11,5 @@ telepatch-macros = { workspace = true }
 
 [dev-dependencies]
 insta = "1"
+tempfile = "3"
+trybuild = "1"

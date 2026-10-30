@@ -1,0 +1,5 @@
+error: unknown sh! argument `onlyif`; expected `unless`, `creates` or `changed_if`
+ --> tests/ui/unknown_arg.rs:3:23
+  |
+3 |     sh!(h, "echo hi", onlyif = "test -e /x");
+  |                       ^^^^^^
