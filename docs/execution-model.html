@@ -1,0 +1,935 @@
+<title>Telepatch Execution Model</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Newsreader:opsz,wght@6..72,500;6..72,600&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: single reading column (68ch), diagrams break out to 880px, sticky section nav hidden on phones. */
+:root {
+  --bg: #f6f7f9;
+  --surface: #ffffff;
+  --fg: #1a1e26;
+  --muted: #5b6472;
+  --line: #d6dbe3;
+  --accent: #1d6a86;
+  --accent-ink: #ffffff;
+  --accent-soft: #e2eff4;
+  --warn: #a35a14;
+  --warn-soft: #f7ebdc;
+  --code-bg: #eceff3;
+  --display: "Newsreader", "Iowan Old Style", Georgia, serif;
+  --body: "IBM Plex Sans", "Helvetica Neue", Arial, sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #12151a; --surface: #191d24; --fg: #e4e7ec; --muted: #98a2b1; --line: #2a303a;
+    --accent: #62b4d1; --accent-ink: #0d1217; --accent-soft: #1b2d36;
+    --warn: #e09a4e; --warn-soft: #2f2414; --code-bg: #1e232b;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #12151a; --surface: #191d24; --fg: #e4e7ec; --muted: #98a2b1; --line: #2a303a;
+  --accent: #62b4d1; --accent-ink: #0d1217; --accent-soft: #1b2d36;
+  --warn: #e09a4e; --warn-soft: #2f2414; --code-bg: #1e232b;
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+body {
+  background: var(--bg); color: var(--fg);
+  font-family: var(--body); font-size: 16px; line-height: 1.6;
+  padding-block: 0 80px;
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+}
+.page { max-width: 880px; margin: 0 auto; }
+.prose { max-width: 68ch; }
+h1, h2, h3 { font-family: var(--display); font-weight: 600; line-height: 1.15; text-wrap: balance; margin: 0; }
+h1 { font-size: clamp(2.2rem, 5vw, 3.2rem); letter-spacing: -0.01em; }
+h2 { font-size: 1.75rem; margin-top: 3.5rem; margin-bottom: 0.75rem; padding-top: 1.25rem; border-top: 1px solid var(--line); }
+h3 { font-size: 1.2rem; margin-top: 2rem; margin-bottom: 0.5rem; font-family: var(--body); font-weight: 600; }
+p { margin: 0 0 1rem; }
+a { color: var(--accent); }
+.eyebrow { font-family: var(--mono); font-size: 0.75rem; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
+header { padding-block: 3rem 1.5rem; display: grid; gap: 0.8rem; }
+header .lede { font-size: 1.15rem; color: var(--muted); max-width: 60ch; }
+.meta { display: flex; flex-wrap: wrap; gap: 1.25rem; font-family: var(--mono); font-size: 0.78rem; color: var(--muted); }
+
+code { font-family: var(--mono); font-size: 0.88em; background: var(--code-bg); padding: 0.08em 0.35em; border-radius: 3px; }
+pre { font-family: var(--mono); font-size: 0.82rem; line-height: 1.55; background: var(--code-bg); border: 1px solid var(--line); border-radius: 6px; padding: 1rem 1.1rem; overflow-x: auto; margin: 1rem 0 1.25rem; }
+pre code { background: none; padding: 0; font-size: inherit; }
+pre .c { color: var(--muted); }
+pre .k { color: var(--accent); font-weight: 500; }
+pre .w { color: var(--warn); }
+.caption { font-size: 0.85rem; color: var(--muted); margin: 0.4rem 0 1.5rem; max-width: 68ch; }
+
+figure { margin: 1.5rem 0 0.5rem; }
+figure svg { width: 100%; height: auto; display: block; }
+.d-box { fill: var(--surface); stroke: var(--line); stroke-width: 1.2; }
+.d-box-accent { fill: var(--accent-soft); stroke: var(--accent); stroke-width: 1.2; }
+.d-box-warn { fill: var(--warn-soft); stroke: var(--warn); stroke-width: 1.2; }
+.d-fill { fill: var(--accent); }
+.d-text { fill: var(--fg); font-family: var(--body); font-size: 13px; }
+.d-text-sm { fill: var(--fg); font-family: var(--body); font-size: 11.5px; }
+.d-mono { fill: var(--fg); font-family: var(--mono); font-size: 11.5px; }
+.d-mono-sm { fill: var(--muted); font-family: var(--mono); font-size: 10.5px; }
+.d-muted { fill: var(--muted); font-family: var(--body); font-size: 12px; }
+.d-label { fill: var(--muted); font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.06em; text-transform: uppercase; }
+.d-line { stroke: var(--fg); stroke-width: 1.3; fill: none; }
+.d-line-muted { stroke: var(--muted); stroke-width: 1; fill: none; stroke-dasharray: 3 3; }
+.d-line-accent { stroke: var(--accent); stroke-width: 1.5; fill: none; }
+.d-bar { fill: var(--accent); }
+.d-grid { stroke: var(--line); stroke-width: 1; }
+.d-axis { stroke: var(--muted); stroke-width: 1; }
+.d-num { fill: var(--fg); font-family: var(--mono); font-size: 12px; font-variant-numeric: tabular-nums; }
+
+table { border-collapse: collapse; width: 100%; font-size: 0.92rem; margin: 1rem 0 1.5rem; }
+th, td { text-align: left; padding: 0.55rem 0.7rem; border-bottom: 1px solid var(--line); vertical-align: top; }
+th { font-family: var(--mono); font-size: 0.74rem; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); font-weight: 500; }
+td code { white-space: nowrap; }
+.table-wrap { overflow-x: auto; }
+.pick td:first-child { font-weight: 600; }
+.pick tr.chosen td { background: var(--accent-soft); }
+
+.callout { border-left: 3px solid var(--accent); background: var(--surface); padding: 0.9rem 1.1rem; margin: 1.25rem 0; max-width: 68ch; }
+.callout.warn { border-left-color: var(--warn); }
+.callout p:last-child { margin-bottom: 0; }
+.callout strong { font-weight: 600; }
+
+ul, ol { padding-left: 1.3rem; margin: 0 0 1rem; }
+li { margin-bottom: 0.35rem; }
+li > code:first-child { font-weight: 500; }
+
+.cols { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 1rem; margin: 1rem 0 1.5rem; }
+.cols > div { min-width: 0; background: var(--surface); border: 1px solid var(--line); border-radius: 6px; padding: 0.9rem 1rem; }
+.cols h4 { margin: 0 0 0.4rem; font-size: 0.95rem; font-weight: 600; }
+.cols p { font-size: 0.9rem; margin: 0; color: var(--muted); }
+
+nav.toc { font-size: 0.9rem; margin: 1.5rem 0 0; padding: 1rem 1.1rem; background: var(--surface); border: 1px solid var(--line); border-radius: 6px; max-width: 68ch; }
+nav.toc ol { margin: 0.4rem 0 0; columns: 2; column-gap: 2rem; }
+nav.toc li { break-inside: avoid; }
+nav.toc a { text-decoration: none; }
+nav.toc a:hover { text-decoration: underline; }
+@media (max-width: 520px) { nav.toc ol { columns: 1; } }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+</style>
+
+<div class="page">
+<header>
+  <div class="eyebrow">telepatch / design note</div>
+  <h1>Telepatch Execution Model</h1>
+  <p class="lede">Roles and tasks are written as plain imperative Rust. Running them does nothing; it records a trace. The engine turns the trace into a per-host graph, merges what can be merged, and streams it into persistent shells over SSH, with a terminal stream per operation.</p>
+  <div class="meta"><span>status: proposal</span><span>tracing + postconditions + guards</span><span>2026-10-30</span></div>
+</header>
+
+<nav class="toc" aria-label="Sections">
+  <div class="eyebrow">Contents</div>
+  <ol>
+    <li><a href="#split">The split</a></li>
+    <li><a href="#ssh">Shells over SSH</a></li>
+    <li><a href="#trace">The trace</a></li>
+    <li><a href="#resolver">The fact resolver</a></li>
+    <li><a href="#example">Worked example</a></li>
+    <li><a href="#loop">The engine loop</a></li>
+    <li><a href="#optimizer">The optimizer</a></li>
+    <li><a href="#cost">What it costs</a></li>
+    <li><a href="#survey">What the Ansible repo does</a></li>
+    <li><a href="#primitives">Initial primitives</a></li>
+    <li><a href="#syntax">Reading like a script</a></li>
+    <li><a href="#prepare">Prepare phase: fail early</a></li>
+    <li><a href="#transactions">Roles as transactions</a></li>
+    <li><a href="#errors">Error handling</a></li>
+    <li><a href="#semantics">Semantics to pin down</a></li>
+    <li><a href="#later">Later: speculation</a></li>
+    <li><a href="#prototype">What to prototype first</a></li>
+  </ol>
+</nav>
+
+<section class="prose" id="split">
+<h2>The split</h2>
+<p>Batching across roles only works if the playbook describes operations instead of performing them. So the design has two parts that never share an address space: the playbook program and the engine. The target hosts run nothing of ours; they run a shell.</p>
+</section>
+
+<figure>
+<svg viewBox="0 0 880 300" role="img" aria-label="Architecture: playbook binary talks to engine over an API; engine keeps persistent shells on each host over SSH.">
+  <!-- playbook -->
+  <rect x="20" y="40" width="200" height="140" rx="6" class="d-box"/>
+  <text x="36" y="66" class="d-label">playbook binary</text>
+  <text x="36" y="92" class="d-text">roles + tasks, plain Rust</text>
+  <text x="36" y="112" class="d-text">links the client crate</text>
+  <text x="36" y="140" class="d-mono-sm">declare(op) -&gt; Handle</text>
+  <text x="36" y="156" class="d-mono-sm">fact(host, key) -&gt; Future</text>
+  <text x="36" y="172" class="d-mono-sm">barrier()</text>
+
+  <!-- engine -->
+  <rect x="290" y="20" width="300" height="200" rx="6" class="d-box-accent"/>
+  <text x="306" y="46" class="d-label">engine (one Rust crate)</text>
+  <rect x="306" y="60" width="128" height="30" rx="4" class="d-box"/><text x="316" y="79" class="d-text-sm">trace recorder</text>
+  <rect x="446" y="60" width="128" height="30" rx="4" class="d-box"/><text x="456" y="79" class="d-text-sm">fact resolver</text>
+  <rect x="306" y="100" width="128" height="30" rx="4" class="d-box"/><text x="316" y="119" class="d-text-sm">optimizer</text>
+  <rect x="446" y="100" width="128" height="30" rx="4" class="d-box"/><text x="456" y="119" class="d-text-sm">executor</text>
+  <rect x="306" y="140" width="128" height="30" rx="4" class="d-box"/><text x="316" y="159" class="d-text-sm">ssh pool</text>
+  <rect x="446" y="140" width="128" height="30" rx="4" class="d-box"/><text x="456" y="159" class="d-text-sm">stream log</text>
+  <text x="306" y="200" class="d-muted">embedded in-process, or long-lived daemon behind a socket</text>
+
+  <!-- hosts -->
+  <rect x="660" y="20" width="200" height="60" rx="6" class="d-box"/>
+  <text x="676" y="44" class="d-label">host a · bash</text>
+  <text x="676" y="64" class="d-mono-sm">1–3 persistent shells · pty on one</text>
+  <rect x="660" y="90" width="200" height="60" rx="6" class="d-box"/>
+  <text x="676" y="114" class="d-label">host b · bash</text>
+  <text x="676" y="134" class="d-mono-sm">1–3 persistent shells · pty on one</text>
+  <rect x="660" y="160" width="200" height="60" rx="6" class="d-box"/>
+  <text x="676" y="184" class="d-label">host c · bash</text>
+  <text x="676" y="204" class="d-mono-sm">1–3 persistent shells · pty on one</text>
+
+  <!-- arrows -->
+  <line x1="220" y1="110" x2="290" y2="110" class="d-line"/>
+  <polygon points="290,110 282,105 282,115" fill="currentColor" class="d-text"/>
+  <text x="228" y="100" class="d-mono-sm">api</text>
+
+  <line x1="590" y1="50" x2="660" y2="50" class="d-line"/><polygon points="660,50 652,45 652,55" class="d-text"/>
+  <line x1="590" y1="120" x2="660" y2="120" class="d-line"/><polygon points="660,120 652,115 652,125" class="d-text"/>
+  <line x1="590" y1="190" x2="660" y2="190" class="d-line"/><polygon points="660,190 652,185 652,195" class="d-text"/>
+  <text x="598" y="110" class="d-mono-sm">ssh</text>
+
+  <!-- UI -->
+  <rect x="290" y="245" width="300" height="40" rx="6" class="d-box"/>
+  <text x="306" y="262" class="d-label">tui / web ui (xterm.js)</text>
+  <text x="306" y="278" class="d-muted">subscribes to stream log; one terminal per op per host</text>
+  <line x1="440" y1="220" x2="440" y2="245" class="d-line-muted"/>
+</svg>
+<figcaption class="caption">The playbook never touches SSH. In one-shot mode the engine is a library call inside the playbook process; in daemon mode the same API goes over a local socket and the daemon spawns the playbook as a child. Nothing is <code>dlopen</code>ed, and nothing is installed on a target.</figcaption>
+</figure>
+
+<section class="prose" id="ssh">
+<h2>Shells over SSH</h2>
+<p>An operator doing this by hand keeps a terminal open and runs the steps one after another. Telepatch does the same thing. Each host gets a small number of persistent shells, opened once at the start of a run, and ops are streamed into them for as long as the run lasts. Ansible's per-task cycle of connect, copy a module, run it, collect JSON, disconnect does not exist here. There is no agent, no binary to push, nothing to bootstrap, and nothing for the host to run except the shell it already has.</p>
+
+<h3>Opening shells</h3>
+<p>The transport is the user's own <code>ssh</code> binary, spawned as <code>ssh host bash</code>. Their <code>~/.ssh/config</code> decides everything about how that connects: keys, agents, <code>ProxyJump</code>, ControlMaster. Telepatch does not own those decisions and does not try to. The executor asks the SSH module for the number of shells it would like on each host; the module tries channels on the first connection, opens further connections when a channel is refused, and reports back what it got.</p>
+<pre><code><span class="k">enum</span>   Principal { Root, User(String) }
+<span class="k">struct</span> Shells    { got: Vec&lt;Shell&gt;, want: usize, limit: Option&lt;Limit&gt; }
+<span class="k">enum</span>   Limit     { MaxSessions, ConnectRefused, AuthFailed, SudoRefused, Other(String) }
+
+<span class="k">fn</span> open(host: HostId, who: Principal, want: usize) -&gt; Shells;   <span class="c">// want is a hint; got.len() is the answer</span></code></pre>
+<p><code>want</code> is a hint. The executor gets the whole answer up front and plans with it:</p>
+<ul>
+  <li><code>got == 0</code> for <code>Root</code> is a host failure, reported like any other unreachable host.</li>
+  <li><code>got == 1</code> always works. One shell, no PTY, ops sequential, hangs handled by <code>timeout</code> inside the shell. Everything is designed to be correct at degree one, so a host that only gives one shell is slower, never broken.</li>
+  <li><code>got &gt;= 2</code> lets the executor assign roles: the first shell without a PTY for ops whose output is parsed, the second with a PTY for ops a human might watch, any further ones raising per-host concurrency once within-host parallelism exists.</li>
+</ul>
+<p>The optimizer never sees any of this. It emits the per-host graph; the executor schedules it onto however many shells it was given, and the UI shows the <code>limit</code> when a host came up short.</p>
+
+<h3>Principals</h3>
+<p>A <code>Root</code> shell is <code>ssh host bash</code> followed by one <code>sudo -n bash</code>; it stays root for the run. Ops run as root by default, which is what the Ansible repo's <code>ansible_become: true</code> already assumes everywhere. A host where <code>sudo -n</code> is refused is reported in prepare and the run stops before apply.</p>
+<p>A <code>User(u)</code> shell is a persistent login shell for that user, opened when the host's graph first needs <code>u</code> and closed when it has no more ops for <code>u</code>. It is opened one of two ways, chosen by the pool: a dedicated channel, <code>ssh host 'sudo -n -iu u bash'</code>, while the host has sessions to spare; or by nesting, typing <code>sudo -iu u bash</code> into a root shell, which turns that channel into <code>u</code>'s shell until <code>exit</code>. Either way the user has their own login shell and profile, so <code>~</code> and <code>~/.cargo/env</code> resolve the way they would at a terminal, and the user needs no key, password or SSH access of their own. One <code>sudo</code> per user per host per run replaces the repo's <code>getent passwd</code> + <code>$SHELL -lc</code> on every per-user task.</p>
+<p>The executor sends each op to its principal's shell in trace order. Shells for different principals pipeline independently; the executor waits across them only at a dependency edge, such as root creating <code>/opt/x</code> and then <code>u</code> writing into it. That is within-host parallelism for the per-user case, which is the only case the corpus has, without a general reordering pass.</p>
+
+<h3>Streaming ops into a shell</h3>
+<p>An op is a command written to the shell's stdin, wrapped so that its result comes back as a trailer the engine can find. The engine does not wait for one op's trailer before writing the next, so a whole window goes down the pipe as fast as the shell will take it. Only an op with a guard waits, and it waits inside the shell, not in the engine.</p>
+</section>
+
+<figure>
+<svg viewBox="0 0 880 250" role="img" aria-label="Two streams over one persistent shell: commands pipelined into stdin, output and nonce-tagged trailers coming back on stdout, with the engine never waiting between commands.">
+  <rect x="20" y="20" width="840" height="210" rx="8" class="d-box"/>
+  <text x="36" y="44" class="d-label">one persistent shell · ssh host bash</text>
+
+  <text x="36" y="80" class="d-label">stdin →</text>
+  <rect x="110" y="66" width="150" height="24" rx="3" class="d-box-accent"/>
+  <text x="118" y="82" class="d-mono-sm">( useradd … ); trailer</text>
+  <rect x="266" y="66" width="200" height="24" rx="3" class="d-box-accent"/>
+  <text x="274" y="82" class="d-mono-sm">( apt-get install … ); trailer</text>
+  <rect x="472" y="66" width="160" height="24" rx="3" class="d-box-accent"/>
+  <text x="480" y="82" class="d-mono-sm">( file nginx.conf ); trailer</text>
+  <rect x="638" y="66" width="200" height="24" rx="3" class="d-box-accent"/>
+  <text x="646" y="82" class="d-mono-sm">[ changed ] &amp;&amp; ( restart ); trailer</text>
+
+  <text x="36" y="150" class="d-label">stdout ←</text>
+  <rect x="110" y="120" width="40" height="24" rx="3" class="d-box"/>
+  <text x="118" y="136" class="d-mono-sm">out</text>
+  <rect x="154" y="120" width="60" height="24" rx="3" class="d-box-warn"/>
+  <text x="162" y="136" class="d-mono-sm">__tp 1</text>
+  <rect x="266" y="120" width="300" height="24" rx="3" class="d-box"/>
+  <text x="274" y="136" class="d-mono-sm">Reading package lists… Setting up nginx…</text>
+  <rect x="570" y="120" width="60" height="24" rx="3" class="d-box-warn"/>
+  <text x="578" y="136" class="d-mono-sm">__tp 2</text>
+  <rect x="640" y="120" width="60" height="24" rx="3" class="d-box-warn"/>
+  <text x="648" y="136" class="d-mono-sm">__tp 3</text>
+  <rect x="710" y="120" width="60" height="24" rx="3" class="d-box"/>
+  <text x="718" y="136" class="d-mono-sm">out</text>
+  <rect x="774" y="120" width="60" height="24" rx="3" class="d-box-warn"/>
+  <text x="782" y="136" class="d-mono-sm">__tp 4</text>
+
+  <line x1="110" y1="100" x2="110" y2="116" class="d-line-muted"/>
+  <text x="36" y="186" class="d-muted">All four commands are written before the first trailer arrives. The engine splits stdout on trailers,</text>
+  <text x="36" y="204" class="d-muted">attributes the bytes between them to the op that produced them, and parses each trailer into that op's typed result.</text>
+  <text x="36" y="222" class="d-muted">The guard on the restart is evaluated by the shell, from a variable the file op set.</text>
+</svg>
+<figcaption class="caption">Pipelined ops on one shell. Time runs left to right; trailer boxes are the nonce-tagged result lines. Nothing on the host knows it is being driven by anything other than a person typing fast.</figcaption>
+</figure>
+
+<section class="prose">
+<p>The trailer is the only protocol. Each <code>OpKind</code> has a shell template and a <code>Result</code> type, and the template is responsible for emitting a trailer that parses into that type:</p>
+<pre><code><span class="c"># emitted by the file op's template; nonce is per run, id is per op</span>
+( umask 022; printf %s "$content" | base64 -d &gt; "$tmp" &amp;&amp;
+  if cmp -s "$tmp" "$dst"; then rm "$tmp"; changed=0; else mv "$tmp" "$dst"; changed=1; fi
+); rc=$?
+echo "__tp_${nonce} ${id} {\"rc\":${rc},\"changed\":${changed}}"</code></pre>
+<pre><code><span class="k">struct</span> FileResult { rc: i32, changed: bool }          <span class="c">// parser generated from the type</span>
+<span class="k">impl</span> Op <span class="k">for</span> File { <span class="k">type</span> Result = FileResult; <span class="k">fn</span> template(&amp;<span class="k">self</span>) -&gt; Script { … } }</code></pre>
+<p>A template that forgets a field fails to compile, not fails at three in the morning. The nonce is random per run so output cannot spoof a trailer. Each op runs in a subshell so working directory and environment never leak from one op to the next; the only state that persists on purpose is the small set of variables guards read.</p>
+
+<h3>What the shell gives us for free</h3>
+<ul>
+  <li><strong>A real terminal per op.</strong> On the PTY shell the bytes between two trailers are exactly what a terminal would have shown: colors, progress bars, cursor movement. The stream log stores them with timestamps, and xterm.js or ghostty-wasm replays them with the same code path as live.</li>
+  <li><strong>Facts in bulk.</strong> One <code>dpkg-query -W -f='${Package}\t${db:Status-Status}\n'</code> answers every package question; one <code>stat -c</code> with a format string answers every file question. The engine parses; the host just prints.</li>
+  <li><strong>Interactive ops work.</strong> Stdin to the PTY shell reaches whatever is in the foreground, so a prompt that genuinely needs a human can get one, through the UI.</li>
+  <li><strong>Non-Linux hosts work to the extent their shell does.</strong> There is no binary to build per architecture and nothing that assumes <code>/proc</code>.</li>
+</ul>
+<p>Where POSIX shell gets genuinely ugly for an op, the backstop is a helper script or static binary that telepatch owns, pushed lazily the first time that op kind runs on a host and cached by hash. That is a toolbox the shell calls, not a resident process.</p>
+<p>Two costs, on the record: a hung op blocks its shell until the <code>timeout</code> wrapper fires or a second shell kills it, and only the PTY shell can forward stdin cleanly. Both are acceptable.</p>
+</section>
+
+<section class="prose" id="trace">
+<h2>The trace</h2>
+<p>Every op the program calls appends a node and returns a handle. Nothing executes during tracing. The trace is a flat, ordered log of three node kinds:</p>
+<pre><code><span class="k">enum</span> Node {
+    Op {
+        kind:   OpKind,            <span class="c">// Pkg, File, Svc, Shell, User, ...</span>
+        host:   HostId,
+        inputs: Inputs,
+        reads:  Set&lt;Key&gt;,          <span class="c">// effect keys this op depends on</span>
+        writes: Set&lt;Key&gt;,          <span class="c">// effect keys this op changes</span>
+        guard:  Option&lt;Guard&gt;,     <span class="c">// run only if an earlier op's output says so</span>
+        post:   <span class="k">fn</span>(&amp;Key) -&gt; Option&lt;Value&gt;,  <span class="c">// what this op guarantees afterwards</span>
+    },
+    FactRead { host: HostId, key: Key, value: Value, source: Source },
+    Barrier,
+}
+
+<span class="k">enum</span> Source  { Confirmed, Postcondition(NodeId) }     <span class="c">// speculation would add Journaled</span>
+<span class="k">enum</span> Guard   { Changed(NodeId), ExitOk(NodeId), Not(Box&lt;Guard&gt;) }</code></pre>
+<p><code>Key</code> is a fine-grained effect address: <code>pkg:nginx</code>, <code>file:/etc/nginx/nginx.conf</code>, <code>svc:nginx</code>, <code>user:deploy</code>. Ops whose effects can't be enumerated (<code>shell</code>) declare <code>writes: *</code>, which makes them a barrier for free. The ordering edges between ops are derived from key overlap, so a user who writes <code>pkg(..)</code> then <code>svc(..).restart()</code> never has to state the dependency.</p>
+<p>Two distinctions matter later:</p>
+<ul>
+  <li>A <strong>postcondition</strong> is what an op guarantees once it has run. After <code>pkg(["nginx"]).installed()</code>, <code>pkg:nginx</code> is <code>Installed</code>. This is a contract, not a prediction.</li>
+  <li>An <strong>output</strong> is something you only know after execution: whether the op changed anything, its exit status, its stdout. Outputs are never awaited by the program. They feed <strong>guards</strong>, which the executor evaluates at run time.</li>
+</ul>
+</section>
+
+<section class="prose" id="resolver">
+<h2>The fact resolver</h2>
+<p>The planner sees everything up to the next fact read it cannot answer. So the design question is which reads it <em>can</em> answer without a round trip. The two most common reasons a playbook asks about remote state are: it wants to know about something it just did, and it wants to react to whether an op changed anything. Postconditions handle the first; guards handle the second. What remains is reads of pre-existing state the playbook never touches, and those sync.</p>
+<p>When the program awaits a fact, the resolver answers from three sources in order.</p>
+<pre><code><span class="k">fn</span> resolve(&amp;<span class="k">self</span>, host: HostId, key: &amp;Key) -&gt; Answer {
+    <span class="c">// 1. Already read this run, and no op since has written this key.</span>
+    <span class="k">if let</span> Some(v) = <span class="k">self</span>.confirmed.get(&amp;(host, key)) {
+        <span class="k">return</span> Answer::Now(v, Source::Confirmed);
+    }
+    <span class="c">// 2. An earlier op in the pending trace guarantees it.</span>
+    <span class="k">if let</span> Some(op) = <span class="k">self</span>.pending.last_writer(host, key) {
+        <span class="k">if let</span> Some(v) = (op.post)(key) {
+            <span class="k">return</span> Answer::Now(v, Source::Postcondition(op.id));
+        }
+    }
+    <span class="c">// 3. Pre-existing state nobody has touched. Sync.</span>
+    Answer::Block
+}</code></pre>
+<p><code>Block</code> suspends the program's future. The engine flushes the trace so far (optimize, execute), reads the fact with one round trip, resolves the future, and the program continues. The program is a single async task that is simply paused; there is no re-trace and no requirement that it be deterministic.</p>
+
+<div class="callout">
+<p><strong>Guards, not awaits, for "if changed".</strong> <code>changed</code> is an output, so the program cannot await it without blocking. Instead the dependent op is declared with a guard: <code>svc("nginx").restart().when(conf.changed())</code>. The restart is in the graph, the planner sees it, and the executor skips it if the guard is false. Same semantics as an Ansible handler, expressed as a graph edge instead of control flow.</p>
+</div>
+</section>
+
+<section class="prose" id="example">
+<h2>Worked example</h2>
+<p>Two roles. Three places where the program asks about remote state are marked; only one of them syncs.</p>
+<pre><code><span class="c">#[role]</span>
+<span class="k">async fn</span> web(h: Host) -&gt; Result&lt;()&gt; {
+    <span class="c">// (A) pre-existing state nothing in the playbook writes: this one syncs</span>
+    <span class="k">let</span> fresh = !h.fact(Fact::exists(<span class="w">"/etc/telepatch/.bootstrapped"</span>)).<span class="k">await</span>?;
+    <span class="k">if</span> fresh {
+        h.shell(<span class="w">"useradd -m deploy"</span>).writes([Key::user(<span class="w">"deploy"</span>)]);
+    }
+    h.pkg([<span class="w">"nginx"</span>, <span class="w">"certbot"</span>]).installed();
+    <span class="k">let</span> conf = h.file(<span class="w">"/etc/nginx/nginx.conf"</span>).content(tpl!(<span class="w">"nginx.conf"</span>, &amp;h.vars));
+    <span class="c">// (B) output of an op: a guard, never awaited</span>
+    h.svc(<span class="w">"nginx"</span>).restart().when(conf.changed());
+    h.svc(<span class="w">"nginx"</span>).enabled();
+    Ok(())
+}
+
+<span class="c">#[role]</span>
+<span class="k">async fn</span> monitoring(h: Host) -&gt; Result&lt;()&gt; {
+    h.pkg([<span class="w">"prometheus-node-exporter"</span>]).installed();
+    h.svc(<span class="w">"prometheus-node-exporter"</span>).enabled();
+    <span class="c">// (C) answered by the postcondition of web's pkg op; no round trip</span>
+    <span class="k">if</span> h.fact(Fact::pkg_installed(<span class="w">"nginx"</span>)).<span class="k">await</span>? == Installed {
+        h.file(<span class="w">"/etc/prometheus/targets/nginx.yml"</span>).content(NGINX_SCRAPE);
+    }
+    Ok(())
+}</code></pre>
+<p>For one host, the trace and the graph the optimizer produces from it:</p>
+</section>
+
+<figure>
+<svg viewBox="0 0 880 330" role="img" aria-label="Trace of nine nodes becomes a per-host chain with the two package ops merged into one, split into two planning windows at the fact read.">
+  <!-- window brackets -->
+  <text x="20" y="22" class="d-label">window 1 · flush, then one round trip</text>
+  <line x1="20" y1="30" x2="118" y2="30" class="d-line-accent"/>
+  <text x="150" y="22" class="d-label">window 2 · everything else, one batched execution</text>
+  <line x1="150" y1="30" x2="860" y2="30" class="d-line-accent"/>
+  <line x1="134" y1="30" x2="134" y2="230" class="d-line-muted"/>
+
+  <!-- node A: fact read -->
+  <polygon points="69,70 118,100 69,130 20,100" class="d-box-warn"/>
+  <text x="69" y="96" text-anchor="middle" class="d-mono">fact</text>
+  <text x="69" y="110" text-anchor="middle" class="d-mono-sm">exists?</text>
+  <text x="69" y="150" text-anchor="middle" class="d-mono-sm">(A) sync</text>
+
+  <!-- chain nodes -->
+  <rect x="150" y="76" width="96" height="48" rx="5" class="d-box"/>
+  <text x="198" y="96" text-anchor="middle" class="d-mono">shell</text>
+  <text x="198" y="111" text-anchor="middle" class="d-mono-sm">useradd</text>
+  <text x="198" y="140" text-anchor="middle" class="d-mono-sm">guard: fresh</text>
+
+  <rect x="270" y="76" width="132" height="48" rx="5" class="d-box-accent"/>
+  <text x="336" y="96" text-anchor="middle" class="d-mono">apt (merged)</text>
+  <text x="336" y="111" text-anchor="middle" class="d-mono-sm">nginx certbot node-exp</text>
+  <text x="336" y="140" text-anchor="middle" class="d-mono-sm">writes pkg:* ×3</text>
+
+  <rect x="426" y="76" width="96" height="48" rx="5" class="d-box"/>
+  <text x="474" y="96" text-anchor="middle" class="d-mono">file</text>
+  <text x="474" y="111" text-anchor="middle" class="d-mono-sm">nginx.conf</text>
+  <text x="474" y="140" text-anchor="middle" class="d-mono-sm">out: changed</text>
+
+  <rect x="546" y="76" width="96" height="48" rx="5" class="d-box"/>
+  <text x="594" y="96" text-anchor="middle" class="d-mono">svc restart</text>
+  <text x="594" y="111" text-anchor="middle" class="d-mono-sm">nginx</text>
+  <text x="594" y="140" text-anchor="middle" class="d-mono-sm">(B) guard: changed</text>
+
+  <rect x="666" y="76" width="96" height="48" rx="5" class="d-box"/>
+  <text x="714" y="96" text-anchor="middle" class="d-mono">svc enable</text>
+  <text x="714" y="111" text-anchor="middle" class="d-mono-sm">nginx</text>
+
+  <rect x="786" y="76" width="74" height="48" rx="5" class="d-box"/>
+  <text x="823" y="96" text-anchor="middle" class="d-mono">svc en.</text>
+  <text x="823" y="111" text-anchor="middle" class="d-mono-sm">node-exp</text>
+
+  <!-- second row: the scrape target, answered by postcondition -->
+  <polygon points="474,206 523,236 474,266 425,236" class="d-box-accent"/>
+  <text x="474" y="232" text-anchor="middle" class="d-mono">fact</text>
+  <text x="474" y="246" text-anchor="middle" class="d-mono-sm">pkg nginx?</text>
+  <text x="474" y="286" text-anchor="middle" class="d-mono-sm">(C) answered by apt's postcondition</text>
+
+  <rect x="546" y="212" width="130" height="48" rx="5" class="d-box"/>
+  <text x="611" y="232" text-anchor="middle" class="d-mono">file</text>
+  <text x="611" y="247" text-anchor="middle" class="d-mono-sm">targets/nginx.yml</text>
+
+  <!-- arrows along chain -->
+  <line x1="118" y1="100" x2="150" y2="100" class="d-line"/>
+  <line x1="246" y1="100" x2="270" y2="100" class="d-line"/>
+  <line x1="402" y1="100" x2="426" y2="100" class="d-line"/>
+  <line x1="522" y1="100" x2="546" y2="100" class="d-line"/>
+  <line x1="642" y1="100" x2="666" y2="100" class="d-line"/>
+  <line x1="762" y1="100" x2="786" y2="100" class="d-line"/>
+  <!-- postcondition edge from apt to fact C -->
+  <path d="M336,124 C336,200 380,236 425,236" class="d-line-accent"/>
+  <line x1="523" y1="236" x2="546" y2="236" class="d-line"/>
+  <!-- hoist annotation -->
+  <path d="M823,124 C823,180 700,190 402,112" class="d-line-muted"/>
+  <text x="700" y="178" class="d-muted">node-exporter's pkg op hoisted into the first apt</text>
+
+  <!-- other hosts, faded -->
+  <rect x="150" y="300" width="710" height="12" rx="3" class="d-box" opacity="0.55"/>
+  <rect x="150" y="316" width="710" height="12" rx="3" class="d-box" opacity="0.35"/>
+  <text x="20" y="312" class="d-muted">hosts b, c …</text>
+  <text x="20" y="326" class="d-muted">same graph, in parallel</text>
+</svg>
+<figcaption class="caption">Nine trace nodes become seven graph nodes. The read at (A) is the only planning horizon. (B) is a guard and (C) is a postcondition, so neither splits the window. The two <code>pkg</code> ops merge into one apt invocation, which is legal because no op between them touches a package key.</figcaption>
+</figure>
+
+<section class="prose" id="loop">
+<h2>The engine loop</h2>
+<p>Because the program is a suspended future rather than something to re-run, the loop is short.</p>
+<pre><code><span class="k">async fn</span> run(playbook: <span class="k">impl</span> Playbook, hosts: &amp;[HostId]) -&gt; Report {
+    <span class="k">let</span> engine = Engine::new(hosts);
+    <span class="k">let mut</span> program = playbook.start(engine.client());   <span class="c">// a future; nothing runs yet</span>
+
+    <span class="k">loop</span> {
+        <span class="c">// Drive the program until it finishes or blocks on a fact read.</span>
+        <span class="k">match</span> engine.trace_until_block(&amp;<span class="k">mut</span> program).<span class="k">await</span> {
+            Traced::Done =&gt; {
+                engine.flush().<span class="k">await</span>;            <span class="c">// optimize + execute what's pending</span>
+                <span class="k">break</span>;
+            }
+            Traced::Blocked { host, key, waker } =&gt; {
+                engine.flush().<span class="k">await</span>;            <span class="c">// everything before the read must run first</span>
+                <span class="k">let</span> v = engine.read_fact(host, &amp;key).<span class="k">await</span>;   <span class="c">// one round trip</span>
+                engine.confirmed.insert((host, key), v.clone());
+                waker.resolve(v);                <span class="c">// program resumes on the next iteration</span>
+            }
+        }
+    }
+    engine.report()
+}
+
+<span class="k">impl</span> Engine {
+    <span class="k">async fn</span> flush(&amp;<span class="k">mut self</span>) {
+        <span class="c">// Non-mutating nodes (fact reads, secret, fetch, render) always run now.</span>
+        <span class="c">// Mutations are deferred until the trace ends or a read needs them;</span>
+        <span class="c">// see "Prepare phase" below.</span>
+        <span class="k">let</span> pending = <span class="k">self</span>.trace.drain_ready();
+        <span class="k">self</span>.prepare(&amp;pending).<span class="k">await</span>?;          <span class="c">// gate: any failure stops the run here</span>
+        <span class="k">let</span> graph   = optimize(pending);
+        <span class="k">self</span>.executor.run(graph).<span class="k">await</span>;         <span class="c">// per-host queues, cross-host parallel</span>
+        <span class="c">// Anything an executed op wrote is no longer confirmed.</span>
+        <span class="k">self</span>.confirmed.retain(|(h, k), _| !graph.wrote(*h, k));
+    }
+}</code></pre>
+<p>Guards are evaluated on the host: the template for a guarded op tests a shell variable its source op set, and emits a trailer with <code>skipped: true</code> if the test fails. The stream log sees every node either way, so a skipped restart shows up in the UI as skipped, with the reason, without the engine having made a round trip to decide it.</p>
+</section>
+
+<section class="prose" id="optimizer">
+<h2>The optimizer</h2>
+<p>Three passes over the pending trace, per host. The first version is deliberately conservative about reordering.</p>
+<pre><code><span class="k">fn</span> optimize(trace: Vec&lt;Node&gt;) -&gt; Graph {
+    <span class="k">let mut</span> g = Graph::from_trace(&amp;trace);
+
+    <span class="c">// 1. Edges. Trace order is kept within a host. An edge is recorded</span>
+    <span class="c">//    where effects overlap, because that is what merging must respect.</span>
+    <span class="k">for</span> (a, b) <span class="k">in</span> g.pairs_in_trace_order() {
+        <span class="k">if</span> a.host == b.host &amp;&amp; (a.writes ∩ b.reads ≠ ∅ || a.writes ∩ b.writes ≠ ∅
+                               || a.is_barrier() || b.is_barrier()) {
+            g.edge(a, b);
+        }
+    }
+
+    <span class="c">// 2. Merge. Same host, same mergeable kind, same guard, and nothing</span>
+    <span class="c">//    between the earliest and latest member conflicts with the members'</span>
+    <span class="c">//    effects. The merged node sits at the earliest member's position.</span>
+    <span class="k">for</span> group <span class="k">in</span> g.candidates(|n| n.kind.mergeable()) {
+        <span class="k">if</span> g.hoist_is_safe(&amp;group) { g.merge(group); }
+    }
+
+    <span class="c">// 3. Schedule. One queue per host in graph order; hosts run in parallel.</span>
+    g.schedule_per_host()
+}</code></pre>
+<p>Pass 2 is what turns five <code>pkg</code> calls across five roles into one <code>apt install</code>. The hoist check is the safety rule: pulling node-exporter's install forward past <code>file nginx.conf</code> is fine because the file op does not read or write any <code>pkg:</code> key. Pulling it past a <code>shell</code> that declares <code>writes: *</code> is not.</p>
+<p>Within-host parallelism (running two unrelated ops on the same host concurrently) is a later pass. It is only as safe as the declared effects are honest, so it should wait until there is a body of real roles to check against.</p>
+</section>
+
+<section class="prose" id="cost">
+<h2>What it costs</h2>
+<p>Counted from the model for the example above, on a warm run where nothing needs changing. An <em>exchange</em> is one serialized engine-to-host step: a fact read, or executing a window. Seconds depend on your hosts; the counts don't.</p>
+</section>
+
+<figure>
+<svg viewBox="0 0 880 230" role="img" aria-label="Two bar charts comparing Ansible and telepatch on the example playbook: exchanges per host (about 20 versus 2) and apt invocations per host (2 versus 1).">
+  <!-- panel 1 -->
+  <text x="20" y="22" class="d-label">exchanges per host</text>
+  <g>
+    <line x1="120" y1="40" x2="120" y2="130" class="d-axis"/>
+    <line x1="120" y1="130" x2="400" y2="130" class="d-axis"/>
+    <line x1="190" y1="40" x2="190" y2="130" class="d-grid"/><text x="190" y="146" text-anchor="middle" class="d-num">5</text>
+    <line x1="260" y1="40" x2="260" y2="130" class="d-grid"/><text x="260" y="146" text-anchor="middle" class="d-num">10</text>
+    <line x1="330" y1="40" x2="330" y2="130" class="d-grid"/><text x="330" y="146" text-anchor="middle" class="d-num">15</text>
+    <line x1="400" y1="40" x2="400" y2="130" class="d-grid"/><text x="400" y="146" text-anchor="middle" class="d-num">20</text>
+    <text x="110" y="66" text-anchor="end" class="d-text-sm">Ansible</text>
+    <rect x="120" y="54" width="280" height="16" class="d-bar"><title>Ansible: about 20 exchanges (2 per task, 10 tasks)</title></rect>
+    <text x="408" y="66" class="d-num">≈20</text>
+    <text x="110" y="106" text-anchor="end" class="d-text-sm">telepatch</text>
+    <rect x="120" y="94" width="28" height="16" class="d-bar"><title>telepatch: 2 exchanges (1 fact read at A, 1 batched window)</title></rect>
+    <text x="156" y="106" class="d-num">2</text>
+  </g>
+  <!-- panel 2 -->
+  <text x="500" y="22" class="d-label">apt invocations per host</text>
+  <g>
+    <line x1="600" y1="40" x2="600" y2="130" class="d-axis"/>
+    <line x1="600" y1="130" x2="860" y2="130" class="d-axis"/>
+    <line x1="730" y1="40" x2="730" y2="130" class="d-grid"/><text x="730" y="146" text-anchor="middle" class="d-num">1</text>
+    <line x1="860" y1="40" x2="860" y2="130" class="d-grid"/><text x="860" y="146" text-anchor="middle" class="d-num">2</text>
+    <text x="590" y="66" text-anchor="end" class="d-text-sm">Ansible</text>
+    <rect x="600" y="54" width="260" height="16" class="d-bar"><title>Ansible: 2 apt invocations, one per package task</title></rect>
+    <text x="868" y="66" class="d-num">2</text>
+    <text x="590" y="106" text-anchor="end" class="d-text-sm">telepatch</text>
+    <rect x="600" y="94" width="130" height="16" class="d-bar"><title>telepatch: 1, both package ops merged across roles</title></rect>
+    <text x="738" y="106" class="d-num">1</text>
+  </g>
+  <text x="20" y="192" class="d-muted">Exchanges cost round-trip latency (tens to hundreds of ms each with a persistent connection).</text>
+  <text x="20" y="212" class="d-muted">apt invocations cost seconds each (lock, metadata, resolution). The second chart is the one that moves wall-clock.</text>
+</svg>
+<figcaption class="caption">Ansible pays per task. Telepatch pays per sync plus one batched window, and the merge across roles halves the apt invocations. Without postconditions and guards, reads (B) and (C) would each have added a sync and split the package ops into separate windows.</figcaption>
+</figure>
+
+<section class="prose">
+<p>The rule of thumb: a run costs about <code>k + 1</code> windows per host, where <code>k</code> is the number of reads of pre-existing state that nothing in the playbook writes. Everything else the playbook asks is answered from the trace. For a typical playbook <code>k</code> is small, often one or zero, and the hosts run those windows in parallel.</p>
+</section>
+
+<section class="prose" id="survey">
+<h2>What the Ansible repo does</h2>
+<p>The existing <code>ansible/</code> repo is the corpus this has to replace: 35 roles, 11 playbooks, about 390 named tasks, targeting Ubuntu first with Debian, RedHat-family, Amazon Linux and Arch branches. Counting tasks by the module they call:</p>
+</section>
+
+<figure>
+<svg viewBox="0 0 880 330" role="img" aria-label="Horizontal bar chart of task counts by category in the Ansible repo: shell and command 73, control flow 67, package install 63, file content 63, user and keys 15, downloads 8, systemd 5, other 10.">
+  <text x="20" y="22" class="d-label">tasks by category · ansible repo</text>
+  <g>
+    <line x1="200" y1="40" x2="200" y2="290" class="d-axis"/>
+    <line x1="200" y1="290" x2="840" y2="290" class="d-axis"/>
+    <line x1="360" y1="40" x2="360" y2="290" class="d-grid"/><text x="360" y="306" text-anchor="middle" class="d-num">20</text>
+    <line x1="520" y1="40" x2="520" y2="290" class="d-grid"/><text x="520" y="306" text-anchor="middle" class="d-num">40</text>
+    <line x1="680" y1="40" x2="680" y2="290" class="d-grid"/><text x="680" y="306" text-anchor="middle" class="d-num">60</text>
+    <line x1="840" y1="40" x2="840" y2="290" class="d-grid"/><text x="840" y="306" text-anchor="middle" class="d-num">80</text>
+
+    <text x="190" y="62" text-anchor="end" class="d-text-sm">shell / command</text>
+    <rect x="200" y="50" width="584" height="16" class="d-bar"><title>shell 58 + command 15 = 73</title></rect>
+    <text x="792" y="62" class="d-num">73</text>
+
+    <text x="190" y="92" text-anchor="end" class="d-text-sm">control flow</text>
+    <rect x="200" y="80" width="536" height="16" class="d-bar"><title>include_tasks 53 + set_fact 14 = 67; these do no work on the host</title></rect>
+    <text x="744" y="92" class="d-num">67</text>
+
+    <text x="190" y="122" text-anchor="end" class="d-text-sm">package install</text>
+    <rect x="200" y="110" width="504" height="16" class="d-bar"><title>apt 37 + dnf 13 + yum 6 + pacman 3 + pip 4 = 63</title></rect>
+    <text x="712" y="122" class="d-num">63</text>
+
+    <text x="190" y="152" text-anchor="end" class="d-text-sm">file content</text>
+    <rect x="200" y="140" width="504" height="16" class="d-bar"><title>file 21 + template 15 + copy 13 + lineinfile 13 + replace 1 = 63</title></rect>
+    <text x="712" y="152" class="d-num">63</text>
+
+    <text x="190" y="182" text-anchor="end" class="d-text-sm">user / keys</text>
+    <rect x="200" y="170" width="120" height="16" class="d-bar"><title>user 13 + authorized_key 2 = 15</title></rect>
+    <text x="328" y="182" class="d-num">15</text>
+
+    <text x="190" y="212" text-anchor="end" class="d-text-sm">other</text>
+    <rect x="200" y="200" width="80" height="16" class="d-bar"><title>debug, fail, reboot, firewalld, stat, find, uri, unarchive</title></rect>
+    <text x="288" y="212" class="d-num">10</text>
+
+    <text x="190" y="242" text-anchor="end" class="d-text-sm">downloads</text>
+    <rect x="200" y="230" width="64" height="16" class="d-bar"><title>get_url 6 + uri 1 + unarchive 1 = 8</title></rect>
+    <text x="272" y="242" class="d-num">8</text>
+
+    <text x="190" y="272" text-anchor="end" class="d-text-sm">systemd</text>
+    <rect x="200" y="260" width="40" height="16" class="d-bar"><title>systemd module 5; another ~8 systemctl calls hide inside shell</title></rect>
+    <text x="248" y="272" class="d-num">5</text>
+  </g>
+</svg>
+<figcaption class="caption">Counted by module key across <code>roles/</code>, <code>playbooks/</code> and <code>tools/</code>. Four galaxy roles (docker, golang, nvm, firewall) do substantial work that is not counted here and will need telepatch equivalents.</figcaption>
+</section>
+
+<section class="prose">
+<p>The histogram undersells how repetitive the repo is. Reading the shell tasks and the control flow, eight patterns account for nearly everything:</p>
+</section>
+<div class="table-wrap">
+<table>
+  <thead><tr><th>Pattern</th><th>Count</th><th>Example</th><th>Becomes</th></tr></thead>
+  <tbody>
+    <tr><td>Distro dispatch</td><td>20 includes, 10 flag vars</td><td><code>include_tasks: debian.yml when: debian_based|bool</code>, with <code>debian_based</code> computed in <code>group_vars</code> from <code>ansible_distribution</code>, plus Pop!_OS and Rocky overrides</td><td>A typed <code>os</code> fact and a <code>match</code>, or a per-family table on <code>pkg</code></td></tr>
+    <tr><td>Per-user loops</td><td>12 includes</td><td><code>include_tasks: per_user.yml loop: admin_users</code>, then every task carries <code>become_user</code>, and <code>getent passwd</code> + <code>set_fact</code> to find the shell</td><td><code>for u in users { let s = h.as_user(u); … }</code>; the login shell is a fact of the user, not a task</td></tr>
+    <tr><td>Hand-rolled ensure</td><td>~25 shell pairs</td><td>"check if cargo-deb installed" (<code>register</code>, <code>changed_when: false</code>, <code>ignore_errors</code>) then "install cargo-deb" <code>when: rc != 0</code></td><td>One line: <code>sh!(..).unless("which cargo-deb")</code> or <code>.creates(path)</code></td></tr>
+    <tr><td>Version pinning</td><td>6 roles</td><td>rust_build, concourse, openbao, minio, cuda keyring: run <code>--version</code>, compare to a var, reinstall if different</td><td>A <code>bin_version</code> fact and the same ensure combinator</td></tr>
+    <tr><td>Repo setup</td><td>5 roles</td><td>curl key, gpg --dearmor, write sources.list.d entry, <code>apt update</code> if changed</td><td>A <code>repo</code> primitive; one <code>apt update</code> per window</td></tr>
+    <tr><td>Shell for a primitive</td><td>~12</td><td><code>shell: systemctl daemon-reload</code>, <code>mkdir -p</code>, <code>echo … &gt; file</code>, <code>sed -i</code> on sources.list</td><td><code>svc</code> and <code>file</code>; daemon-reload is implied when a unit file changes</td></tr>
+    <tr><td>Controller-side gather</td><td>~10</td><td><code>delegate_to: localhost</code> for <code>bao read</code>, <code>get_url</code>, <code>cat ~/.ssh/id_ed25519.pub</code>, <code>infocmp</code>; <code>vars_prompt</code> for passwords</td><td><code>secret</code>, <code>fetch</code>, <code>local</code>: all prepare-phase, all fail before apply</td></tr>
+    <tr><td>Handlers (Ansible's notify)</td><td>11 notifies</td><td>all of them systemd reload/restart, update-grub, udevadm, reboot</td><td>No handler concept. A guard on the restart op; identical guarded ops merge, so "run once" falls out of the optimizer</td></tr>
+  </tbody>
+</table>
+</div>
+<section class="prose">
+<p>Two things worth saying plainly. First, 17% of the repo is control flow that does nothing on a host: includes, flag variables, <code>set_fact</code> to parse stdout. In Rust that is a <code>match</code>, a <code>for</code> and a <code>.split(':')</code>. Second, most of the 73 shell tasks are not "things only shell can do." They are idempotency scaffolding Ansible forced because there is no module for <code>cargo install</code> or <code>rustup target add</code>. With a check combinator on the shell primitive they collapse to one line each, and <code>changed_when</code>, <code>failed_when</code> and <code>ignore_errors</code> (64 uses between them) mostly disappear because a check is a fact, not a task.</p>
+</section>
+
+<section class="prose" id="primitives">
+<h2>Initial primitives</h2>
+<p>Sized to the corpus. Tier one covers roughly four fifths of the tasks; tier two covers the rest; everything else is <code>sh</code> with declared effects.</p>
+</section>
+<div class="table-wrap">
+<table>
+  <thead><tr><th>Primitive</th><th>Replaces</th><th>Shape</th><th>Effects / notes</th></tr></thead>
+  <tbody>
+    <tr><td><code>pkg</code></td><td>apt, dnf, yum, pacman, build-dep, pip</td><td><code>h.pkg([..]).installed()</code> / <code>.absent()</code>; <code>pkg::pip</code>, <code>pkg::cargo(user)</code> as managers with the same shape</td><td>writes <code>pkg:*</code>; merges across roles; one cache update per window; postcondition <code>pkg:x → Installed</code></td></tr>
+    <tr><td><code>repo</code></td><td>apt_key, apt_repository, keyring + sources.list dance, yum .repo template</td><td><code>h.repo("hashicorp").key_url(..).line(..)</code></td><td>writes <code>repo:name</code>; forces a cache update before the next <code>pkg</code> in the window</td></tr>
+    <tr><td><code>file</code></td><td>file, template, copy, lineinfile, replace</td><td><code>h.file(p).content(..)</code> / <code>.from(fetched)</code> / <code>.dir()</code> / <code>.absent()</code> / <code>.line(..)</code> / <code>.line_re(re, line)</code> / <code>.mode(0o644).owner(u)</code> / <code>.only_if_absent()</code></td><td>writes <code>file:p</code>; output <code>changed</code>; captures previous content for rollback</td></tr>
+    <tr><td><code>sh</code></td><td>shell, command</td><td><code>sh!(h, "…{var}…")</code> with <code>.unless(check)</code> / <code>.creates(path)</code> / <code>.changed_if(re)</code> / <code>.writes([..])</code> / <code>.undo("…")</code></td><td>writes <code>*</code> unless narrowed; <code>{var}</code> is shell-quoted on interpolation; PTY by default</td></tr>
+    <tr><td><code>svc</code></td><td>systemd, the 8 shell systemctl calls, daemon-reload handlers</td><td><code>h.svc(n).enabled()</code> / <code>.started()</code> / <code>.restart()</code> / <code>.masked()</code></td><td>writes <code>svc:n</code>; daemon-reload implied when any <code>file:/etc/systemd/**</code> changed earlier in the window; guarded restarts of the same unit merge</td></tr>
+    <tr><td><code>user</code></td><td>user, authorized_key</td><td><code>h.user(n).present().groups_add([..]).shell(..).password_hash(..)</code>; <code>.authorized_key(k)</code></td><td>writes <code>user:n</code>; output <code>created</code> (the repo's "set default password only when new")</td></tr>
+    <tr><td><code>as_user</code></td><td>become_user + <code>getent passwd</code> + <code>$SHELL -lc</code></td><td><code>let s = h.as_user(u);</code> then any primitive on <code>s</code></td><td>ops go to a persistent login shell for <code>u</code>, opened once per host per run; the user's login shell and <code>~/.cargo/env</code> are in effect; the user needs no SSH access</td></tr>
+    <tr><td><code>secret</code></td><td>vars_prompt, <code>bao read</code> via delegate_to</td><td><code>let k = secret("infra/concourse_ci", "worker_key")</code></td><td>prepare phase; missing secret fails the run before apply; value never appears in the stream log</td></tr>
+    <tr><td><code>fetch</code></td><td>get_url, uri, local_action get_url, docker cp tricks</td><td><code>let f = h.fetch("https://…").sha256("…")</code> then <code>h.file(p).from(f)</code></td><td>prepare phase, on the host: downloads to a staging dir and verifies there; cached under <code>/var/cache/telepatch/</code> by checksum; <code>.via_controller()</code> for air-gapped hosts or controller-local sources</td></tr>
+    <tr><td><code>local</code></td><td>local_action shell, delegate_to localhost</td><td><code>let key = local("cat ~/.ssh/id_ed25519.pub")</code></td><td>prepare phase; a fact resolved on the controller</td></tr>
+  </tbody>
+</table>
+</div>
+<section class="prose">
+<p>Tier two, each used once or twice in the corpus: <code>git</code> (<code>h.git(url).depth(1).into(path)</code>, optionally <code>.rev(r)</code>; writes <code>file:path</code>; postcondition that the checkout exists; inverse removes it if this run created it, otherwise restores the previous rev), <code>mount</code> (fstab line plus <code>mount -a</code>), <code>group</code>, <code>unarchive</code>, <code>firewall</code>, <code>reboot</code>. Facts, as distinct from ops: <code>os</code> (family, distro, version), <code>user_info(u)</code> (home, shell, exists), <code>exists(p)</code>, <code>stat(p)</code>, <code>pkg_installed(n)</code>, <code>bin_version(cmd)</code>, and the general <code>check(cmd)</code> that returns rc and stdout.</p>
+<p>The four galaxy roles are the real porting cost. <code>geerlingguy.docker</code> is repo + pkg + svc + user groups, maybe 20 lines. <code>gantsign.golang</code> and <code>stephdewit.nvm</code> are fetch + unarchive + profile.d file. <code>geerlingguy.firewall</code> is a template and a service. None of them need anything outside tier one plus <code>unarchive</code>.</p>
+</section>
+
+<section class="prose" id="syntax">
+<h2>Reading like a script</h2>
+<p>The goal is that a role reads like the shell session an operator would type, not like a Rust program that happens to run shell. Here is the repo's <code>zsh</code> role, 50 lines of YAML across two files, as a baseline:</p>
+<pre><code>- name: Install Zsh
+  apt: { name: [zsh], state: present, update_cache: yes }
+- name: Add source /etc/profile to /etc/zsh/zprofile
+  lineinfile: { path: /etc/zsh/zprofile, line: "emulate sh -c 'source /etc/profile'" }
+- include_tasks: per_user.yml
+  loop: "{{ admin_users }}"
+<span class="c"># per_user.yml</span>
+- name: "Get current shell for user {{ item }}"
+  shell: "getent passwd {{ item }} | cut -d: -f7"
+  register: current_shell
+  changed_when: false
+- name: "Get home directory for user {{ item }}"
+  shell: "getent passwd {{ item }} | cut -d: -f6"
+  register: users_home_dir
+  changed_when: false
+- name: "Change default shell to Zsh for user {{ item }}"
+  user: { name: "{{ item }}", shell: /usr/bin/zsh }
+  when: current_shell.stdout != "/usr/bin/zsh"
+- name: "Download and install Oh My Zsh for user {{ item }}"
+  shell: |
+    curl -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh -o /tmp/ohmyzsh_install.sh;
+    chmod +x /tmp/ohmyzsh_install.sh; /tmp/ohmyzsh_install.sh --unattended
+  become: yes
+  become_user: "{{ item }}"
+  args: { creates: "{{ users_home_dir.stdout }}/.oh-my-zsh" }
+<span class="c"># … three more tasks</span></code></pre>
+
+<h3>Option A: builder calls, no macro</h3>
+<pre><code><span class="c">#[role]</span>
+<span class="k">async fn</span> zsh(h: &amp;Host) {
+    h.pkg([<span class="w">"zsh"</span>]).installed();
+    h.file(<span class="w">"/etc/zsh/zprofile"</span>).line(<span class="w">"emulate sh -c 'source /etc/profile'"</span>);
+    <span class="k">for</span> u <span class="k">in</span> &amp;h.vars.admin_users {
+        <span class="k">let</span> s = h.as_user(u);
+        s.user().shell(<span class="w">"/usr/bin/zsh"</span>);
+        s.sh(<span class="w">"curl -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh | sh -s -- --unattended"</span>)
+            .creates(<span class="w">"~/.oh-my-zsh"</span>);
+        s.git(<span class="w">"https://github.com/romkatv/powerlevel10k.git"</span>).depth(1).into(<span class="w">"~/.oh-my-zsh/custom/themes/powerlevel10k"</span>);
+        s.file(<span class="w">"~/.zshrc"</span>).line_re(<span class="w">r#"^ZSH_THEME=".*""#</span>, <span class="w">r#"ZSH_THEME="powerlevel10k/powerlevel10k""#</span>).create();
+        s.file(<span class="w">"~/.zshrc"</span>).line_re(<span class="w">r#"^export POWERLEVEL9K_DISABLE_CONFIGURATION_WIZARD="#</span>, <span class="w">"export POWERLEVEL9K_DISABLE_CONFIGURATION_WIZARD=true"</span>);
+    }
+}</code></pre>
+<p>Eleven lines. Everything is a plain method call, so rust-analyzer completes it, errors point at the right line, and a role can call any crate. The cost is the <code>h.</code> and <code>s.</code> prefixes and the quoting, which is Rust's, not shell's. <code>~</code> expands on the host because the command runs in the user's login shell.</p>
+
+<h3>Option B: <code>sh!</code> with interpolation and effects</h3>
+<p>Same as A, but shell lines go through a macro that interpolates Rust values with shell quoting and lets effects and checks ride as named arguments:</p>
+<pre><code><span class="k">let</span> theme = <span class="w">"powerlevel10k"</span>;
+sh!(s, <span class="w">"git clone --depth=1 https://github.com/romkatv/{theme}.git ~/.oh-my-zsh/custom/themes/{theme}"</span>,
+    creates = <span class="w">"~/.oh-my-zsh/custom/themes/{theme}"</span>);
+sh!(h, <span class="w">"rustup target add {target}"</span>, unless = <span class="w">"rustup target list --installed | grep -qx {target}"</span>);</code></pre>
+<p><code>{target}</code> becomes <code>'x86_64-unknown-linux-musl'</code> on the wire, so a value with a space or a quote cannot break the command. This is a small <code>macro_rules!</code> plus a quoting function, not a parser. It removes the one thing that makes A feel like Rust-wrapping-shell, which is building command strings by hand.</p>
+
+<h3>Option C: a line-oriented DSL in a proc macro</h3>
+<pre><code>tp! { h,
+    pkg zsh
+    line /etc/zsh/zprofile "emulate sh -c 'source /etc/profile'"
+    for u in admin_users {
+        user shell=/usr/bin/zsh
+        sh "curl -fsSL …/install.sh | sh -s -- --unattended"   creates ~/.oh-my-zsh
+        sh "git clone --depth=1 …/powerlevel10k.git ~/.oh-my-zsh/custom/themes/powerlevel10k"
+                                                               creates ~/.oh-my-zsh/custom/themes/powerlevel10k
+        line ~/.zshrc  ^ZSH_THEME=  'ZSH_THEME="powerlevel10k/powerlevel10k"'
+    }
+}</code></pre>
+<p>This is the closest to a script, and it is a second language. The proc macro parses token trees, so paths and flags mostly work unquoted, but anything with shell metacharacters needs quoting anyway, loops and conditionals have to be re-invented inside the macro, errors come out as "unexpected token" at the macro boundary, and rust-analyzer sees an opaque block. It compiles down to A, so it can be added later without changing anything underneath.</p>
+
+<h3>Option D: real script files</h3>
+<p><code>include_tp!("zsh.tp")</code> with the same grammar as C in its own file. Gains shell-style syntax highlighting; otherwise identical cost to C. Mentioned for completeness.</p>
+
+<div class="callout">
+<p><strong>Decision: A and B, each where it fits.</strong> Ops with structure (<code>pkg</code>, <code>file</code>, <code>git</code>, <code>fetch</code>, <code>svc</code>, <code>user</code>) are builders, because their options are typed and their inverses are known. Anything that is really a shell line is <code>sh!</code>, because the command <em>is</em> the content and a builder would only get in the way. The conventions that make A read well: One op per line, no trailing <code>.await</code> on ops (they return handles, not futures). Builder defaults such that the common case takes no options: <code>pkg([..])</code> alone means installed, <code>file(p).content(c)</code> alone means mode 0644 root. <code>as_user</code> as a scope so <code>become_user</code> is written once per block, not per task. The <code>os</code> fact as an enum so distro dispatch is a <code>match</code> in the role, not seven include files. Reconsider C once there are twenty roles written in A and the <code>h.</code> noise is measurable rather than imagined.</p>
+</div>
+
+<p>For scale, the repo's <code>rust_build</code> role is 183 lines of YAML across five files. In A plus <code>sh!</code>:</p>
+<pre><code><span class="c">#[role]</span>
+<span class="k">async fn</span> rust_build(h: &amp;Host) {
+    <span class="k">match</span> h.os.family {
+        Debian =&gt; h.pkg([<span class="w">"build-essential"</span>, <span class="w">"libclang-dev"</span>]),
+        RedHat =&gt; h.pkg([<span class="w">"gcc"</span>, <span class="w">"clang-devel"</span>]),
+        Arch   =&gt; h.pkg([<span class="w">"base-devel"</span>, <span class="w">"clang"</span>]),
+    }.installed();
+    <span class="k">for</span> u <span class="k">in</span> h.vars.admin_users.iter().chain([<span class="w">"root"</span>]) {
+        <span class="k">let</span> s = h.as_user(u);
+        <span class="k">let</span> want = &amp;h.vars.rust_version;
+        sh!(s, <span class="w">"curl -sSf https://sh.rustup.rs | sh -s -- -y"</span>, unless = <span class="w">"which cargo"</span>);
+        sh!(s, <span class="w">"rustup update"</span>, unless = <span class="w">"rustc --version | grep -q {want}"</span>);
+        <span class="k">for</span> tool <span class="k">in</span> [<span class="w">"cargo-deb"</span>, <span class="w">"cargo-generate-rpm"</span>] {
+            sh!(s, <span class="w">"cargo install --locked {tool}"</span>, creates = <span class="w">"~/.cargo/bin/{tool}"</span>);
+        }
+        sh!(s, <span class="w">"rustup target add x86_64-unknown-linux-musl"</span>,
+            unless = <span class="w">"rustup target list --installed | grep -qx x86_64-unknown-linux-musl"</span>);
+    }
+}</code></pre>
+<p>Sixteen lines, and the "repair a broken install" block the YAML needed is a <code>bin_version</code> fact returning <code>None</code> and the same <code>unless</code>.</p>
+</section>
+
+<section class="prose" id="prepare">
+<h2>Prepare phase: fail early</h2>
+<p>The repo fetches binaries, reads OpenBao secrets and prompts for passwords in the middle of plays, with <code>delegate_to: localhost</code>. A missing secret in the concourse role fails after the packages are installed and the user is created. That is the late failure this phase exists to remove.</p>
+<p>The rule: <strong>anything that can fail without touching a host runs before anything that touches a host, and a failure there ends the run with nothing changed.</strong> Concretely the prepare phase does, for every host in parallel:</p>
+<ul>
+  <li><strong>Secrets.</strong> Every <code>secret(..)</code> the trace declared is resolved from its backend (OpenBao, env, prompt). Any miss fails the run and names the role that needed it.</li>
+  <li><strong>Downloads.</strong> Every <code>fetch(..)</code> runs on its host: download to <code>/var/tmp/telepatch/&lt;run&gt;/</code>, verify the checksum there, reuse the on-host cache when the checksum matches. Network and checksum failures happen here, per host, before anything moves into place. The controller only downloads when a fetch says <code>.via_controller()</code>.</li>
+  <li><strong>Templates.</strong> Every <code>file(..).content(tpl!(..))</code> is rendered. Missing variables fail here, not on host forty.</li>
+  <li><strong>Facts.</strong> The bulk fact commands run once per host: <code>os</code>, package state, the <code>getent</code> lines, every <code>exists</code> and <code>stat</code> the trace asked for.</li>
+  <li><strong>Permissions.</strong> Did <code>sudo -n bash</code> succeed at shell open? Does <code>sudo -iu u true</code> work for every user the roles address? Is <code>curl</code> or <code>wget</code> present on hosts that fetch? These are facts with an assertion attached.</li>
+</ul>
+<p>Then a gate: if every host passed, apply; if any host failed, report and stop, unless the run was started with a per-host policy that lets the healthy hosts proceed.</p>
+</section>
+
+<figure>
+<svg viewBox="0 0 880 230" role="img" aria-label="Run timeline: trace, then a prepare phase that resolves secrets, downloads, templates, facts and permissions, then a gate, then apply windows per host in parallel, with rollback on failure.">
+  <text x="20" y="22" class="d-label">one run · time runs left to right</text>
+  <!-- trace -->
+  <rect x="20" y="40" width="90" height="44" rx="5" class="d-box"/>
+  <text x="65" y="59" text-anchor="middle" class="d-mono">trace</text>
+  <text x="65" y="74" text-anchor="middle" class="d-mono-sm">controller only</text>
+  <!-- prepare -->
+  <rect x="124" y="40" width="300" height="44" rx="5" class="d-box-accent"/>
+  <text x="274" y="59" text-anchor="middle" class="d-mono">prepare</text>
+  <text x="274" y="74" text-anchor="middle" class="d-mono-sm">secrets · fetch · render · facts · permissions</text>
+  <!-- gate -->
+  <polygon points="470,40 500,62 470,84 440,62" class="d-box-warn"/>
+  <text x="470" y="66" text-anchor="middle" class="d-mono-sm">gate</text>
+  <!-- apply -->
+  <rect x="514" y="40" width="346" height="44" rx="5" class="d-box-accent"/>
+  <text x="687" y="59" text-anchor="middle" class="d-mono">apply</text>
+  <text x="687" y="74" text-anchor="middle" class="d-mono-sm">batched windows · hosts in parallel · mutations only here</text>
+  <!-- arrows -->
+  <line x1="110" y1="62" x2="124" y2="62" class="d-line"/>
+  <line x1="424" y1="62" x2="440" y2="62" class="d-line"/>
+  <line x1="500" y1="62" x2="514" y2="62" class="d-line"/>
+  <!-- fail branch -->
+  <line x1="470" y1="84" x2="470" y2="120" class="d-line-muted"/>
+  <rect x="380" y="120" width="180" height="36" rx="5" class="d-box"/>
+  <text x="470" y="136" text-anchor="middle" class="d-mono-sm">any host failed → stop</text>
+  <text x="470" y="150" text-anchor="middle" class="d-mono-sm">nothing on any host has changed</text>
+  <!-- rollback branch -->
+  <line x1="687" y1="84" x2="687" y2="120" class="d-line-muted"/>
+  <rect x="590" y="120" width="194" height="36" rx="5" class="d-box"/>
+  <text x="687" y="136" text-anchor="middle" class="d-mono-sm">op failed → roll back that role</text>
+  <text x="687" y="150" text-anchor="middle" class="d-mono-sm">on that host, undo log in reverse</text>
+  <!-- note -->
+  <text x="20" y="196" class="d-muted">Prepare work runs on the hosts (fetch, facts, permission checks) but touches nothing a role declares, so it runs everywhere at once and retries freely.</text>
+  <text x="20" y="214" class="d-muted">A fact read that needs the result of a mutation is an implicit barrier: prepare runs for everything before it, then apply, then prepare resumes.</text>
+</svg>
+<figcaption class="caption">The gate is the point of the design. Everything left of it is reversible by definition because nothing happened; everything right of it is covered by the undo log.</figcaption>
+</figure>
+
+<section class="prose">
+<h3>How this fits the trace</h3>
+<p>Nothing in the tracing model changes; the executor's flush gets a rule. When the program blocks on a fact read, the flush used to execute everything pending. Now it executes only <em>non-mutating</em> nodes, which are fact reads and prepare ops (<code>secret</code>, <code>fetch</code>, <code>local</code>, template rendering), and leaves mutations in the pending list. Mutations run only when:</p>
+<ol>
+  <li>the trace ends, so the whole playbook's mutations are known and the prepare phase has covered all of them; or</li>
+  <li>a fact read needs the effect of a pending mutation and no postcondition answers it. That is an implicit barrier: prepare runs for everything before it, apply runs up to it, the fact is read, and tracing resumes.</li>
+</ol>
+<p>In the corpus, case 2 is rare. The <code>minio_client</code> role does it (download, then ask the installed binary its hash) and <code>mount_btrfs</code> does it (<code>mkfs</code>, then <code>lsblk</code>). Everything else is case 1, which means for most playbooks the apply phase sees every op on every host before the first one runs. That is also the best possible input to the optimizer: the apt merge now spans the whole playbook, not just the first window.</p>
+<p>Secrets never enter the trace as values. A <code>secret(..)</code> returns a handle; the template that uses it is rendered in prepare with the real value; the rendered bytes go to the host; the stream log records the op as <code>file /opt/concourse/keys/worker_key (secret)</code> and redacts the content.</p>
+</section>
+
+<section class="prose" id="transactions">
+<h2>Roles as transactions</h2>
+<p>A role on a host either completes or leaves the host as it found it, to the extent the ops in it allow. That extent is the honest part and it is reported up front.</p>
+<h3>Mechanism: an undo log</h3>
+<p>Every tier-one primitive's template captures the state it is about to change and returns it in the trailer. The engine appends an inverse op to a per-role, per-host undo log as each op completes. On failure the log runs in reverse, through the same shell, with the same stream log.</p>
+</section>
+<div class="table-wrap">
+<table>
+  <thead><tr><th>Primitive</th><th>Captured before</th><th>Inverse</th></tr></thead>
+  <tbody>
+    <tr><td><code>file</code></td><td>previous content, mode, owner, or "did not exist", saved under <code>/var/tmp/telepatch/&lt;run&gt;/</code> on the host</td><td>restore or delete</td></tr>
+    <tr><td><code>pkg</code></td><td>which of the requested packages were already installed (from the prepare-phase fact)</td><td><code>apt-get remove</code> the ones this run added; never the ones that were there</td></tr>
+    <tr><td><code>repo</code></td><td>whether the repo file and key existed</td><td>remove them and refresh the cache</td></tr>
+    <tr><td><code>svc</code></td><td><code>is-enabled</code>, <code>is-active</code>, masked</td><td>restore all three</td></tr>
+    <tr><td><code>user</code></td><td>whether the user existed; previous shell, groups, hash</td><td><code>userdel</code> if created, else restore fields</td></tr>
+    <tr><td><code>sh</code></td><td>nothing, unless <code>.undo("…")</code> is given</td><td>the supplied command, or none</td></tr>
+    <tr><td><code>mount</code>, <code>reboot</code>, <code>mkfs</code>-class ops</td><td>irreversible by nature</td><td>none; declared <code>irreversible</code></td></tr>
+  </tbody>
+</table>
+</div>
+<section class="prose">
+<h3>Coverage is a planning output</h3>
+<p>Because the trace is complete before apply, the engine knows which ops in a role have inverses. The dry run prints it per role: <code>rust_build: 14 ops, 12 reversible, 2 sh without undo</code>. A role is a transaction when every op in it is reversible. A role with irreversible ops still runs, still rolls back the ops it can, and says so; a playbook can be run with <code>--require-transactional</code> to refuse roles that are not.</p>
+<h3>Scope</h3>
+<p>Per role, per host. A failure on host X rolls back that role on host X and reports it; other hosts continue, unless the run was started all-or-nothing, in which case every host rolls back that role and the run stops. Roles already completed on X stay; the undo log for a completed role is discarded at commit. Cross-role rollback is not offered: by the time role three fails, roles one and two have been committed on purpose.</p>
+<h3>The snapshot option</h3>
+<p>Where the root filesystem is btrfs, zfs or on LVM, a snapshot before a role and a restore on failure is cheaper to implement and more complete than any undo log: it reverts every file, including the ones <code>sh</code> touched without declaring them. It does not revert a running service's state or anything outside the filesystem. It is worth having as an opt-in op, <code>h.snapshot()</code>, that makes the role transactional regardless of its contents on hosts that support it. The repo's own <code>mount_btrfs</code> role suggests the fleet is already partly there.</p>
+<h3>What this does not promise</h3>
+<ul>
+  <li>Anything an installer did on the network (registered a key with a service, posted telemetry) stays done.</li>
+  <li>A <code>sh</code> op without <code>.undo</code> is a hole, and the plan says where the holes are. The alternative, refusing to run roles with holes, is available as a flag and is not the default.</li>
+  <li>Rollback itself can fail. When it does, the host is reported as <code>inconsistent</code> with the exact op that failed, and the undo log is kept on the host for a human.</li>
+</ul>
+</section>
+
+<section class="prose" id="errors">
+<h2>Error handling</h2>
+<p>An op returns a handle, not a result, so a role cannot <code>?</code> on a host failure at the line that caused it. That constraint is useful: it forces every kind of failure to have a named owner, and the owner is decided by <em>when</em> the failure can happen.</p>
+</section>
+<div class="table-wrap">
+<table>
+  <thead><tr><th>When</th><th>What can fail</th><th>Who handles it</th><th>Default outcome</th></tr></thead>
+  <tbody>
+    <tr><td>Trace</td><td>missing variable, bad template argument, unparseable path, <code>local(..)</code> failed</td><td>the role body, with <code>?</code>; <code>#[role]</code> returns <code>Result&lt;(), TraceError&gt;</code></td><td>the run fails before prepare. It is a playbook bug, not a host condition.</td></tr>
+    <tr><td>Prepare</td><td>secret missing, fetch or checksum failed, <code>sudo -n</code> refused, <code>sudo -iu u</code> refused, template won't render for this host, a fact assertion failed</td><td>the engine; the role never sees it</td><td>host marked <code>blocked(reason)</code>, nothing changed. Any blocked host stops the run; a flag lets healthy hosts proceed.</td></tr>
+    <tr><td>Apply</td><td>trailer <code>rc != 0</code>, timeout, typed result failed to parse</td><td>the engine, unless the op opted out</td><td>role fails on that host; undo log runs in reverse; host marked <code>failed(role, op)</code> with the op's last 40 stream lines; later roles on that host are skipped; other hosts continue.</td></tr>
+    <tr><td>Rollback</td><td>an inverse op fails</td><td>the engine</td><td>host marked <code>inconsistent(role, op)</code>; undo log left on the host; nothing further on that host.</td></tr>
+    <tr><td>Connection loss</td><td>shell gone, in-flight op unknown</td><td>the engine</td><td>reconnect; the run directory on the host holds a per-op completion marker written before each trailer, so the engine learns what finished; then roll back the role from the on-host undo log. Resume is a later feature.</td></tr>
+  </tbody>
+</table>
+</div>
+<section class="prose">
+<p>The default for apply is deliberately that the role body never sees a host failure. The corpus has 64 uses of <code>ignore_errors</code>, <code>changed_when</code> and <code>failed_when</code> between them and almost all are on check commands, which are facts here. Genuine "react to a failed mutation" logic is rare, and when it exists it should cost something visible. What the author gets:</p>
+<pre><code>sh!(s, <span class="w">"cargo install --locked {tool}"</span>);                 <span class="c">// failure fails the role: the default</span>
+sh!(s, <span class="w">"…"</span>).allow_fail();                                <span class="c">// failure recorded, role continues</span>
+<span class="k">let</span> r = sh!(h, <span class="w">"some-installer"</span>).allow_fail();
+h.svc(<span class="w">"x"</span>).restart().when(r.ok());                       <span class="c">// outcome as a guard; no sync</span>
+sh!(h, <span class="w">"diff a b"</span>).ok_if(|rc| rc &lt;= 1);                  <span class="c">// failed_when, typed</span>
+sh!(h, <span class="w">"apt-get update"</span>).retry(3).timeout(5 * MIN);      <span class="c">// in-template loop; timeout kills from the spare shell</span>
+<span class="k">let</span> out = sh!(h, <span class="w">"…"</span>).allow_fail().<span class="k">await</span>?;               <span class="c">// explicit: Rust sees the result; implicit barrier; shown in the plan</span>
+h.assert(s.bin_exists(<span class="w">"cargo"</span>), <span class="w">"cargo missing for {u}"</span>); <span class="c">// the repo's `fail:` task, moved to prepare</span></code></pre>
+<p>The last two are the escape hatches. Awaiting an op's result blocks tracing the way a fact read does, so it is allowed, costs a window, and the dry run shows where. An assertion that depends only on facts runs in prepare and blocks the host before apply, which is where the repo's <code>fail:</code> wanted to be all along.</p>
+<p>Three defaults set here rather than left to each author: every op kind has a timeout (<code>pkg</code> long, <code>sh</code> medium, <code>svc</code> short), overridable per op; a guarded op whose source failed is skipped, not failed, because the role has already failed by then; and the run's exit status is non-zero if any host is not <code>ok</code> or <code>changed</code>, with the per-host status table printed first.</p>
+</section>
+
+<section class="prose" id="semantics">
+<h2>Semantics to pin down</h2>
+<div class="cols">
+  <div><h4>Effects are the contract</h4><p>Every op declares <code>reads</code> and <code>writes</code>. Ordering and merge safety are derived from them. <code>shell</code> defaults to <code>writes: *</code>; the user can narrow it with <code>.writes([..])</code>. Lying about effects is the user's problem, the same way <code>changed_when</code> is in Ansible.</p></div>
+  <div><h4>Facts vs outputs</h4><p>A fact is a question about the host (<code>pkg_installed</code>, <code>exists</code>, <code>stat</code>). An output is a result of an op (<code>changed</code>, <code>exit</code>, <code>stdout</code>). Facts are awaited and may block. Outputs are never awaited; they drive guards.</p></div>
+  <div><h4>Postconditions are narrow</h4><p>An op's <code>post</code> answers only keys it fully determines. <code>pkg(x).installed()</code> determines <code>pkg:x</code>. It says nothing about <code>file:/etc/x/x.conf</code>, even though apt probably wrote it. When in doubt, return <code>None</code> and let the read block.</p></div>
+  <div><h4>Controller-side I/O is an op</h4><p>Reading a local template or an inventory file inside a role goes through <code>local_read</code>, a fact the engine resolves without a round trip. Not required today, but it keeps roles replayable, which the dry-run view wants and speculation would need.</p></div>
+  <div><h4>Explicit barriers stay</h4><p><code>barrier()</code> is an edge from everything before to everything after on that host. It is the escape hatch when effects are too coarse to express an ordering, and it is also what "don't merge these two apt calls" looks like.</p></div>
+  <div><h4>Within-host order is trace order</h4><p>Version one reorders nothing on a host except merge-hoisting. Hosts run fully in parallel. Reordering unrelated ops on one host comes later, once declared effects have earned trust.</p></div>
+</div>
+</section>
+
+<section class="prose" id="later">
+<h2>Later: speculation</h2>
+<p>If measured playbooks turn out to sync more than expected, the remaining reads of pre-existing state can be answered from the previous run and verified before anything depends on them. That adds three things and changes nothing else:</p>
+<ol>
+  <li><strong>Journal.</strong> Persist <code>(host, key) → value</code> from each run. The resolver gains a third source, <code>Journaled</code>, consulted after postconditions and before blocking.</li>
+  <li><strong>Verify.</strong> Before executing a window, gather every <code>Journaled</code> read whose key no pending op writes, one batched round trip per host. If a value differs, replace it with the real one and re-trace.</li>
+  <li><strong>Re-trace.</strong> The program becomes something you run from the top again instead of a suspended future, and the prefix that has already executed must come out identical. That is where the determinism rule and <code>local_read</code> become mandatory.</li>
+</ol>
+<p>The op model, the optimizer, the executor, the agent protocol and the UI are untouched. The <code>Source</code> enum and the loop grow; nothing else does.</p>
+</section>
+
+<section class="prose" id="prototype">
+<h2>What to prototype first</h2>
+<p>The part that could turn out to be wrong is small and needs no SSH:</p>
+<ul>
+  <li>A toy op set: <code>pkg</code>, <code>file</code>, <code>svc</code>, <code>sh</code>, with effects, postconditions and inverses.</li>
+  <li>The trace recorder and the resolver, with a fake executor that just records what it would have run, including the deferred-mutation rule.</li>
+  <li>The three optimizer passes, especially <code>hoist_is_safe</code>.</li>
+  <li>A dozen adversarial playbooks: merges that must happen, merges that must not, guards on guards, a <code>sh</code> in the middle of a package run, the same fact read from two roles, a read that forces an implicit barrier.</li>
+  <li>Port <code>zsh</code>, <code>rust_build</code> and <code>concourse_ci_worker</code> from the Ansible repo on top of it. The first two exercise per-user and ensure; the third exercises secrets, fetch and rollback coverage reporting.</li>
+</ul>
+<p>Instrument the count of blocking reads per playbook. That number decides whether speculation is ever worth building. The SSH layer, the trailer parser, and the terminal UI are large but they are well-trodden; they are not the part of this design that could be mistaken.</p>
+</section>
+</div>
