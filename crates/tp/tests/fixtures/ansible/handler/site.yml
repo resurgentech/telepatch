@@ -1,0 +1,5 @@
+---
+- name: Service
+  hosts: all
+  roles:
+    - svcs

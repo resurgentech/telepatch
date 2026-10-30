@@ -1,0 +1,8 @@
+---
+- name: Install zsh
+  apt:
+    name: zsh
+    state: present
+
+- include_tasks: per_user.yml
+  loop: "{{ admin_users }}"

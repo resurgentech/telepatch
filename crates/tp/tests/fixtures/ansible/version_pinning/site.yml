@@ -1,0 +1,5 @@
+---
+- name: Toolchain
+  hosts: all
+  roles:
+    - rustup

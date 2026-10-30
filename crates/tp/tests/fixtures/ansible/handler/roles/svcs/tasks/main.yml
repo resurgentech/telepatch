@@ -1,0 +1,6 @@
+---
+- name: Write config
+  copy:
+    src: app.conf
+    dest: /etc/app.conf
+  notify: restart app

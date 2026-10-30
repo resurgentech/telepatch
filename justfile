@@ -6,6 +6,12 @@ lint:
     cargo clippy --workspace --all-targets -- -D warnings
     cargo fmt --all --check
 
+# Classify the container playbooks in ../ansible (prints; not a gate).
+classify-corpus:
+    for p in dev_base kernel_build rust latest_kernel_build; do \
+        cargo run -q -p tp -- classify ../ansible/playbooks/container/$p.yml; echo; \
+    done
+
 # Regenerate crates/telepatch/tests/fixtures/os-release/<distro> from the
 # upstream images named in ../docker_images/docker-bake.hcl (needs docker and
 # network; not part of the gate). omarchy's base image is stock Arch plus a

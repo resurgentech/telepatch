@@ -1,0 +1,10 @@
+---
+- name: Call a module telepatch has no mapping for
+  community.general.ufw:
+    rule: allow
+    port: "22"
+
+- name: Install git
+  apt:
+    name: git
+    state: present

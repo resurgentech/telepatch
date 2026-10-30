@@ -1,0 +1,9 @@
+---
+- name: Reload systemd
+  shell: systemctl daemon-reload
+
+- name: Make dir
+  command: mkdir -p /opt/app
+
+- name: Build something custom
+  shell: make -C /opt/src && make install

@@ -1,0 +1,11 @@
+---
+- name: Local tool
+  apt:
+    name: git
+    state: present
+
+- name: Run on another host
+  shell: uptime
+  delegate_to: "{{ groups['build'][0] }}"
+
+- include_tasks: "{{ ansible_distribution }}.yml"

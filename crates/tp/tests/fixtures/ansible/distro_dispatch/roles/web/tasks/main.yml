@@ -1,0 +1,13 @@
+---
+- name: web_debian
+  include_tasks: debian.yml
+  when: debian_based|bool
+
+- name: web_redhat
+  include_tasks: redhat.yml
+  when: ansible_os_family == "RedHat"
+
+- name: Install nginx anywhere
+  apt:
+    name: nginx
+    state: present

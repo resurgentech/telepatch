@@ -1,0 +1,5 @@
+---
+- name: Systemd
+  hosts: all
+  roles:
+    - sysd

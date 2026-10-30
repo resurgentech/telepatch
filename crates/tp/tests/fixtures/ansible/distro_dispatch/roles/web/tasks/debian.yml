@@ -1,0 +1,5 @@
+---
+- name: Debian packages
+  apt:
+    name: [nginx, curl]
+    state: present

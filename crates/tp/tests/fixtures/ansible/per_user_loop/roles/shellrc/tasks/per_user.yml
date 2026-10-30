@@ -1,0 +1,12 @@
+---
+- name: "Set shell for {{ item }}"
+  user:
+    name: "{{ item }}"
+    shell: /usr/bin/zsh
+
+- name: "Drop zshrc for {{ item }}"
+  copy:
+    src: zshrc
+    dest: "/home/{{ item }}/.zshrc"
+  become: yes
+  become_user: "{{ item }}"

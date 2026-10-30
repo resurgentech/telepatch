@@ -1,0 +1,19 @@
+---
+- name: Add apt key
+  apt_key:
+    url: https://apt.releases.hashicorp.com/gpg
+    state: present
+
+- name: Add apt repository
+  apt_repository:
+    repo: "deb https://apt.releases.hashicorp.com {{ ansible_distribution_release }} main"
+    state: present
+
+- name: Refresh cache
+  apt:
+    update_cache: yes
+
+- name: Install terraform
+  apt:
+    name: terraform
+    state: present

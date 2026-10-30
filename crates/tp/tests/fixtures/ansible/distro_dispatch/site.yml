@@ -1,0 +1,5 @@
+---
+- name: Web server
+  hosts: all
+  roles:
+    - web

@@ -1,0 +1,147 @@
+use std::path::PathBuf;
+
+use assert_cmd::Command;
+use tp::classify::{Options, Report, classify_playbook};
+
+fn fixture(name: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/ansible")
+        .join(name)
+}
+
+fn run(name: &str) -> Report {
+    classify_playbook(&Options {
+        playbook: fixture(name).join("site.yml"),
+        roles_path: None,
+        base: None,
+    })
+    .unwrap()
+}
+
+fn count(report: &Report, pattern: &str) -> usize {
+    report
+        .patterns
+        .iter()
+        .find(|p| p.id == pattern)
+        .unwrap_or_else(|| panic!("no pattern {pattern}"))
+        .count
+}
+
+macro_rules! snapshot_fixture {
+    ($test:ident, $dir:literal) => {
+        #[test]
+        fn $test() {
+            insta::assert_snapshot!(run($dir).to_markdown());
+        }
+    };
+}
+
+snapshot_fixture!(snap_distro_dispatch, "distro_dispatch");
+snapshot_fixture!(snap_per_user_loop, "per_user_loop");
+snapshot_fixture!(snap_hand_rolled_ensure, "hand_rolled_ensure");
+snapshot_fixture!(snap_version_pinning, "version_pinning");
+snapshot_fixture!(snap_repo_setup, "repo_setup");
+snapshot_fixture!(snap_shell_for_primitive, "shell_for_primitive");
+snapshot_fixture!(snap_controller_side, "controller_side");
+snapshot_fixture!(snap_handler, "handler");
+snapshot_fixture!(snap_out_of_scope, "out_of_scope");
+snapshot_fixture!(snap_unclassified, "unclassified");
+
+#[test]
+fn each_fixture_hits_its_pattern() {
+    for (dir, pattern, n) in [
+        ("distro_dispatch", "distro_dispatch", 2),
+        ("per_user_loop", "per_user_loop", 3),
+        ("hand_rolled_ensure", "hand_rolled_ensure", 2),
+        ("version_pinning", "version_pinning", 2),
+        ("repo_setup", "repo_setup", 3),
+        ("shell_for_primitive", "shell_for_primitive", 2),
+        ("controller_side", "controller_side", 2),
+        ("handler", "handler", 2),
+    ] {
+        assert_eq!(count(&run(dir), pattern), n, "{dir}");
+    }
+}
+
+#[test]
+fn unclassified_is_listed_not_dropped() {
+    let r = run("unclassified");
+    assert_eq!(r.unclassified.len(), 1);
+    assert_eq!(r.unclassified[0].module, "community.general.ufw");
+    assert_eq!(r.unclassified[0].line, 2);
+}
+
+#[test]
+fn out_of_scope_is_skipped_not_misclassified() {
+    let r = run("out_of_scope");
+    let kinds: Vec<&str> = r.skipped.iter().map(|s| s.kind.as_str()).collect();
+    for k in [
+        "delegate_to",
+        "vars_prompt",
+        "galaxy_role",
+        "unresolved_include",
+    ] {
+        assert!(kinds.contains(&k), "missing {k} in {kinds:?}");
+    }
+    // The galaxy-named role and the role absent from the roles path are both skipped.
+    assert_eq!(kinds.iter().filter(|k| **k == "galaxy_role").count(), 2);
+    // The delegated task appears in no pattern, category or unclassified list.
+    assert!(r.unclassified.is_empty());
+    assert!(
+        r.patterns
+            .iter()
+            .all(|p| p.tasks.iter().all(|t| t.module != "shell"))
+    );
+    assert_eq!(
+        r.total_tasks,
+        r.categories.iter().map(|c| c.count).sum::<usize>() + r.unclassified.len()
+    );
+}
+
+#[test]
+fn tasks_keep_file_and_line() {
+    let r = run("hand_rolled_ensure");
+    let p = r
+        .patterns
+        .iter()
+        .find(|p| p.id == "hand_rolled_ensure")
+        .unwrap();
+    assert_eq!(p.tasks[0].file, "roles/tools/tasks/main.yml");
+    assert_eq!(p.tasks[0].line, 2);
+    assert_eq!(p.tasks[1].line, 8);
+}
+
+#[test]
+fn json_flag_matches_report() {
+    let dir = fixture("distro_dispatch");
+    let out = Command::cargo_bin("tp")
+        .unwrap()
+        .current_dir(&dir)
+        .args(["classify", "site.yml", "--json"])
+        .assert()
+        .success();
+    let v: serde_json::Value = serde_json::from_slice(&out.get_output().stdout).unwrap();
+    let report = run("distro_dispatch");
+    assert_eq!(
+        v["total_tasks"].as_u64().unwrap() as usize,
+        report.total_tasks
+    );
+    for p in v["patterns"].as_array().unwrap() {
+        let id = p["id"].as_str().unwrap();
+        assert_eq!(
+            p["count"].as_u64().unwrap() as usize,
+            count(&report, id),
+            "{id}"
+        );
+        assert_eq!(p["tasks"].as_array().unwrap().len(), count(&report, id));
+    }
+    // Paths are relative: no absolute path leaks into the output.
+    assert!(!String::from_utf8_lossy(&out.get_output().stdout).contains("/home/"));
+}
+
+#[test]
+fn markdown_starts_with_current_method_heading_and_has_provenance() {
+    let md = run("handler").to_markdown();
+    assert!(md.starts_with("## Current method\n"));
+    assert!(md.contains("`tp classify site.yml`"));
+}

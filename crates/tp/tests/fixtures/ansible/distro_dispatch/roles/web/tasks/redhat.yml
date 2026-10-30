@@ -1,0 +1,5 @@
+---
+- name: RedHat packages
+  dnf:
+    name: [nginx, curl]
+    state: present

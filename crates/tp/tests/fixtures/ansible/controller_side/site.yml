@@ -1,0 +1,5 @@
+---
+- name: Keys
+  hosts: all
+  roles:
+    - keys

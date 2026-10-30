@@ -1,0 +1,5 @@
+---
+- name: Hashicorp
+  hosts: all
+  roles:
+    - hashicorp

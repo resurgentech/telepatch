@@ -1,0 +1,15 @@
+---
+- name: Check if cargo-deb is installed
+  shell: which cargo-deb
+  register: cargodeb_check
+  changed_when: false
+  ignore_errors: yes
+
+- name: Install cargo-deb
+  shell: cargo install cargo-deb
+  when: cargodeb_check.rc != 0
+
+- name: Unrelated read
+  command: getent passwd root
+  register: passwd_info
+  changed_when: false

@@ -1,0 +1,16 @@
+---
+- name: Read public key from controller
+  shell: cat ~/.ssh/id_ed25519.pub
+  delegate_to: localhost
+  register: pubkey
+
+- name: Fetch a file on the controller
+  local_action:
+    module: get_url
+    url: https://example.com/tool.tgz
+    dest: /tmp/tool.tgz
+
+- name: Install key
+  authorized_key:
+    user: root
+    key: "{{ pubkey.stdout }}"

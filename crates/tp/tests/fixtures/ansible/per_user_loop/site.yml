@@ -1,0 +1,5 @@
+---
+- name: Shell setup
+  hosts: all
+  roles:
+    - shellrc
