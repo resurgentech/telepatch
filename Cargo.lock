@@ -592,12 +592,14 @@ name = "telepatch"
 version = "0.1.0"
 dependencies = [
  "base64",
+ "clap",
  "insta",
  "serde",
  "serde_json",
  "telepatch-macros",
  "tempfile",
  "tokio",
+ "toml",
  "trybuild",
 ]
 

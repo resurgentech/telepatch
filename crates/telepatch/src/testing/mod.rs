@@ -106,3 +106,15 @@ pub fn plan_all<V>(playbook: &Playbook<V>, hosts: &[FixtureHost<V>]) -> String {
         .collect::<Vec<_>>()
         .join("\n")
 }
+
+/// Render the optimized plan of `playbook` for the embedded os-release
+/// fixture `distro` (see [`crate::facts::os::FIXTURES`]), every fact
+/// answered absent. The host is named after the distro. Panics on an
+/// unknown distro or a failing playbook; meant for downstream snapshot tests.
+pub fn plan_for<V>(distro: &str, playbook: &Playbook<V>, vars: V) -> String {
+    let os = Os::fixture(distro).unwrap_or_else(|| {
+        let names: Vec<&str> = crate::facts::os::FIXTURES.iter().map(|(n, _)| *n).collect();
+        panic!("unknown distro `{distro}`; fixtures: {}", names.join(", "))
+    });
+    plan(playbook, &FixtureHost::new(distro, os, Rc::new(vars)))
+}

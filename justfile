@@ -42,3 +42,22 @@ test-live-os:
 # rockylinux/rockylinux:10 via docker exec; second run must change nothing.
 test-live-pkg:
     cargo test -p telepatch --test live -- --ignored --nocapture pkg_
+
+# Build examples/hello for musl and fail unless the binary is static; then
+# smoke-test it.
+musl-example:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cargo build --release --example hello --target x86_64-unknown-linux-musl -p telepatch
+    bin=target/x86_64-unknown-linux-musl/release/examples/hello
+    desc=$(file -b "$bin")
+    echo "file: $desc"
+    ldd_out=$(ldd "$bin" 2>&1 || true)
+    echo "ldd:  $ldd_out"
+    if echo "$desc" | grep -Eq 'statically linked|static-pie linked' \
+       || echo "$ldd_out" | grep -Eq 'not a dynamic executable|statically linked'; then
+        echo "static: yes"
+    else
+        echo "static: NO" >&2; exit 1
+    fi
+    "$bin" plan hello --distro ubuntu2404 | head -5

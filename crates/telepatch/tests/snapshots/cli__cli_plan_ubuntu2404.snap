@@ -1,0 +1,35 @@
+---
+source: crates/telepatch/tests/cli.rs
+expression: out
+---
+host ubuntu2404 (os: Debian/Ubuntu 24.04)
+blocking reads: 0
+
+window 1 (final)
+role greet
+  #1 file as shell:root reads [] writes [file:/srv/greeting] post [file:/srv/greeting=Exists(true)]
+      | rc=0; changed=0
+      | tp_p='/srv/greeting'
+      | if [ -d "$tp_p" ]; then echo "telepatch: $tp_p is a directory" >&2; rc=1; fi
+      | tp_b='aGVsbG8K'
+      | if [ "$rc" -eq 0 ] && ! { [ -f "$tp_p" ] && printf %s "$tp_b" | base64 -d | cmp -s - "$tp_p"; }; then
+      |   tp_t=$(mktemp "$tp_p.tpXXXXXX") || rc=$?
+      |   if [ "$rc" -eq 0 ]; then
+      |     if printf %s "$tp_b" | base64 -d > "$tp_t"; then
+      |       if [ -e "$tp_p" ]; then
+      |         chmod --reference="$tp_p" "$tp_t"; chown --reference="$tp_p" "$tp_t" 2>/dev/null
+      |       else
+      |         chmod 644 "$tp_t"
+      |       fi
+      |       mv -f "$tp_t" "$tp_p"; rc=$?
+      |     else
+      |       rc=$?
+      |     fi
+      |     if [ "$rc" -eq 0 ]; then changed=1; else rm -f "$tp_t"; fi
+      |   fi
+      | fi
+  #2 sh as shell:root reads [] writes [*]
+      | rc=0; changed=0; skipped=0
+      | echo hi
+      | rc=$?
+      | if [ "$rc" -eq 0 ]; then changed=1; fi

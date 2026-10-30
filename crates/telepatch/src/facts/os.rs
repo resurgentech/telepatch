@@ -146,6 +146,78 @@ impl Os {
     }
 }
 
+/// The os-release fixtures, embedded so downstream playbook repos can render
+/// plans for every distro without reading telepatch's `tests/` directory.
+pub const FIXTURES: &[(&str, &str)] = &[
+    (
+        "debian12",
+        include_str!("../../tests/fixtures/os-release/debian12"),
+    ),
+    (
+        "debian13",
+        include_str!("../../tests/fixtures/os-release/debian13"),
+    ),
+    (
+        "ubuntu2404",
+        include_str!("../../tests/fixtures/os-release/ubuntu2404"),
+    ),
+    (
+        "ubuntu2604",
+        include_str!("../../tests/fixtures/os-release/ubuntu2604"),
+    ),
+    (
+        "pop-os",
+        include_str!("../../tests/fixtures/os-release/pop-os"),
+    ),
+    (
+        "fedora43",
+        include_str!("../../tests/fixtures/os-release/fedora43"),
+    ),
+    (
+        "fedora44",
+        include_str!("../../tests/fixtures/os-release/fedora44"),
+    ),
+    (
+        "rockylinux9",
+        include_str!("../../tests/fixtures/os-release/rockylinux9"),
+    ),
+    (
+        "rockylinux10",
+        include_str!("../../tests/fixtures/os-release/rockylinux10"),
+    ),
+    (
+        "almalinux9",
+        include_str!("../../tests/fixtures/os-release/almalinux9"),
+    ),
+    (
+        "almalinux10",
+        include_str!("../../tests/fixtures/os-release/almalinux10"),
+    ),
+    (
+        "amazonlinux2023",
+        include_str!("../../tests/fixtures/os-release/amazonlinux2023"),
+    ),
+    ("arch", include_str!("../../tests/fixtures/os-release/arch")),
+    (
+        "omarchy",
+        include_str!("../../tests/fixtures/os-release/omarchy"),
+    ),
+    (
+        "omarchy-host",
+        include_str!("../../tests/fixtures/os-release/omarchy-host"),
+    ),
+];
+
+impl Os {
+    /// The parsed embedded fixture named `name` (`ubuntu2404`, `arch`, ...).
+    pub fn fixture(name: &str) -> Option<Os> {
+        FIXTURES
+            .iter()
+            .find(|(n, _)| *n == name)
+            .map(|(n, text)| Os::parse(text).unwrap_or_else(|e| panic!("fixture {n}: {e}")))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -189,6 +261,27 @@ mod tests {
             assert_eq!(os.version.as_str(), version, "{name} version");
             assert_eq!(os.version.major(), major, "{name} major");
         }
+    }
+
+    #[test]
+    fn embedded_fixtures_match_files() {
+        let dir = format!("{}/tests/fixtures/os-release", env!("CARGO_MANIFEST_DIR"));
+        let mut on_disk: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .collect();
+        on_disk.sort();
+        let mut embedded: Vec<&str> = FIXTURES.iter().map(|(n, _)| *n).collect();
+        embedded.sort();
+        assert_eq!(on_disk, embedded);
+        for (n, text) in FIXTURES {
+            assert_eq!(
+                *text,
+                std::fs::read_to_string(format!("{dir}/{n}")).unwrap()
+            );
+            assert!(Os::fixture(n).is_some());
+        }
+        assert!(Os::fixture("nope").is_none());
     }
 
     #[test]
