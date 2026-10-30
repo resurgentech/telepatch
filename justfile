@@ -32,3 +32,8 @@ os-fixtures:
         echo "$distro <- $image"
         docker run --rm "$image" sh -c 'cat /etc/os-release 2>/dev/null || cat /usr/lib/os-release' > "$out/$distro"
     done
+
+# Live: start each upstream image in docker, read `os` through the docker
+# transport, compare with the committed fixtures. Needs docker; may pull.
+test-live-os:
+    cargo test -p telepatch --test live -- --ignored os_
