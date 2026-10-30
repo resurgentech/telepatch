@@ -1,0 +1,13 @@
+[package]
+name = "tp"
+description = "telepatch tooling: classify, check-understanding, import"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+
+[dev-dependencies]
+assert_cmd = "2"

@@ -1,0 +1,10 @@
+[package]
+name = "telepatch"
+description = "Trace imperative Rust roles into a per-host graph and stream it into persistent shells"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+telepatch-macros = { workspace = true }

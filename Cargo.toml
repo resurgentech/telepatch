@@ -1,0 +1,13 @@
+[workspace]
+resolver = "3"
+members = ["crates/telepatch", "crates/telepatch-macros", "crates/tp"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/resurgentech/telepatch"
+
+[workspace.dependencies]
+telepatch = { path = "crates/telepatch" }
+telepatch-macros = { path = "crates/telepatch-macros" }
