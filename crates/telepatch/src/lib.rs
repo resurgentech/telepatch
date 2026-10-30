@@ -10,12 +10,14 @@ pub mod engine;
 pub mod facts;
 pub mod host;
 pub mod key;
+pub mod ops;
 pub mod plan;
 pub mod resolver;
 pub mod role;
 pub mod sh;
 pub mod testing;
 pub mod trace;
+pub mod trailer;
 
 pub use host::{Host, OpHandle, Scope, TraceError};
 pub use key::{Key, Value};

@@ -1,7 +1,6 @@
 //! `Host<V>`: the handle a role receives. Cheap to clone; single-threaded.
 
 use std::cell::RefCell;
-use std::collections::BTreeMap;
 use std::fmt;
 use std::ops::Deref;
 use std::rc::Rc;
@@ -91,16 +90,22 @@ impl<V> Host<V> {
         self.trace.borrow().clone()
     }
 
+    /// Record a playbook bug found while tracing. The run fails with the
+    /// first recorded error before anything is applied.
+    pub fn record_error(&self, e: TraceError) {
+        self.trace.borrow_mut().errors.push(e);
+    }
+
     /// Append an op node and return its handle. Op builders (`pkg`, `file`,
     /// ...) in later steps are thin wrappers over this.
     pub fn op(&self, spec: OpSpec) -> OpHandle {
         let node = OpNode {
             writes: spec.default_writes(),
+            post: spec.default_post(),
             spec,
             run_as: self.run_as.clone(),
             reads: Default::default(),
             guard: None,
-            post: BTreeMap::new(),
             allow_fail: false,
         };
         let id = self.trace.borrow_mut().push(Node::Op(node));
@@ -158,15 +163,34 @@ pub struct OpHandle {
 }
 
 impl OpHandle {
+    /// Record a trace error (see [`Host::record_error`]).
+    pub(crate) fn record_error(&self, e: TraceError) {
+        self.trace.borrow_mut().errors.push(e);
+    }
+
     pub fn id(&self) -> NodeId {
         self.id
     }
 
-    fn edit(&self, f: impl FnOnce(&mut OpNode)) -> &Self {
+    pub(crate) fn edit(&self, f: impl FnOnce(&mut OpNode)) -> &Self {
         if let Node::Op(op) = &mut self.trace.borrow_mut().nodes[self.id.0] {
             f(op);
         }
         self
+    }
+
+    /// Re-derive the file postcondition after a builder changed the spec
+    /// (`.absent()` flips it to `Exists(false)`).
+    pub(crate) fn refresh_effects(&self) {
+        self.edit(|op| {
+            if let crate::trace::OpSpec::File(f) = &op.spec {
+                let key = Key::file(&f.path);
+                let v = op.spec.default_post().remove(&key);
+                if let Some(v) = v {
+                    op.post.insert(key, v);
+                }
+            }
+        });
     }
 
     /// Replace the declared read set.

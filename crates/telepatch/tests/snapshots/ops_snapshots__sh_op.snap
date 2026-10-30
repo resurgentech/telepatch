@@ -1,0 +1,27 @@
+---
+source: crates/telepatch/tests/ops_snapshots.rs
+expression: "wrapped(&h, id)"
+---
+(
+__tp_esc() { local s=${1//\\/\\\\}; s=${s//\"/\\\"}; printf %s "$s"; }
+__tp_emit() {
+  if [ "$1" -ne 0 ]; then rc=$1; fi
+  case "$rc" in ''|*[!0-9]*) rc=1;; esac
+  case "$changed" in 1) __tp_c=true;; *) __tp_c=false;; esac
+  case "$skipped" in 1) __tp_s=true;; *) __tp_s=false;; esac
+  __tp_i=
+  for __tp_x in "${installed[@]}"; do __tp_i="$__tp_i${__tp_i:+,}\"$(__tp_esc "$__tp_x")\""; done
+  printf '\n__tp_testnonce 0 {"rc":%s,"changed":%s,"skipped":%s}\n' "$rc" "$__tp_c" "$__tp_s"
+}
+trap '__tp_emit $?' EXIT
+rc=0; changed=0; skipped=0; installed=()
+rc=0; changed=0; skipped=0
+if [ -e /usr/local/bin/x ]; then
+  skipped=1
+else
+make install
+rc=$?
+if [ "$rc" -eq 0 ]; then changed=1; fi
+fi
+exit "$rc"
+)

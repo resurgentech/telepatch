@@ -131,6 +131,11 @@ impl<E: Executor> Engine<E> {
         let mut window = 1;
         loop {
             let poll = fut.as_mut().poll(&mut cx);
+            // A trace error is a playbook bug: fail before applying anything.
+            let first_error = host.trace_cell().borrow().errors.first().cloned();
+            if let Some(err) = first_error {
+                return Err(EngineError::Playbook(err));
+            }
             self.drain_resolved(&info, &host, window);
             match poll {
                 Poll::Ready(Err(e)) => return Err(EngineError::Playbook(e)),

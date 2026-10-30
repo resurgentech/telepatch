@@ -1,0 +1,84 @@
+---
+source: crates/telepatch/tests/ops_snapshots.rs
+expression: "render_host(\"h\", &h.os, &h.snapshot())"
+---
+host h (os: Debian/Debian 12)
+blocking reads: 0
+
+role (none)
+  #0 pkg as shell:root reads [] writes [pkg:curl] post [pkg:curl=Installed]
+      | rc=0; changed=0; installed=()
+      | tp_want=('curl')
+      | tp_missing=()
+      | export DEBIAN_FRONTEND=noninteractive
+      | for tp_n in "${tp_want[@]}"; do
+      |   [ "$(dpkg-query -W -f='${db:Status-Status}' "$tp_n" 2>/dev/null)" = installed ] || tp_missing+=("$tp_n")
+      | done
+      | if [ "$rc" -eq 0 ] && [ "${#tp_missing[@]}" -gt 0 ]; then
+      |   if ! find /var/lib/apt/lists -maxdepth 1 -type f ! -name lock 2>/dev/null | grep -q .; then apt-get -q update || rc=$?; fi
+      |   if [ "$rc" -eq 0 ]; then
+      |     apt-get -y -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold install "${tp_missing[@]}"
+      |     rc=$?
+      |     if [ "$rc" -eq 0 ]; then changed=1; installed=("${tp_missing[@]}"); fi
+      |   fi
+      | fi
+  #1 pkg as shell:root reads [] writes [pkg:pip:requests] post [pkg:pip:requests=Installed]
+      | rc=0; changed=0; installed=()
+      | tp_want=('requests')
+      | tp_missing=()
+      | if python3 -m pip --version >/dev/null 2>&1; then tp_pip=(python3 -m pip)
+      | elif command -v pip3 >/dev/null 2>&1; then tp_pip=(pip3)
+      | else echo 'telepatch: pip not found' >&2; rc=127; fi
+      | if [ "$rc" -eq 0 ]; then
+      |   for tp_n in "${tp_want[@]}"; do
+      |     "${tp_pip[@]}" show "$tp_n" >/dev/null 2>&1 || tp_missing+=("$tp_n")
+      |   done
+      |   if [ "${#tp_missing[@]}" -gt 0 ]; then
+      |     "${tp_pip[@]}" install "${tp_missing[@]}"
+      |     rc=$?
+      |     if [ "$rc" -eq 0 ]; then changed=1; installed=("${tp_missing[@]}"); fi
+      |   fi
+      | fi
+  #2 pkg as shell:root reads [] writes [*]
+      | rc=0; changed=0; installed=()
+      | tp_want=('python3')
+      | tp_missing=()
+      | export DEBIAN_FRONTEND=noninteractive
+      | if [ "$rc" -eq 0 ]; then
+      |   if ! find /var/lib/apt/lists -maxdepth 1 -type f ! -name lock 2>/dev/null | grep -q .; then apt-get -q update || rc=$?; fi
+      | fi
+      | if [ "$rc" -eq 0 ]; then
+      |   tp_out=$(mktemp)
+      |   LC_ALL=C apt-get -y -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold build-dep "${tp_want[@]}" 2>&1 | tee "$tp_out"
+      |   rc=${PIPESTATUS[0]}
+      |   if [ "$rc" -eq 0 ] && grep -Eq '[1-9][0-9]* newly installed' "$tp_out"; then changed=1; fi
+      |   rm -f "$tp_out"
+      | fi
+  #3 file as shell:root reads [] writes [file:/etc/a] post [file:/etc/a=Exists(true)]
+      | rc=0; changed=0
+      | tp_p='/etc/a'
+      | if [ -d "$tp_p" ]; then echo "telepatch: $tp_p is a directory" >&2; rc=1; fi
+      | if [ "$rc" -eq 0 ] && [ ! -e "$tp_p" ]; then
+      |   (umask 022; : > "$tp_p")
+      |   rc=$?
+      |   if [ "$rc" -eq 0 ]; then changed=1; fi
+      | fi
+      | tp_append() {
+      |   if [ -s "$1" ] && [ -n "$(tail -c1 "$1")" ]; then printf '\n' >> "$1"; fi
+      |   printf '%s\n' "$2" >> "$1"
+      | }
+      | if [ "$rc" -eq 0 ]; then
+      |   if [ ! -e "$tp_p" ]; then (umask 022; : > "$tp_p") && changed=1 || rc=$?; fi
+      |   tp_l='x'
+      |   if [ "$rc" -eq 0 ] && ! grep -qxF -- "$tp_l" "$tp_p"; then
+      |     if tp_append "$tp_p" "$tp_l"; then changed=1; else rc=$?; fi
+      |   fi
+      | fi
+  #4 file as shell:root reads [] writes [file:/etc/b] post [file:/etc/b=Exists(false)]
+      | rc=0; changed=0
+      | tp_p='/etc/b'
+      | if [ -e "$tp_p" ] || [ -L "$tp_p" ]; then
+      |   rm -rf -- "$tp_p"
+      |   rc=$?
+      |   if [ "$rc" -eq 0 ]; then changed=1; fi
+      | fi

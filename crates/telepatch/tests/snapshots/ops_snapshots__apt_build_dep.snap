@@ -1,0 +1,33 @@
+---
+source: crates/telepatch/tests/ops_snapshots.rs
+expression: "wrapped(&h, p.id())"
+---
+(
+__tp_esc() { local s=${1//\\/\\\\}; s=${s//\"/\\\"}; printf %s "$s"; }
+__tp_emit() {
+  if [ "$1" -ne 0 ]; then rc=$1; fi
+  case "$rc" in ''|*[!0-9]*) rc=1;; esac
+  case "$changed" in 1) __tp_c=true;; *) __tp_c=false;; esac
+  case "$skipped" in 1) __tp_s=true;; *) __tp_s=false;; esac
+  __tp_i=
+  for __tp_x in "${installed[@]}"; do __tp_i="$__tp_i${__tp_i:+,}\"$(__tp_esc "$__tp_x")\""; done
+  printf '\n__tp_testnonce 0 {"rc":%s,"changed":%s,"installed":[%s]}\n' "$rc" "$__tp_c" "$__tp_i"
+}
+trap '__tp_emit $?' EXIT
+rc=0; changed=0; skipped=0; installed=()
+rc=0; changed=0; installed=()
+tp_want=('python3')
+tp_missing=()
+export DEBIAN_FRONTEND=noninteractive
+if [ "$rc" -eq 0 ]; then
+  if ! find /var/lib/apt/lists -maxdepth 1 -type f ! -name lock 2>/dev/null | grep -q .; then apt-get -q update || rc=$?; fi
+fi
+if [ "$rc" -eq 0 ]; then
+  tp_out=$(mktemp)
+  LC_ALL=C apt-get -y -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold build-dep "${tp_want[@]}" 2>&1 | tee "$tp_out"
+  rc=${PIPESTATUS[0]}
+  if [ "$rc" -eq 0 ] && grep -Eq '[1-9][0-9]* newly installed' "$tp_out"; then changed=1; fi
+  rm -f "$tp_out"
+fi
+exit "$rc"
+)

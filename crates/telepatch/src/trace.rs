@@ -74,6 +74,10 @@ pub enum OpSpec {
     Raw { script: String },
     /// A shell command from `sh!`.
     Shell(crate::sh::ShellSpec),
+    /// Package install (`h.pkg`, `h.pip`, ...).
+    Pkg(crate::ops::pkg::PkgSpec),
+    /// File, directory, line edits (`h.file`).
+    File(crate::ops::file::FileSpec),
 }
 
 impl OpSpec {
@@ -81,6 +85,18 @@ impl OpSpec {
     pub fn kind(&self) -> &'static str {
         match self {
             OpSpec::Raw { .. } | OpSpec::Shell(_) => "sh",
+            OpSpec::Pkg(_) => "pkg",
+            OpSpec::File(_) => "file",
+        }
+    }
+
+    /// Which trailer result type this op's template emits.
+    pub fn op_kind(&self) -> crate::trailer::OpKind {
+        use crate::trailer::OpKind;
+        match self {
+            OpSpec::Raw { .. } | OpSpec::Shell(_) => OpKind::Sh,
+            OpSpec::Pkg(_) => OpKind::Pkg,
+            OpSpec::File(_) => OpKind::File,
         }
     }
 
@@ -88,7 +104,9 @@ impl OpSpec {
     pub fn script(&self, _os: &Os) -> String {
         match self {
             OpSpec::Raw { script } => script.clone(),
-            OpSpec::Shell(s) => s.render(),
+            OpSpec::Shell(s) => crate::ops::shell::body(s),
+            OpSpec::Pkg(p) => p.render(),
+            OpSpec::File(f) => f.render(),
         }
     }
 
@@ -96,6 +114,25 @@ impl OpSpec {
     pub fn default_writes(&self) -> BTreeSet<Key> {
         match self {
             OpSpec::Raw { .. } | OpSpec::Shell(_) => BTreeSet::from([Key::Any]),
+            OpSpec::Pkg(p) => p.keys(),
+            OpSpec::File(f) => BTreeSet::from([Key::file(&f.path)]),
+        }
+    }
+
+    /// Postconditions of an op of this kind before the caller adds more.
+    pub fn default_post(&self) -> BTreeMap<Key, Value> {
+        use crate::ops::file::FileKind;
+        match self {
+            OpSpec::Raw { .. } | OpSpec::Shell(_) => BTreeMap::new(),
+            OpSpec::Pkg(p) => p
+                .names
+                .iter()
+                .map(|n| (p.key_of(n), Value::Installed))
+                .collect(),
+            OpSpec::File(f) => BTreeMap::from([(
+                Key::file(&f.path),
+                Value::Exists(f.kind != FileKind::Absent),
+            )]),
         }
     }
 }
@@ -150,6 +187,10 @@ pub enum Node {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Trace {
     pub nodes: Vec<Node>,
+    /// Playbook bugs found while tracing (bad package name, unsupported
+    /// os family, ...). A non-empty list fails the run before anything is
+    /// applied.
+    pub errors: Vec<crate::host::TraceError>,
 }
 
 impl Trace {

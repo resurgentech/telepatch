@@ -45,6 +45,9 @@ pub fn trace<V>(playbook: &Playbook<V>, host: &FixtureHost<V>) -> String {
         ),
     }
     drop(fut);
+    if let Some(e) = h.snapshot().errors.first() {
+        panic!("playbook {} failed on {}: {e}", playbook.name, host.name);
+    }
     render_host(&host.name, &host.os, &h.snapshot())
 }
 
