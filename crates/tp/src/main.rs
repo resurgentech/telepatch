@@ -2,6 +2,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
+use tp::check_understanding;
 use tp::classify::{Options, classify_playbook};
 
 /// telepatch tooling: understand and port Ansible roles.
@@ -31,12 +32,44 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Check an understanding doc: required levels in order, dated sources,
+    /// no hedge words, a `Decision:` line. Prints one line per problem and
+    /// exits 1, or prints `ok`.
+    CheckUnderstanding {
+        /// Understanding doc (Markdown).
+        doc: PathBuf,
+        /// Also require the trial-only `## skill-feedback` section.
+        #[arg(long)]
+        require_feedback: bool,
+    },
 }
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
     match cli.command {
         None => ExitCode::SUCCESS,
+        Some(Command::CheckUnderstanding {
+            doc,
+            require_feedback,
+        }) => match check_understanding::check_file(
+            &doc,
+            check_understanding::Options { require_feedback },
+        ) {
+            Ok(problems) if problems.is_empty() => {
+                println!("ok");
+                ExitCode::SUCCESS
+            }
+            Ok(problems) => {
+                for p in problems {
+                    println!("{p}");
+                }
+                ExitCode::FAILURE
+            }
+            Err(e) => {
+                eprintln!("tp check-understanding: {e}");
+                ExitCode::FAILURE
+            }
+        },
         Some(Command::Classify {
             playbook,
             roles_path,

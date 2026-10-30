@@ -2,4 +2,5 @@
 //! `tp classify` now and `tp import` later.
 
 pub mod ansible;
+pub mod check_understanding;
 pub mod classify;
