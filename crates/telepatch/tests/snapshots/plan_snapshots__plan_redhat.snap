@@ -1,0 +1,21 @@
+---
+source: crates/telepatch/tests/plan_snapshots.rs
+expression: "trace(&playbook(), &host(\"web2\", \"rockylinux9\"))"
+---
+host web2 (os: RedHat/Rocky 9.8)
+blocking reads: 0
+
+role web
+  #1 sh as shell:root reads [] writes [*]
+      | echo hi
+  #2 sh as shell:root reads [] writes [file:/var/cache/pkgmeta]
+      | dnf makecache
+  #3 sh as login:deploy reads [] writes [file:/home/x/.profile]
+      | echo "$HOME"
+  #4 sh as login:root reads [user:root] writes [*]
+      | id -un
+  #5 barrier
+
+role monitoring
+  #8 sh as shell:root reads [pkg:node-exporter] writes [svc:node_exporter]
+      | systemctl enable node_exporter

@@ -8,3 +8,6 @@ repository.workspace = true
 
 [dependencies]
 telepatch-macros = { workspace = true }
+
+[dev-dependencies]
+insta = "1"

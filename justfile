@@ -5,3 +5,19 @@ test:
 lint:
     cargo clippy --workspace --all-targets -- -D warnings
     cargo fmt --all --check
+
+# Regenerate crates/telepatch/tests/fixtures/os-release/<distro> from the
+# upstream images named in ../docker_images/docker-bake.hcl (needs docker and
+# network; not part of the gate). omarchy's base image is stock Arch plus a
+# pacman repo, so its os-release is Arch's. pop-os and omarchy-host are
+# hand-kept and not touched here.
+os-fixtures:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    out=crates/telepatch/tests/fixtures/os-release
+    mkdir -p "$out"
+    sed -nE 's/^ *([a-z0-9]+) += \{ root = "([^"]+)".*/\1 \2/p' ../docker_images/docker-bake.hcl |
+    while read -r distro image; do
+        echo "$distro <- $image"
+        docker run --rm "$image" sh -c 'cat /etc/os-release 2>/dev/null || cat /usr/lib/os-release' > "$out/$distro"
+    done
