@@ -31,4 +31,4 @@ if [ "$rc" -eq 0 ] && [ "${#tp_missing[@]}" -gt 0 ]; then
   fi
 fi
 exit "$rc"
-)
+) </dev/null

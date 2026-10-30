@@ -197,8 +197,7 @@ fn stub_dir(d: &std::path::Path, installed: &str) -> std::path::PathBuf {
     std::fs::create_dir_all(&bin).unwrap();
     let w = |n: &str, s: &str| {
         let p = bin.join(n);
-        std::fs::write(&p, format!("#!/bin/bash\n{s}\n")).unwrap();
-        std::fs::set_permissions(&p, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        write_exe(&p, &format!("#!/bin/bash\n{s}\n"));
     };
     w(
         "dpkg-query",
@@ -254,4 +253,21 @@ fn trailer_parse_and_types() {
     // a template that forgets a field does not parse into the type
     assert!(t.typed::<ShellResult>().is_err());
     assert!(Trailer::parse_line("hello").is_none());
+}
+
+/// Write an executable via a child `sh` so no write fd lives in this test
+/// process (a sibling thread's fork could inherit it; exec then fails with
+/// ETXTBSY).
+fn write_exe(p: &std::path::Path, text: &str) {
+    use std::io::Write;
+    let mut c = std::process::Command::new("sh")
+        .arg("-c")
+        .arg("cat > \"$1\" && chmod 755 \"$1\"")
+        .arg("sh")
+        .arg(p)
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    c.stdin.take().unwrap().write_all(text.as_bytes()).unwrap();
+    assert!(c.wait().unwrap().success());
 }

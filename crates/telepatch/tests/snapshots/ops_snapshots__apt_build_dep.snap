@@ -30,4 +30,4 @@ if [ "$rc" -eq 0 ]; then
   rm -f "$tp_out"
 fi
 exit "$rc"
-)
+) </dev/null

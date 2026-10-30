@@ -29,7 +29,7 @@ if [ "$rc" -eq 0 ] && [ "$(stat -L -c %a "$tp_p")" != '755' ]; then
   if chmod 755 "$tp_p"; then changed=1; else rc=$?; fi
 fi
 exit "$rc"
-)
+) </dev/null
 
 (
 __tp_esc() { local s=${1//\\/\\\\}; s=${s//\"/\\\"}; printf %s "$s"; }
@@ -52,4 +52,4 @@ if [ -e "$tp_p" ] || [ -L "$tp_p" ]; then
   if [ "$rc" -eq 0 ]; then changed=1; fi
 fi
 exit "$rc"
-)
+) </dev/null

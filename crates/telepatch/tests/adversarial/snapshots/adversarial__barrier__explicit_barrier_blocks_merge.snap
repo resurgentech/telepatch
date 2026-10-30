@@ -1,0 +1,43 @@
+---
+source: crates/telepatch/tests/adversarial/barrier.rs
+expression: "plan(&Playbook { name: \"t\", run }, &super::common::ubuntu())"
+---
+host web1 (os: Debian/Ubuntu 24.04)
+blocking reads: 0
+
+window 1 (final)
+role a
+  #1 pkg as shell:root reads [] writes [pkg:curl] post [pkg:curl=Installed]
+      | rc=0; changed=0; installed=()
+      | tp_want=('curl')
+      | tp_missing=()
+      | export DEBIAN_FRONTEND=noninteractive
+      | for tp_n in "${tp_want[@]}"; do
+      |   [ "$(dpkg-query -W -f='${db:Status-Status}' "$tp_n" 2>/dev/null)" = installed ] || tp_missing+=("$tp_n")
+      | done
+      | if [ "$rc" -eq 0 ] && [ "${#tp_missing[@]}" -gt 0 ]; then
+      |   if ! find /var/lib/apt/lists -maxdepth 1 -type f ! -name lock 2>/dev/null | grep -q .; then apt-get -q update || rc=$?; fi
+      |   if [ "$rc" -eq 0 ]; then
+      |     apt-get -y -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold install "${tp_missing[@]}"
+      |     rc=$?
+      |     if [ "$rc" -eq 0 ]; then changed=1; installed=("${tp_missing[@]}"); fi
+      |   fi
+      | fi
+role b
+  #5 pkg as shell:root reads [] writes [pkg:git, pkg:jq] post [pkg:git=Installed, pkg:jq=Installed]
+      | rc=0; changed=0; installed=()
+      | tp_want=('git' 'jq')
+      | tp_missing=()
+      | export DEBIAN_FRONTEND=noninteractive
+      | for tp_n in "${tp_want[@]}"; do
+      |   [ "$(dpkg-query -W -f='${db:Status-Status}' "$tp_n" 2>/dev/null)" = installed ] || tp_missing+=("$tp_n")
+      | done
+      | if [ "$rc" -eq 0 ] && [ "${#tp_missing[@]}" -gt 0 ]; then
+      |   if ! find /var/lib/apt/lists -maxdepth 1 -type f ! -name lock 2>/dev/null | grep -q .; then apt-get -q update || rc=$?; fi
+      |   if [ "$rc" -eq 0 ]; then
+      |     apt-get -y -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold install "${tp_missing[@]}"
+      |     rc=$?
+      |     if [ "$rc" -eq 0 ]; then changed=1; installed=("${tp_missing[@]}"); fi
+      |   fi
+      | fi
+      merged from b #5, b #6

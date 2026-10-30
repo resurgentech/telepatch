@@ -24,4 +24,4 @@ rc=$?
 if [ "$rc" -eq 0 ]; then changed=1; fi
 fi
 exit "$rc"
-)
+) </dev/null

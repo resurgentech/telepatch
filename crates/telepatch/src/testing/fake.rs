@@ -49,6 +49,8 @@ pub struct FakeExecutor {
     fixtures: BTreeMap<(RunAs, Fact), Value>,
     /// Calls per host, in order.
     pub calls: Vec<(String, Call)>,
+    /// Every window applied, with its host, as the engine prepared it.
+    pub windows: Vec<(String, Window)>,
 }
 
 impl FakeExecutor {
@@ -185,6 +187,7 @@ impl Executor for FakeExecutor {
     }
 
     async fn apply(&mut self, host: &HostInfo, window: &Window) -> Result<(), String> {
+        self.windows.push((host.name.clone(), window.clone()));
         let ops = window
             .ops
             .iter()

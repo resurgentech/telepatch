@@ -70,3 +70,39 @@ pub fn block_on<F: std::future::Future>(fut: F) -> F::Output {
         Poll::Pending => panic!("block_on: future returned Pending with nothing to wake it"),
     }
 }
+
+/// Run `playbook` on one host through the engine (fake executor, every fact
+/// absent) and render the optimized plan: the windows the executor received,
+/// merged ops annotated with their member roles.
+pub fn plan<V>(playbook: &Playbook<V>, host: &FixtureHost<V>) -> String {
+    plan_with(playbook, host, FakeExecutor::new())
+}
+
+/// Like [`plan`] with fixture answers for facts.
+pub fn plan_with<V>(playbook: &Playbook<V>, host: &FixtureHost<V>, fake: FakeExecutor) -> String {
+    let h = Host::new(host.name.clone(), host.os.clone(), host.vars.clone());
+    let mut engine = crate::engine::Engine::new(fake);
+    block_on(engine.run_host(playbook, h.clone()))
+        .unwrap_or_else(|e| panic!("playbook {} on {}: {e}", playbook.name, host.name));
+    let windows: Vec<crate::engine::Window> = engine
+        .executor
+        .windows
+        .iter()
+        .map(|(_, w)| w.clone())
+        .collect();
+    crate::plan::render_windows(
+        &host.name,
+        &host.os,
+        engine.executor.blocking_reads(),
+        &windows,
+    )
+}
+
+/// [`plan`] for several hosts, separated by a blank line.
+pub fn plan_all<V>(playbook: &Playbook<V>, hosts: &[FixtureHost<V>]) -> String {
+    hosts
+        .iter()
+        .map(|h| plan(playbook, h))
+        .collect::<Vec<_>>()
+        .join("\n")
+}

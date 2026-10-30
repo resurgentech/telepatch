@@ -144,20 +144,26 @@ __tp_emit() {
 /// The full script for one op: body wrapped in the trailer subshell.
 /// `id` is the op's trace index; `nonce` is random per run.
 pub fn render_op(op: &OpNode, id: usize, nonce: &str, os: &Os) -> String {
-    assert!(
-        nonce.chars().all(|c| c.is_ascii_alphanumeric()),
-        "nonce must be alphanumeric"
-    );
     let body = match &op.spec {
         crate::trace::OpSpec::Raw { script } => crate::ops::shell::raw_body(script),
         spec => spec.script(os),
     };
-    let json = match op.spec.op_kind() {
+    wrap(op.spec.op_kind(), &body, id, nonce)
+}
+
+/// Wrap `body` (which sets `rc` / `changed` / ...) in the trailer subshell
+/// for a result of `kind`.
+pub fn wrap(kind: OpKind, body: &str, id: usize, nonce: &str) -> String {
+    assert!(
+        nonce.chars().all(|c| c.is_ascii_alphanumeric()),
+        "nonce must be alphanumeric"
+    );
+    let json = match kind {
         OpKind::Pkg => r#"{"rc":%s,"changed":%s,"installed":[%s]}"#,
         OpKind::File => r#"{"rc":%s,"changed":%s}"#,
         OpKind::Sh => r#"{"rc":%s,"changed":%s,"skipped":%s}"#,
     };
-    let args = match op.spec.op_kind() {
+    let args = match kind {
         OpKind::Pkg => r#""$rc" "$__tp_c" "$__tp_i""#,
         OpKind::File => r#""$rc" "$__tp_c""#,
         OpKind::Sh => r#""$rc" "$__tp_c" "$__tp_s""#,
@@ -166,10 +172,81 @@ pub fn render_op(op: &OpNode, id: usize, nonce: &str, os: &Os) -> String {
     o.push_str(PRELUDE);
     let _ = writeln!(o, "  printf '\\n__tp_{nonce} {id} {}\\n' {args}", json);
     o.push_str("}\ntrap '__tp_emit $?' EXIT\nrc=0; changed=0; skipped=0; installed=()\n");
-    o.push_str(&body);
+    o.push_str(body);
     if !body.ends_with('\n') {
         o.push('\n');
     }
-    o.push_str("exit \"$rc\"\n)\n");
+    // stdin is the shell's op queue: an op must never read it.
+    o.push_str("exit \"$rc\"\n) </dev/null\n");
     o
+}
+
+/// Why an op could not be rendered for the shell it was routed to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RenderError {
+    /// A login environment for `user` was requested in a shell that is
+    /// `shell_user`'s. Switching to another user (`sudo -iu`) is not
+    /// implemented yet.
+    UserSwitchUnsupported { user: String, shell_user: String },
+}
+
+impl std::fmt::Display for RenderError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RenderError::UserSwitchUnsupported { user, shell_user } => write!(
+                f,
+                "as_user({user}) from a {shell_user} shell: switching users is not supported yet"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for RenderError {}
+
+const LOGIN_PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
+
+/// Render `op` for a shell whose user is `shell_user` ("root" for a root
+/// shell). Ops with `run_as.login == false` are [`render_op`] unchanged. An
+/// op issued through `as_user(u)` runs its whole wrapped script (trailer
+/// included, stdout inherited) in a fresh `bash -l` for `u` started with
+/// `env -i`, with HOME and SHELL taken from `getent passwd u` evaluated in
+/// the shell at op time, so a profile edited earlier in the run is seen. If
+/// `u` has no passwd entry the op fails with rc 1 and a message on stderr
+/// (still with a trailer). Only `u == shell_user` is supported.
+pub fn render_for(
+    op: &OpNode,
+    id: usize,
+    nonce: &str,
+    os: &Os,
+    shell_user: &str,
+) -> Result<String, RenderError> {
+    let plain = render_op(op, id, nonce, os);
+    if !op.run_as.login {
+        return Ok(plain);
+    }
+    let user = match &op.run_as.principal {
+        crate::trace::Principal::Root => "root",
+        crate::trace::Principal::User(u) => u.as_str(),
+    };
+    if user != shell_user {
+        return Err(RenderError::UserSwitchUnsupported {
+            user: user.to_string(),
+            shell_user: shell_user.to_string(),
+        });
+    }
+    let q = crate::sh::quote(user);
+    let failed = wrap(
+        op.spec.op_kind(),
+        &format!("echo \"telepatch: no passwd entry for \"{q} >&2\nrc=1\n"),
+        id,
+        nonce,
+    );
+    Ok(format!(
+        "(\n__tp_pw=$(getent passwd {q}) || __tp_pw=\n\
+         if [ -z \"$__tp_pw\" ]; then\n{failed}else\n\
+         IFS=: read -r _ _ _ _ _ __tp_home __tp_shell <<<\"$__tp_pw\"\n\
+         env -i HOME=\"$__tp_home\" USER={q} LOGNAME={q} SHELL=\"$__tp_shell\" PATH={LOGIN_PATH} bash -l -c {}\n\
+         fi\n) </dev/null\n",
+        crate::sh::quote(&plain)
+    ))
 }

@@ -193,8 +193,15 @@ fn pip_latest(o: &mut String) {
 /// Entries for non-pkg or non-apt ops are `false`. Call on the final
 /// (merged) op list.
 pub fn apt_update_needed(ops: &[OpNode]) -> Vec<bool> {
-    let mut stale = false;
-    ops.iter()
+    apt_update_flags(false, ops).0
+}
+
+/// [`apt_update_needed`] starting from a known cache state (`stale`), also
+/// returning the state after `ops`, so a caller handling ops in several
+/// windows can carry it over.
+pub fn apt_update_flags(mut stale: bool, ops: &[OpNode]) -> (Vec<bool>, bool) {
+    let flags = ops
+        .iter()
         .map(|op| match &op.spec {
             OpSpec::Pkg(p) if p.manager == Manager::Apt => std::mem::take(&mut stale),
             _ => {
@@ -202,7 +209,8 @@ pub fn apt_update_needed(ops: &[OpNode]) -> Vec<bool> {
                 false
             }
         })
-        .collect()
+        .collect();
+    (flags, stale)
 }
 
 fn writes_apt_sources(k: &Key) -> bool {

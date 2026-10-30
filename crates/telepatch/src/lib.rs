@@ -11,13 +11,16 @@ pub mod facts;
 pub mod host;
 pub mod key;
 pub mod ops;
+pub mod optimize;
 pub mod plan;
+pub mod pool;
 pub mod resolver;
 pub mod role;
 pub mod sh;
 pub mod testing;
 pub mod trace;
 pub mod trailer;
+pub mod transport;
 
 pub use host::{Host, OpHandle, Scope, TraceError};
 pub use key::{Key, Value};

@@ -3,6 +3,7 @@
 
 use std::fmt::Write;
 
+use crate::engine::{Window, WindowKind};
 use crate::facts::os::Os;
 use crate::key::Key;
 use crate::trace::{Guard, Node, OpNode, Trace};
@@ -81,6 +82,74 @@ pub fn render_host(name: &str, os: &Os, trace: &Trace) -> String {
                 let _ = writeln!(out, "  #{i} barrier");
             }
             Node::RoleBegin(_) | Node::RoleEnd(_) => unreachable!(),
+        }
+    }
+    out
+}
+
+/// The role path (nested names joined with ` > `) each node was traced in;
+/// empty for nodes outside any role. Indexed by node.
+pub fn node_roles(trace: &Trace) -> Vec<String> {
+    let mut stack: Vec<&str> = Vec::new();
+    trace
+        .nodes
+        .iter()
+        .map(|n| match n {
+            Node::RoleBegin(name) => {
+                stack.push(name);
+                stack.join(" > ")
+            }
+            Node::RoleEnd(_) => {
+                let r = stack.join(" > ");
+                stack.pop();
+                r
+            }
+            _ => stack.join(" > "),
+        })
+        .collect()
+}
+
+fn role_name(r: &str) -> &str {
+    if r.is_empty() { "(none)" } else { r }
+}
+
+fn window_kind(k: WindowKind) -> &'static str {
+    match k {
+        WindowKind::NonMutating => "non-mutating",
+        WindowKind::ImplicitBarrier => "implicit barrier",
+        WindowKind::Final => "final",
+    }
+}
+
+/// Render the windows an executor received for one host: per window, its
+/// ops in order under role headings; a merged op lists the member ops and
+/// the roles they came from.
+pub fn render_windows(name: &str, os: &Os, blocking_reads: usize, windows: &[Window]) -> String {
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
+        "host {name} (os: {:?}/{:?} {})",
+        os.family, os.distro, os.version
+    );
+    let _ = writeln!(out, "blocking reads: {blocking_reads}");
+    for w in windows {
+        let _ = writeln!(out, "\nwindow {} ({})", w.number, window_kind(w.kind));
+        let mut role: Option<&str> = None;
+        for op in &w.ops {
+            let r = op.members[0].role.as_str();
+            if role != Some(r) {
+                let _ = writeln!(out, "role {}", role_name(r));
+                role = Some(r);
+            }
+            op_line(&mut out, op.id.0, &op.node, os);
+            if op.members.len() > 1 {
+                let from: Vec<String> = op
+                    .members
+                    .iter()
+                    .map(|m| format!("{} {}", role_name(&m.role), m.id))
+                    .collect();
+                let _ = writeln!(out, "      merged from {}", from.join(", "));
+            }
         }
     }
     out

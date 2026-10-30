@@ -42,4 +42,4 @@ if [ "$rc" -eq 0 ] && [ "$(stat -L -c '%U:%G' "$tp_p")" != 'root:root' ]; then
   if chown 'root:root' "$tp_p"; then changed=1; else rc=$?; fi
 fi
 exit "$rc"
-)
+) </dev/null

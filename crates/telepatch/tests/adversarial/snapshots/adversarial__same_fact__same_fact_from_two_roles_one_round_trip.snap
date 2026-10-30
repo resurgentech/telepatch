@@ -1,0 +1,52 @@
+---
+source: crates/telepatch/tests/adversarial/same_fact.rs
+expression: "plan(&Playbook { name: \"t\", run }, &super::common::ubuntu())"
+---
+host web1 (os: Debian/Ubuntu 24.04)
+blocking reads: 1
+
+window 2 (final)
+role a
+  #2 file as shell:root reads [] writes [file:/etc/a] post [file:/etc/a=Exists(true)]
+      | rc=0; changed=0
+      | tp_p='/etc/a'
+      | if [ -d "$tp_p" ]; then echo "telepatch: $tp_p is a directory" >&2; rc=1; fi
+      | tp_b='YQ=='
+      | if [ "$rc" -eq 0 ] && ! { [ -f "$tp_p" ] && printf %s "$tp_b" | base64 -d | cmp -s - "$tp_p"; }; then
+      |   tp_t=$(mktemp "$tp_p.tpXXXXXX") || rc=$?
+      |   if [ "$rc" -eq 0 ]; then
+      |     if printf %s "$tp_b" | base64 -d > "$tp_t"; then
+      |       if [ -e "$tp_p" ]; then
+      |         chmod --reference="$tp_p" "$tp_t"; chown --reference="$tp_p" "$tp_t" 2>/dev/null
+      |       else
+      |         chmod 644 "$tp_t"
+      |       fi
+      |       mv -f "$tp_t" "$tp_p"; rc=$?
+      |     else
+      |       rc=$?
+      |     fi
+      |     if [ "$rc" -eq 0 ]; then changed=1; else rm -f "$tp_t"; fi
+      |   fi
+      | fi
+role b
+  #6 file as shell:root reads [] writes [file:/etc/b] post [file:/etc/b=Exists(true)]
+      | rc=0; changed=0
+      | tp_p='/etc/b'
+      | if [ -d "$tp_p" ]; then echo "telepatch: $tp_p is a directory" >&2; rc=1; fi
+      | tp_b='Yg=='
+      | if [ "$rc" -eq 0 ] && ! { [ -f "$tp_p" ] && printf %s "$tp_b" | base64 -d | cmp -s - "$tp_p"; }; then
+      |   tp_t=$(mktemp "$tp_p.tpXXXXXX") || rc=$?
+      |   if [ "$rc" -eq 0 ]; then
+      |     if printf %s "$tp_b" | base64 -d > "$tp_t"; then
+      |       if [ -e "$tp_p" ]; then
+      |         chmod --reference="$tp_p" "$tp_t"; chown --reference="$tp_p" "$tp_t" 2>/dev/null
+      |       else
+      |         chmod 644 "$tp_t"
+      |       fi
+      |       mv -f "$tp_t" "$tp_p"; rc=$?
+      |     else
+      |       rc=$?
+      |     fi
+      |     if [ "$rc" -eq 0 ]; then changed=1; else rm -f "$tp_t"; fi
+      |   fi
+      | fi

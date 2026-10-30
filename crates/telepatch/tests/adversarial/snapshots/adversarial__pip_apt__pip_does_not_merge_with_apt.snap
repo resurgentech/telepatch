@@ -1,0 +1,44 @@
+---
+source: crates/telepatch/tests/adversarial/pip_apt.rs
+expression: "plan(&Playbook { name: \"t\", run }, &super::common::ubuntu())"
+---
+host web1 (os: Debian/Ubuntu 24.04)
+blocking reads: 0
+
+window 1 (final)
+role a
+  #1 pkg as shell:root reads [] writes [pkg:git, pkg:python3-pip] post [pkg:git=Installed, pkg:python3-pip=Installed]
+      | rc=0; changed=0; installed=()
+      | tp_want=('python3-pip' 'git')
+      | tp_missing=()
+      | export DEBIAN_FRONTEND=noninteractive
+      | for tp_n in "${tp_want[@]}"; do
+      |   [ "$(dpkg-query -W -f='${db:Status-Status}' "$tp_n" 2>/dev/null)" = installed ] || tp_missing+=("$tp_n")
+      | done
+      | if [ "$rc" -eq 0 ] && [ "${#tp_missing[@]}" -gt 0 ]; then
+      |   if ! find /var/lib/apt/lists -maxdepth 1 -type f ! -name lock 2>/dev/null | grep -q .; then apt-get -q update || rc=$?; fi
+      |   if [ "$rc" -eq 0 ]; then
+      |     apt-get -y -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold install "${tp_missing[@]}"
+      |     rc=$?
+      |     if [ "$rc" -eq 0 ]; then changed=1; installed=("${tp_missing[@]}"); fi
+      |   fi
+      | fi
+      merged from a #1, b #5
+  #2 pkg as shell:root reads [] writes [pkg:pip:flask, pkg:pip:requests] post [pkg:pip:flask=Installed, pkg:pip:requests=Installed]
+      | rc=0; changed=0; installed=()
+      | tp_want=('requests' 'flask')
+      | tp_missing=()
+      | if python3 -m pip --version >/dev/null 2>&1; then tp_pip=(python3 -m pip)
+      | elif command -v pip3 >/dev/null 2>&1; then tp_pip=(pip3)
+      | else echo 'telepatch: pip not found' >&2; rc=127; fi
+      | if [ "$rc" -eq 0 ]; then
+      |   for tp_n in "${tp_want[@]}"; do
+      |     "${tp_pip[@]}" show "$tp_n" >/dev/null 2>&1 || tp_missing+=("$tp_n")
+      |   done
+      |   if [ "${#tp_missing[@]}" -gt 0 ]; then
+      |     "${tp_pip[@]}" install "${tp_missing[@]}"
+      |     rc=$?
+      |     if [ "$rc" -eq 0 ]; then changed=1; installed=("${tp_missing[@]}"); fi
+      |   fi
+      | fi
+      merged from a #2, b #6

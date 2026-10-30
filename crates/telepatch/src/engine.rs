@@ -16,9 +16,12 @@ use crate::facts::os::Os;
 use crate::facts::query::FactQuery;
 use crate::host::{Host, TraceError};
 use crate::key::{Key, Value};
+use crate::ops::pkg::apt_update_flags;
+use crate::optimize::{Item, optimize};
+use crate::plan::node_roles;
 use crate::resolver::Resolved;
 use crate::role::Playbook;
-use crate::trace::{Node, NodeId, OpNode};
+use crate::trace::{Node, NodeId, OpNode, OpSpec};
 
 /// The host an executor call is about.
 #[derive(Debug, Clone)]
@@ -38,10 +41,23 @@ pub enum WindowKind {
     Final,
 }
 
+/// A trace op folded into a [`WindowOp`], with the role that traced it
+/// (nested roles joined with ` > `; empty outside any role).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Member {
+    pub id: NodeId,
+    pub role: String,
+}
+
+/// One op of a window. `id` is the earliest member's trace id. `members`
+/// lists the trace ops it stands for in trace order: one for an ordinary
+/// op, several for a merged `pkg` op (whose `node` then carries the union
+/// of names, effects and postconditions).
 #[derive(Debug, Clone)]
 pub struct WindowOp {
     pub id: NodeId,
     pub node: OpNode,
+    pub members: Vec<Member>,
 }
 
 /// One batch of ops for the executor. `number` counts round trips on this
@@ -53,9 +69,26 @@ pub struct Window {
     pub ops: Vec<WindowOp>,
 }
 
-/// The seam where T8's optimizer plugs in: turn the ops being flushed (in
-/// trace order) into the window the executor runs. Today it is the identity.
-pub fn prepare_window(number: usize, kind: WindowKind, ops: Vec<WindowOp>) -> Window {
+/// The seam where the optimizer plugs in: turn the items being flushed (ops
+/// and explicit barriers, in trace order) into the window the executor
+/// runs. Same-host `pkg` ops merge ([`crate::optimize`]), then the apt
+/// cache rule runs over the merged schedule. `apt_stale` is the host's apt
+/// cache state, carried from window to window.
+pub fn prepare_window(
+    number: usize,
+    kind: WindowKind,
+    items: Vec<Item>,
+    apt_stale: &mut bool,
+) -> Window {
+    let mut ops = optimize(items).schedule();
+    let nodes: Vec<OpNode> = ops.iter().map(|o| o.node.clone()).collect();
+    let (flags, stale) = apt_update_flags(*apt_stale, &nodes);
+    *apt_stale = stale;
+    for (op, flag) in ops.iter_mut().zip(flags) {
+        if let OpSpec::Pkg(p) = &mut op.node.spec {
+            p.update_cache = flag;
+        }
+    }
     Window { number, kind, ops }
 }
 
@@ -129,6 +162,7 @@ impl<E: Executor> Engine<E> {
         let mut fut = (playbook.run)(host.clone());
         let mut cx = Context::from_waker(Waker::noop());
         let mut window = 1;
+        let mut apt_stale = false;
         loop {
             let poll = fut.as_mut().poll(&mut cx);
             // A trace error is a playbook bug: fail before applying anything.
@@ -141,7 +175,7 @@ impl<E: Executor> Engine<E> {
                 Poll::Ready(Err(e)) => return Err(EngineError::Playbook(e)),
                 Poll::Ready(Ok(())) => {
                     let ids = pending_ids(&host);
-                    self.apply(&info, &host, window, WindowKind::Final, ids)
+                    self.apply(&info, &host, window, WindowKind::Final, ids, &mut apt_stale)
                         .await?;
                     return Ok(());
                 }
@@ -156,7 +190,8 @@ impl<E: Executor> Engine<E> {
                             queries.push(w.query.clone());
                         }
                     }
-                    self.block_round(&info, &host, window, &queries).await?;
+                    self.block_round(&info, &host, window, &queries, &mut apt_stale)
+                        .await?;
                     let values = self.executor.read_facts(&info, window, &queries).await;
                     for w in &waiting {
                         let i = queries.iter().position(|q| *q == w.query).unwrap();
@@ -185,10 +220,18 @@ impl<E: Executor> Engine<E> {
         host: &Host<V>,
         window: usize,
         queries: &[FactQuery],
+        apt_stale: &mut bool,
     ) -> Result<(), EngineError> {
         let hoist = non_mutating_ready(host);
-        self.apply(info, host, window, WindowKind::NonMutating, hoist)
-            .await?;
+        self.apply(
+            info,
+            host,
+            window,
+            WindowKind::NonMutating,
+            hoist,
+            apt_stale,
+        )
+        .await?;
 
         let keys: Vec<Key> = queries.iter().map(|q| q.fact.effect_key()).collect();
         let upto = {
@@ -219,8 +262,15 @@ impl<E: Executor> Engine<E> {
                     reads: keys,
                 },
             );
-            self.apply(info, host, window, WindowKind::ImplicitBarrier, ids)
-                .await?;
+            self.apply(
+                info,
+                host,
+                window,
+                WindowKind::ImplicitBarrier,
+                ids,
+                apt_stale,
+            )
+            .await?;
         }
         Ok(())
     }
@@ -232,23 +282,42 @@ impl<E: Executor> Engine<E> {
         window: usize,
         kind: WindowKind,
         ids: Vec<NodeId>,
+        apt_stale: &mut bool,
     ) -> Result<(), EngineError> {
-        if ids.is_empty() {
+        let (Some(first), Some(last)) = (ids.first(), ids.last()) else {
             return Ok(());
-        }
-        let ops: Vec<WindowOp> = {
-            let trace = host.trace_cell().borrow();
-            ids.iter()
-                .map(|id| match &trace.nodes[id.0] {
-                    Node::Op(op) => WindowOp {
-                        id: *id,
-                        node: op.clone(),
-                    },
-                    _ => unreachable!("only op nodes are applied"),
-                })
-                .collect()
         };
-        let w = prepare_window(window, kind, ops);
+        // The window's ops plus every explicit barrier traced between them.
+        let items: Vec<Item> = {
+            let trace = host.trace_cell().borrow();
+            let roles = node_roles(&trace);
+            let mut items = Vec::new();
+            let mut wanted = ids.iter().peekable();
+            for (i, node) in trace
+                .nodes
+                .iter()
+                .enumerate()
+                .take(last.0 + 1)
+                .skip(first.0)
+            {
+                match node {
+                    Node::Op(op) if wanted.next_if(|id| id.0 == i).is_some() => {
+                        items.push(Item::Op(WindowOp {
+                            id: NodeId(i),
+                            node: op.clone(),
+                            members: vec![Member {
+                                id: NodeId(i),
+                                role: roles[i].clone(),
+                            }],
+                        }));
+                    }
+                    Node::Barrier => items.push(Item::Barrier(NodeId(i))),
+                    _ => {}
+                }
+            }
+            items
+        };
+        let w = prepare_window(window, kind, items, apt_stale);
         self.executor
             .apply(info, &w)
             .await

@@ -148,8 +148,7 @@ fn json_escapes_names() {
         ("find", "exit 0"),
     ] {
         let p = bin.join(n);
-        std::fs::write(&p, format!("#!/bin/bash\n{body}\n")).unwrap();
-        std::fs::set_permissions(&p, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        write_exe(&p, &format!("#!/bin/bash\n{body}\n"));
     }
     let out = std::process::Command::new("bash")
         .arg("-c")
@@ -186,4 +185,21 @@ fn every_snapshot_template_is_valid_bash() {
         n += 1;
     }
     assert!(n >= 12, "only {n} snapshots checked");
+}
+
+/// Write an executable via a child `sh` so no write fd lives in this test
+/// process (a sibling thread's fork could inherit it; exec then fails with
+/// ETXTBSY).
+fn write_exe(p: &std::path::Path, text: &str) {
+    use std::io::Write;
+    let mut c = std::process::Command::new("sh")
+        .arg("-c")
+        .arg("cat > \"$1\" && chmod 755 \"$1\"")
+        .arg("sh")
+        .arg(p)
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    c.stdin.take().unwrap().write_all(text.as_bytes()).unwrap();
+    assert!(c.wait().unwrap().success());
 }

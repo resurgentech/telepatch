@@ -1,0 +1,48 @@
+---
+source: crates/telepatch/tests/adversarial/two_hosts.rs
+expression: "plan_all(&Playbook { name: \"t\", run }, &hosts)"
+---
+host u1 (os: Debian/Ubuntu 24.04)
+blocking reads: 0
+
+window 1 (final)
+role web
+  #1 pkg as shell:root reads [] writes [pkg:build-essential, pkg:git, pkg:libpq-dev, pkg:nginx] post [pkg:build-essential=Installed, pkg:git=Installed, pkg:libpq-dev=Installed, pkg:nginx=Installed]
+      | rc=0; changed=0; installed=()
+      | tp_want=('nginx' 'libpq-dev' 'build-essential' 'git')
+      | tp_missing=()
+      | export DEBIAN_FRONTEND=noninteractive
+      | for tp_n in "${tp_want[@]}"; do
+      |   [ "$(dpkg-query -W -f='${db:Status-Status}' "$tp_n" 2>/dev/null)" = installed ] || tp_missing+=("$tp_n")
+      | done
+      | if [ "$rc" -eq 0 ] && [ "${#tp_missing[@]}" -gt 0 ]; then
+      |   if ! find /var/lib/apt/lists -maxdepth 1 -type f ! -name lock 2>/dev/null | grep -q .; then apt-get -q update || rc=$?; fi
+      |   if [ "$rc" -eq 0 ]; then
+      |     apt-get -y -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold install "${tp_missing[@]}"
+      |     rc=$?
+      |     if [ "$rc" -eq 0 ]; then changed=1; installed=("${tp_missing[@]}"); fi
+      |   fi
+      | fi
+      merged from web #1, tools #4, tools #5
+
+host r1 (os: RedHat/Rocky 10.2)
+blocking reads: 0
+
+window 1 (final)
+role web
+  #1 pkg as shell:root reads [] writes [pkg:gcc, pkg:git, pkg:libpq-devel, pkg:make, pkg:nginx] post [pkg:gcc=Installed, pkg:git=Installed, pkg:libpq-devel=Installed, pkg:make=Installed, pkg:nginx=Installed]
+      | rc=0; changed=0; installed=()
+      | tp_want=('nginx' 'libpq-devel' 'gcc' 'make' 'git')
+      | tp_missing=()
+      | for tp_n in "${tp_want[@]}"; do
+      |   case "$tp_n" in
+      |     @*) dnf group list --installed 2>/dev/null | grep -qF -- "${tp_n#@}" || tp_missing+=("$tp_n");;
+      |     *) rpm -q --whatprovides "$tp_n" >/dev/null 2>&1 || tp_missing+=("$tp_n");;
+      |   esac
+      | done
+      | if [ "${#tp_missing[@]}" -gt 0 ]; then
+      |   dnf install -y "${tp_missing[@]}"
+      |   rc=$?
+      |   if [ "$rc" -eq 0 ]; then changed=1; installed=("${tp_missing[@]}"); fi
+      | fi
+      merged from web #1, tools #4, tools #5

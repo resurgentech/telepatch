@@ -30,4 +30,4 @@ if [ "${#tp_missing[@]}" -gt 0 ]; then
   if [ "$rc" -eq 0 ]; then changed=1; installed=("${tp_missing[@]}"); fi
 fi
 exit "$rc"
-)
+) </dev/null

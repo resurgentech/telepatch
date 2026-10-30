@@ -1,0 +1,41 @@
+---
+source: crates/telepatch/tests/adversarial/build_dep.rs
+expression: "plan(&Playbook { name: \"t\", run }, &super::common::ubuntu())"
+---
+host web1 (os: Debian/Ubuntu 24.04)
+blocking reads: 0
+
+window 1 (final)
+role toolchain
+  #1 pkg as shell:root reads [] writes [pkg:gcc, pkg:make] post [pkg:gcc=Installed, pkg:make=Installed]
+      | rc=0; changed=0; installed=()
+      | tp_want=('gcc' 'make')
+      | tp_missing=()
+      | export DEBIAN_FRONTEND=noninteractive
+      | for tp_n in "${tp_want[@]}"; do
+      |   [ "$(dpkg-query -W -f='${db:Status-Status}' "$tp_n" 2>/dev/null)" = installed ] || tp_missing+=("$tp_n")
+      | done
+      | if [ "$rc" -eq 0 ] && [ "${#tp_missing[@]}" -gt 0 ]; then
+      |   if ! find /var/lib/apt/lists -maxdepth 1 -type f ! -name lock 2>/dev/null | grep -q .; then apt-get -q update || rc=$?; fi
+      |   if [ "$rc" -eq 0 ]; then
+      |     apt-get -y -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold install "${tp_missing[@]}"
+      |     rc=$?
+      |     if [ "$rc" -eq 0 ]; then changed=1; installed=("${tp_missing[@]}"); fi
+      |   fi
+      | fi
+      merged from toolchain #1, toolchain #2
+  #3 pkg as shell:root reads [] writes [*]
+      | rc=0; changed=0; installed=()
+      | tp_want=('python3')
+      | tp_missing=()
+      | export DEBIAN_FRONTEND=noninteractive
+      | if [ "$rc" -eq 0 ]; then
+      |   if ! find /var/lib/apt/lists -maxdepth 1 -type f ! -name lock 2>/dev/null | grep -q .; then apt-get -q update || rc=$?; fi
+      | fi
+      | if [ "$rc" -eq 0 ]; then
+      |   tp_out=$(mktemp)
+      |   LC_ALL=C apt-get -y -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold build-dep "${tp_want[@]}" 2>&1 | tee "$tp_out"
+      |   rc=${PIPESTATUS[0]}
+      |   if [ "$rc" -eq 0 ] && grep -Eq '[1-9][0-9]* newly installed' "$tp_out"; then changed=1; fi
+      |   rm -f "$tp_out"
+      | fi
