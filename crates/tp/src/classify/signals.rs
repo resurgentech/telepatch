@@ -20,10 +20,20 @@ static DOWNLOADS: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\b(curl|wget)\b|https?://").unwrap());
 static VERSION_LIKE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\b\d+\.\d+(\.\d+)?\b|\bversion\b").unwrap());
+/// Commands that install or update a tool outside the package manager.
+/// `rustup` alone is not one: `rustup --version` is a probe and
+/// `rustup target add` manages a component.
 pub(super) static TOOL_INSTALLERS: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"\b(rustup|cargo\s+install|pip3?\s+install|npm\s+install\s+-g|go\s+install|make\s+install)\b")
-        .unwrap()
+    Regex::new(
+        r"\b(rustup-init|rustup\.sh|rustup\s+(self\s+update|update|install|toolchain\s+install|default)|cargo\s+install|pip3?\s+install|npm\s+install\s+-g|go\s+install|make\s+install)\b",
+    )
+    .unwrap()
 });
+
+/// A task whose `changed_when` is `false` observes; it never installs.
+pub(super) fn is_probe(t: &Task) -> bool {
+    t.changed_when.as_deref() == Some("false")
+}
 
 fn one_line(s: &str, max: usize) -> String {
     let s: String = s.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -155,7 +165,7 @@ pub fn signals(t: &Task, all: &[&Task]) -> Vec<String> {
     } else if is_cmd && DOWNLOADS.is_match(&cmd) || matches!(m, "get_url" | "uri") {
         out.push("downloads from the network".into());
     }
-    if TOOL_INSTALLERS.is_match(&cmd) {
+    if TOOL_INSTALLERS.is_match(&cmd) && !is_probe(t) {
         out.push("installs a tool outside the package manager".into());
     }
     if VERSION_LIKE.is_match(&cmd) || (!is_cmd && VERSION_LIKE.is_match(&args_text)) {
@@ -199,6 +209,12 @@ pub fn signals(t: &Task, all: &[&Task]) -> Vec<String> {
             .collect();
         if readers.is_empty() {
             out.push(format!("register `{r}`, read by nothing in scope"));
+        } else if readers.len() > 3 {
+            out.push(format!(
+                "register `{r}`, read by {} and {} more",
+                readers[..2].join(", "),
+                readers.len() - 2
+            ));
         } else {
             out.push(format!("register `{r}`, read by {}", readers.join(", ")));
         }

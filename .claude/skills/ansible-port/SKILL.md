@@ -134,7 +134,8 @@ definition.
 - **Dated sources.** Every source is one line of the form
   `Source: <url> (accessed YYYY-MM-DD)`. A line with a URL and no date
   fails the check; a URL inside backticks (a command, a table cell) is
-  not a source and is exempt. Prefer vendor documentation and issue threads; mark a
+  not a source and is exempt. The check is per line, so keep a code
+  span that holds a URL on one line. Prefer vendor documentation and issue threads; mark a
   blog or forum as secondary in the text; record a failed fetch instead of
   retrying the same URL. A claim that rests on one secondary source needs
   a second primary page, or is stated as unconfirmed under an Open line.
@@ -145,6 +146,8 @@ definition.
   settles it ("`docker run ... ls /usr/lib*/python3*/EXTERNALLY-MANAGED`
   on each image"). Generated text and fenced code are not checked.
 - **One row per task in Task intent.** Includes and loops are rows too.
+  A role another doc already covers is left out with `--skip-role` on
+  both the skeleton and the check, and the doc says which doc covers it.
   A row's "adequate" column is yes or no with the reason; "no" rows are
   what phase 2 fixes or flags, so an empty column is a missed task, not a
   clean one. A defect in a built primitive that the role trips over (a
@@ -184,7 +187,9 @@ definition.
 ## Procedure
 
 1. Mirror the originals under `conversion/ansible/` and record them in
-   `conversion/SOURCE` (repo, commit, sha256 per file).
+   `conversion/SOURCE` (repo, commit, sha256 per file). Hook-safe form:
+   `git -C <ansible> archive <commit> <paths...> | tar -x -C
+   conversion/ansible` (no shell redirects to computed paths).
 2. Copy `templates/understanding.md` to `conversion/<playbook>.md`.
 3. Follow `references/UNDERSTAND.md` level by level. Run `tp classify`
    on the mirrored copy (`conversion/ansible/<playbook>` with

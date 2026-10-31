@@ -128,6 +128,10 @@ pub fn check(name: &str, text: &str, opts: Options) -> Vec<String> {
                 problems.push(format!(
                     "{name}:{n}: 'Primitive gaps:' says nothing (write the gaps, or 'none')"
                 ));
+            } else if line.trim() == "Built-primitive defects:" {
+                problems.push(format!(
+                    "{name}:{n}: 'Built-primitive defects:' says nothing (write the defects, or 'none')"
+                ));
             }
         }
         if !fenced

@@ -48,9 +48,11 @@ Start from the tool's skeleton, run on the mirrored copy so citations
 share the doc's root:
 
 ```
-tp classify conversion/ansible/<playbook> --roles-path conversion/ansible/roles --intent-skeleton
+tp classify conversion/ansible/<playbook> --roles-path conversion/ansible/roles --intent-skeleton [--skip-role <role>]...
 ```
 
+`--skip-role` leaves out a role another doc already covers (say which doc
+in Purpose); pass the same flags to `tp check-understanding --playbook`.
 Paste it over the section. It fills three columns and leaves four empty.
 Then open each task in the YAML and fill the four by hand, one row at a
 time, in order. Read the row's Signals as what they are, observations;
@@ -61,11 +63,11 @@ changed every run" is not a verdict. The shape and the verdict are yours.
 |---|---|---|
 | Task | tool | `file:line` and the YAML name |
 | Intent | you | One sentence: the end state this task exists to reach. Not what it runs. "uv present in `/usr/local/bin`" not "runs the uv installer" |
-| Shape | you | One of: `package`, `repo`, `file`, `service`, `user`, `installer`, `fetch`, `git`, `check`, `derived fact`, `dispatch` (an include that picks a branch), `glue` (a command with no state worth modelling). Name the shape the intent has, not the module the YAML used |
+| Shape | you | One of: `package`, `repo`, `file`, `service`, `user`, `installer`, `fetch`, `git`, `check`, `derived fact`, `dispatch` (an include that picks a branch), `glue` (a command with no state worth modelling), `log` (`debug`, `meta`, `pause`: nothing on the host). Name the shape the intent has, not the module the YAML used |
 | Method | tool | The module and the arguments that matter. Add to it when the tool missed something that matters (`bash with pipefail`) |
 | Signals | tool | Observations: network execution, tool installers, `creates`, change reporting, registers and their readers, conditions, loops, users, handlers |
 | Adequate | you | `yes`, or `no:` and the reason. The test is whether the method can tell when the end state is already reached, and whether it reaches the *intended* state rather than whatever the source serves today |
-| Primitive | you | The telepatch primitive that fits the shape: `pkg`, `file`, `sh`, or one of the designed-not-built ones (`repo`, `svc`, `user`, `fetch`, `git`, `secret`, `tool`), or `none` with a one-line sketch of what it would need |
+| Primitive | you | The telepatch primitive that fits the shape: `pkg`, `file`, `sh`, or one of the designed-not-built ones (`repo`, `svc`, `user`, `fetch`, `git`, `secret`, `tool`), or `none` with a one-line sketch of what it would need. Control flow has fixed spellings: `dispatch` rows are `match`, `log` rows are `dropped`, a `check` row names the op that absorbs it (`unless on :130`), a `derived fact` row names the fact or scope that replaces it |
 
 `tp check-understanding <doc> --playbook <mirrored playbook> --roles-path
 <mirrored roles>` fails on an empty judgment cell and on a row count that
@@ -154,7 +156,13 @@ standing in for it, needs.
   remote script piped to a shell is refused by the shell hook, so
   download the script to a file first and mount it read-only into a
   throwaway container (`docker run --rm -v ./install.sh:/i.sh:ro <image>
-  sh /i.sh`), then run the tool's own version command.
+  sh /i.sh`), then run the tool's own version command. Run it through
+  `sh`: a read-only mount is not executable, so `./i.sh` fails.
+- "What does the source serve today" has a primary source for most
+  installers: the release manifest the installer itself reads (rustup's
+  `static.rust-lang.org/rustup/release-stable.toml` and
+  `dist/channel-rust-stable.toml`, uv's `APP_VERSION` in the served
+  script, a GitHub releases page). Cite that, dated, not a blog.
 
 ## 7. Recommendation and decision
 

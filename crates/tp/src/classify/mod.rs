@@ -34,6 +34,10 @@ pub struct Options {
     /// Paths in the output are relative to this. Default: the directory that
     /// contains the roles dir, else the playbook's directory.
     pub base: Option<PathBuf>,
+    /// Roles whose tasks are left out of the Task intent skeleton (and of
+    /// the `--playbook` row count) because another doc covers them. The
+    /// pattern report still includes them.
+    pub skip_roles: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -80,6 +84,8 @@ pub struct IntentRow {
     /// Observations about the task, not verdicts: `pipes network to sh`,
     /// `no creates`, `reports changed every run`, `register x, read by ...`.
     pub signals: Vec<String>,
+    /// Role the task came from, if any.
+    pub role: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -150,8 +156,21 @@ pub fn classify_playbook(opts: &Options) -> Result<Report, ClassifyError> {
     // first occurrence only.
     let mut seen = std::collections::HashSet::new();
     let mut tasks: Vec<&Task> = Vec::new();
+    // Other include sites of a task already counted (the same per_user.yml
+    // reached under a second loop), for the skeleton's signals.
+    let mut also_via: BTreeMap<(String, usize), Vec<String>> = BTreeMap::new();
     for t in loaded.plays.iter().flat_map(|p| &p.tasks) {
         if !seen.insert((t.file.as_str(), t.line)) {
+            if let Some(f) = t.include_chain.last() {
+                let site = match &f.loop_expr {
+                    Some(l) => format!("`{}:{}` (loop `{l}`)", f.file, f.line),
+                    None => format!("`{}:{}`", f.file, f.line),
+                };
+                let v = also_via.entry((t.file.clone(), t.line)).or_default();
+                if !v.contains(&site) {
+                    v.push(site);
+                }
+            }
             continue;
         }
         if let Some(d) = patterns::delegates_elsewhere(t) {
@@ -242,12 +261,20 @@ pub fn classify_playbook(opts: &Options) -> Result<Report, ClassifyError> {
 
     let intent_rows = tasks
         .iter()
-        .map(|t| IntentRow {
-            file: t.file.clone(),
-            line: t.line,
-            name: t.name.clone(),
-            method: signals::method(t),
-            signals: signals::signals(t, &tasks),
+        .filter(|t| !t.role.as_ref().is_some_and(|r| opts.skip_roles.contains(r)))
+        .map(|t| {
+            let mut sig = signals::signals(t, &tasks);
+            if let Some(v) = also_via.get(&(t.file.clone(), t.line)) {
+                sig.push(format!("also included from {}", v.join(", ")));
+            }
+            IntentRow {
+                file: t.file.clone(),
+                line: t.line,
+                name: t.name.clone().or_else(|| Some(signals::method(t))),
+                method: signals::method(t),
+                signals: sig,
+                role: t.role.clone(),
+            }
         })
         .collect();
 
@@ -274,7 +301,7 @@ impl Report {
 
     /// The `## Task intent` skeleton for the understanding doc: factual
     /// columns filled, judgment columns empty.
-    pub fn to_intent_skeleton(&self) -> String {
-        render::intent_skeleton(self)
+    pub fn to_intent_skeleton(&self, command: &str) -> String {
+        render::intent_skeleton(self, command)
     }
 }

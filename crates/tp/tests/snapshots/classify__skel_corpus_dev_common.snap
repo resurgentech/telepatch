@@ -22,4 +22,6 @@ expression: body
 | `roles/dev_common/tasks/main.yml:26` Various python dependancies |  |  | `pip` 3 name(s) | when `not (debian_based\|bool or arch_based\|bool)` |  |  |
 | `roles/dev_common/tasks/main.yml:34` Installing uv for python |  |  | `shell: set -o pipefail && curl -LsSf https://astral.sh/uv/install.sh \| UV_INSTALL_DIR=/usr/local/…` | downloads from the network and executes it; no creates; reports changed every run |  |  |
 
-Primitive gaps:
+Primitive gaps: 
+
+Built-primitive defects:

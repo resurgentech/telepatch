@@ -37,6 +37,10 @@ enum Command {
         /// (Intent, Shape, Adequate, Primitive) left empty.
         #[arg(long, conflicts_with = "json")]
         intent_skeleton: bool,
+        /// Leave this role's tasks out of the skeleton (another doc covers
+        /// it). Repeatable.
+        #[arg(long = "skip-role", value_name = "ROLE")]
+        skip_roles: Vec<String>,
     },
     /// Emit telepatch Rust from an Ansible role, a directory of roles or a
     /// playbook: one module per role, `// TODO(port)` where the mapping is
@@ -72,6 +76,10 @@ enum Command {
         /// Roles directory for `--playbook` (default: found from the playbook).
         #[arg(long, requires = "playbook")]
         roles_path: Option<PathBuf>,
+        /// With `--playbook`: roles whose tasks the doc does not row
+        /// (another doc covers them). Repeatable; must match the skeleton's.
+        #[arg(long = "skip-role", value_name = "ROLE", requires = "playbook")]
+        skip_roles: Vec<String>,
     },
 }
 
@@ -84,6 +92,7 @@ fn main() -> ExitCode {
             require_feedback,
             playbook,
             roles_path,
+            skip_roles,
         }) => match check_understanding::check_file(
             &doc,
             check_understanding::Options { require_feedback },
@@ -94,6 +103,7 @@ fn main() -> ExitCode {
                     playbook: pb,
                     roles_path,
                     base: None,
+                    skip_roles,
                 })
                 .map_err(|e| e.to_string())?;
                 let text = std::fs::read_to_string(&doc).map_err(|e| e.to_string())?;
@@ -164,17 +174,26 @@ fn main() -> ExitCode {
             base,
             json,
             intent_skeleton,
+            skip_roles,
         }) => {
+            // The provenance line shows the command as typed, so the doc's
+            // regeneration command is right whatever the working directory.
+            let invocation = std::env::args()
+                .enumerate()
+                .map(|(i, a)| if i == 0 { "tp".to_string() } else { a })
+                .collect::<Vec<_>>()
+                .join(" ");
             match classify_playbook(&Options {
                 playbook,
                 roles_path,
                 base,
+                skip_roles,
             }) {
                 Ok(report) => {
                     if json {
                         println!("{}", report.to_json());
                     } else if intent_skeleton {
-                        print!("{}", report.to_intent_skeleton());
+                        print!("{}", report.to_intent_skeleton(&invocation));
                     } else {
                         print!("{}", report.to_markdown());
                     }

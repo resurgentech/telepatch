@@ -14,6 +14,7 @@ fn run(name: &str) -> Report {
         playbook: fixture(name).join("site.yml"),
         roles_path: None,
         base: None,
+        skip_roles: Vec::new(),
     })
     .unwrap()
 }
@@ -42,7 +43,9 @@ macro_rules! skeleton_fixture {
     ($test:ident, $dir:literal) => {
         #[test]
         fn $test() {
-            insta::assert_snapshot!(run($dir).to_intent_skeleton());
+            insta::assert_snapshot!(
+                run($dir).to_intent_skeleton("tp classify site.yml --intent-skeleton")
+            );
         }
     };
 }
@@ -67,9 +70,10 @@ fn skel_corpus_dev_common() {
         playbook,
         roles_path: Some(corpus.join("roles")),
         base: Some(corpus),
+        skip_roles: Vec::new(),
     })
     .unwrap();
-    let skeleton = report.to_intent_skeleton();
+    let skeleton = report.to_intent_skeleton("tp classify dev_base.yml --intent-skeleton");
     // The provenance line carries the temp dir; drop it for the snapshot.
     let body: String = skeleton
         .lines()

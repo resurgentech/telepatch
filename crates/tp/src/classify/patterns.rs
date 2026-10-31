@@ -250,9 +250,10 @@ pub fn detect(tasks: &[&Task]) -> Vec<Vec<usize>> {
             .get("creates")
             .and_then(Value::as_str)
             .is_some_and(|c| c.contains("/bin/"));
-        if super::signals::NET_TO_SH.is_match(&cmd)
-            || super::signals::TOOL_INSTALLERS.is_match(&cmd)
-            || creates_bin
+        if !super::signals::is_probe(t)
+            && (super::signals::NET_TO_SH.is_match(&cmd)
+                || super::signals::TOOL_INSTALLERS.is_match(&cmd)
+                || creates_bin)
         {
             hits[i].push(ins);
         }
