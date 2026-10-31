@@ -24,19 +24,24 @@ Cite absences as "omits" or "no X" at the line that would hold them.
 
 ## Task intent
 
-One row per task in YAML order, written from the YAML before the
-classifier runs. Intent is the end state, not the command. Shape is one
-of package, repo, file, service, user, installer, fetch, git, check,
+Paste the output of `tp classify conversion/ansible/<playbook>
+--roles-path conversion/ansible/roles --intent-skeleton` over this
+section, then fill Intent, Shape, Adequate and Primitive by hand, row by
+row, from the YAML. Intent is the end state, not the command. Shape is
+one of package, repo, file, service, user, installer, fetch, git, check,
 derived fact, dispatch, glue. Adequate is yes, or no with the reason.
 Primitive is the telepatch primitive that fits the shape, built or not,
-or none with a sketch.
+or none with a sketch. Signals are the tool's observations, not shapes.
 
-| Task | Intent | Shape | Method | Adequate | Primitive |
-|---|---|---|---|---|---|
-| `<file>:<line>` <name> | <end state> | <shape> | <module and the arguments that matter> | <yes / no: reason> | <pkg / file / sh / repo / svc / user / fetch / git / secret / tool / none: sketch> |
+| Task | Intent | Shape | Method | Signals | Adequate | Primitive |
+|---|---|---|---|---|---|---|
+| `<file>:<line>` <name> | <end state> | <shape> | <tool: module and arguments> | <tool: observations> | <yes / no: reason> | <pkg / file / sh / repo / svc / user / fetch / git / secret / tool / none: sketch> |
 
 Primitive gaps: <one line per shape the role needs that has no built
 primitive, naming the rows; or none>.
+
+Built-primitive defects: <one line per place a built primitive renders
+the role wrongly on some distro, with the probe; or none>.
 
 ## Current method
 
@@ -91,6 +96,9 @@ none>.
 
 Primitive gaps: <each with "build first" or "marked hack" and why; or
 none>.
+
+Built-primitive defects: <each with the hack the port uses until
+telepatch is fixed; or none>.
 
 Decision: <chosen option>. <Decided by agent (agent-alone); not yet
 reviewed by the user. Or: decided by NAME on YYYY-MM-DD.>

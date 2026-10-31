@@ -12,7 +12,7 @@ use super::modules::short;
 use super::patterns::command_text;
 use crate::ansible::Task;
 
-static NET_TO_SH: LazyLock<Regex> = LazyLock::new(|| {
+pub(super) static NET_TO_SH: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"\b(curl|wget)\b[^|\n]*\|\s*(sudo\s+)?(env\s+\S+\s+)*(\w+=\S+\s+)*(sh|bash)\b")
         .unwrap()
 });
@@ -20,7 +20,7 @@ static DOWNLOADS: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\b(curl|wget)\b|https?://").unwrap());
 static VERSION_LIKE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\b\d+\.\d+(\.\d+)?\b|\bversion\b").unwrap());
-static TOOL_INSTALLERS: LazyLock<Regex> = LazyLock::new(|| {
+pub(super) static TOOL_INSTALLERS: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"\b(rustup|cargo\s+install|pip3?\s+install|npm\s+install\s+-g|go\s+install|make\s+install)\b")
         .unwrap()
 });

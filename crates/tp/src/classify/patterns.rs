@@ -24,6 +24,16 @@ pub const PATTERNS: &[Pattern] = &[
         primitive: "typed `os` fact and a `match`, or a per-family table on `pkg`",
     },
     Pattern {
+        id: "distro_guard",
+        title: "Guarded by a distro flag",
+        primitive: "the task's own primitive inside the `match` arm; the flag is not a dispatch point",
+    },
+    Pattern {
+        id: "installer",
+        title: "Installer outside the package manager",
+        primitive: "`tool` (binary, installed version, wanted version, source, install/update); not built",
+    },
+    Pattern {
         id: "per_user_loop",
         title: "Per-user loop",
         primitive: "`for u in users { let s = h.as_user(u); ... }`; the login shell is a fact of the user",
@@ -210,8 +220,10 @@ pub fn delegates_elsewhere(t: &Task) -> Option<&str> {
 pub fn detect(tasks: &[&Task]) -> Vec<Vec<usize>> {
     let mut hits: Vec<Vec<usize>> = vec![Vec::new(); tasks.len()];
     let id = |name: &str| PATTERNS.iter().position(|p| p.id == name).unwrap();
-    let (dd, pu, he, vp, rs, sp, cs, hd) = (
+    let (dd, dg, ins, pu, he, vp, rs, sp, cs, hd) = (
         id("distro_dispatch"),
+        id("distro_guard"),
+        id("installer"),
         id("per_user_loop"),
         id("hand_rolled_ensure"),
         id("version_pinning"),
@@ -222,9 +234,27 @@ pub fn detect(tasks: &[&Task]) -> Vec<Vec<usize>> {
     );
 
     for (i, t) in tasks.iter().enumerate() {
-        // Distro dispatch: a distro flag or fact in this task's own conditions.
-        if all_whens(t).any(|w| DISTRO.is_match(w)) {
-            hits[i].push(dd);
+        // Distro dispatch: an include or import whose own `when` tests a
+        // distro flag or fact. The same condition on any other task is a
+        // guard on that task, not a dispatch point.
+        let is_include =
+            short(&t.module).contains("include") || short(&t.module).contains("import");
+        if t.when.iter().any(|w| DISTRO.is_match(w)) {
+            hits[i].push(if is_include { dd } else { dg });
+        }
+        // Installer: a remote script piped to a shell, a tool installer
+        // outside the package manager, or `creates:` pointing at a binary.
+        let cmd = command_text(t).unwrap_or_default();
+        let creates_bin = t
+            .kw_args
+            .get("creates")
+            .and_then(Value::as_str)
+            .is_some_and(|c| c.contains("/bin/"));
+        if super::signals::NET_TO_SH.is_match(&cmd)
+            || super::signals::TOOL_INSTALLERS.is_match(&cmd)
+            || creates_bin
+        {
+            hits[i].push(ins);
         }
         // Per-user loop: a looped include over users, anything under one, or
         // a task that becomes a templated user.

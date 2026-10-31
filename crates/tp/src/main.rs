@@ -65,6 +65,13 @@ enum Command {
         /// Also require the trial-only `## skill-feedback` section.
         #[arg(long)]
         require_feedback: bool,
+        /// Also check that the Task intent table has one row per in-scope
+        /// task of this playbook (the mirrored copy under conversion/).
+        #[arg(long)]
+        playbook: Option<PathBuf>,
+        /// Roles directory for `--playbook` (default: found from the playbook).
+        #[arg(long, requires = "playbook")]
+        roles_path: Option<PathBuf>,
     },
 }
 
@@ -75,10 +82,32 @@ fn main() -> ExitCode {
         Some(Command::CheckUnderstanding {
             doc,
             require_feedback,
+            playbook,
+            roles_path,
         }) => match check_understanding::check_file(
             &doc,
             check_understanding::Options { require_feedback },
-        ) {
+        )
+        .and_then(|mut problems| {
+            if let Some(pb) = playbook {
+                let report = classify_playbook(&Options {
+                    playbook: pb,
+                    roles_path,
+                    base: None,
+                })
+                .map_err(|e| e.to_string())?;
+                let text = std::fs::read_to_string(&doc).map_err(|e| e.to_string())?;
+                let rows = check_understanding::intent_row_count(&text);
+                let want = report.intent_rows.len();
+                if rows != want {
+                    problems.push(format!(
+                        "{}: Task intent has {rows} rows; the playbook has {want} in-scope tasks",
+                        doc.display()
+                    ));
+                }
+            }
+            Ok(problems)
+        }) {
             Ok(problems) if problems.is_empty() => {
                 println!("ok");
                 ExitCode::SUCCESS

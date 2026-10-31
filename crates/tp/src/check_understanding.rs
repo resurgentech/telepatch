@@ -137,8 +137,11 @@ pub fn check(name: &str, text: &str, opts: Options) -> Vec<String> {
         {
             has_decision = true;
         }
+        // A URL in backticks is a command or a cell, not a source; the
+        // source-line rule applies to URLs outside backticks.
+        let outside_ticks: String = line.split('`').step_by(2).collect::<Vec<_>>().join(" ");
         if !fenced
-            && (line.contains("http://") || line.contains("https://"))
+            && (outside_ticks.contains("http://") || outside_ticks.contains("https://"))
             && !date_re().is_match(line)
         {
             problems.push(format!("{name}:{n}: source line without a YYYY-MM-DD date"));
@@ -184,6 +187,42 @@ pub fn check(name: &str, text: &str, opts: Options) -> Vec<String> {
             .unwrap_or(usize::MAX)
     });
     problems
+}
+
+/// Number of data rows in the `## Task intent` table (header and rule
+/// excluded), for the row-count check against the playbook.
+pub fn intent_row_count(text: &str) -> usize {
+    let mut fenced = false;
+    let mut in_section = false;
+    let mut rows = 0usize;
+    let mut seen_header = false;
+    for line in text.lines() {
+        if line.trim_start().starts_with("```") {
+            fenced = !fenced;
+            continue;
+        }
+        if fenced {
+            continue;
+        }
+        if line.starts_with("## ") {
+            in_section = line.trim_end() == TASK_INTENT;
+            seen_header = false;
+            continue;
+        }
+        if in_section && line.starts_with('|') {
+            if !seen_header {
+                seen_header = true;
+            } else if !line
+                .trim()
+                .trim_matches('|')
+                .chars()
+                .all(|c| c == '-' || c == '|' || c == ' ')
+            {
+                rows += 1;
+            }
+        }
+    }
+    rows
 }
 
 /// Read and check a file.

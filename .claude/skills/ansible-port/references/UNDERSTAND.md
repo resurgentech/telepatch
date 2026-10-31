@@ -7,11 +7,13 @@ edit run `tp check-understanding conversion/<playbook>.md`.
 
 Run from the telepatch checkout (`tp` is `cargo run -q -p tp --`).
 
-The order matters. Levels 1 to 3 are written from the YAML with nothing
-but your own reading. Level 4 is the tool's reading, pasted in afterwards
-so the two can be compared. Writing level 3 after level 4 produces a doc
-that restates the classifier, which is the failure this skill exists to
-prevent.
+The split matters more than the order. The tool owns the facts: which
+tasks exist, where, with which module and arguments, and what can be
+observed about each (level 3's skeleton, level 4's patterns). You own the
+judgments: what each task is for, what shape that is, whether the method
+is adequate, which primitive fits. Never copy a tool column into a
+judgment column; a doc that restates the classifier is the failure this
+skill exists to prevent.
 
 ## 1. Purpose
 
@@ -40,17 +42,34 @@ Written from the YAML, before the classifier output exists.
 ## 3. Task intent
 
 One table row per task, in YAML order, includes and loops included. This
-is the level where you understand the role. Write it from the YAML, in
-your own words, before running the classifier.
+is the level where you understand the role.
 
-| Column | What goes in it |
-|---|---|
-| Task | `file:line` and the YAML name |
-| Intent | One sentence: the end state this task exists to reach. Not what it runs. "uv present in `/usr/local/bin`" not "runs the uv installer" |
-| Shape | One of: `package`, `repo`, `file`, `service`, `user`, `installer`, `fetch`, `git`, `check`, `derived fact`, `dispatch` (an include or `when` that picks a branch), `glue` (a command with no state worth modelling). Name the shape the intent has, not the module the YAML used |
-| Method | How the YAML reaches it, in a phrase: the module and the arguments that matter (`shell: curl \| sh, unpinned, no creates`) |
-| Adequate | `yes`, or `no:` and the reason. The test is whether the method can tell when the end state is already reached, and whether it reaches the *intended* state rather than whatever the source serves today |
-| Primitive | The telepatch primitive that fits the shape: `pkg`, `file`, `sh`, or one of the designed-not-built ones (`repo`, `svc`, `user`, `fetch`, `git`, `secret`, `tool`), or `none` with a one-line sketch of what it would need |
+Start from the tool's skeleton, run on the mirrored copy so citations
+share the doc's root:
+
+```
+tp classify conversion/ansible/<playbook> --roles-path conversion/ansible/roles --intent-skeleton
+```
+
+Paste it over the section. It fills three columns and leaves four empty.
+Then open each task in the YAML and fill the four by hand, one row at a
+time, in order. Read the row's Signals as what they are, observations;
+"downloads from the network and executes it" is not a shape, and "reports
+changed every run" is not a verdict. The shape and the verdict are yours.
+
+| Column | Who fills it | What goes in it |
+|---|---|---|
+| Task | tool | `file:line` and the YAML name |
+| Intent | you | One sentence: the end state this task exists to reach. Not what it runs. "uv present in `/usr/local/bin`" not "runs the uv installer" |
+| Shape | you | One of: `package`, `repo`, `file`, `service`, `user`, `installer`, `fetch`, `git`, `check`, `derived fact`, `dispatch` (an include that picks a branch), `glue` (a command with no state worth modelling). Name the shape the intent has, not the module the YAML used |
+| Method | tool | The module and the arguments that matter. Add to it when the tool missed something that matters (`bash with pipefail`) |
+| Signals | tool | Observations: network execution, tool installers, `creates`, change reporting, registers and their readers, conditions, loops, users, handlers |
+| Adequate | you | `yes`, or `no:` and the reason. The test is whether the method can tell when the end state is already reached, and whether it reaches the *intended* state rather than whatever the source serves today |
+| Primitive | you | The telepatch primitive that fits the shape: `pkg`, `file`, `sh`, or one of the designed-not-built ones (`repo`, `svc`, `user`, `fetch`, `git`, `secret`, `tool`), or `none` with a one-line sketch of what it would need |
+
+`tp check-understanding <doc> --playbook <mirrored playbook> --roles-path
+<mirrored roles>` fails on an empty judgment cell and on a row count that
+differs from the playbook's in-scope tasks.
 
 Shapes that are easy to misread:
 
@@ -74,9 +93,16 @@ Shapes that are easy to misread:
   that installs, configures, enables or fetches something does not,
   whatever module it uses.
 
-After the table, a short list: **Primitive gaps**, one line per shape
-with no built primitive that the role needs, naming the rows. This list
-feeds level 7. If every row has a built primitive, write "none".
+After the table, two short lists that feed level 7:
+
+- **Primitive gaps**, one line per shape with no built primitive that the
+  role needs, naming the rows. If every row has a built primitive, write
+  "none".
+- **Built-primitive defects**, one line per place a built primitive
+  renders the role wrongly on some distro (a dnf group the role names by
+  display name, which dnf5 resolves only by id), with the probe that
+  shows it. "none" when there are none. These are filed against
+  telepatch; the port works around them with a marked hack.
 
 ## 4. Current method
 
@@ -121,7 +147,14 @@ standing in for it, needs.
 - Unsettled points are `Open:` lines phrased as a command whose output
   settles it, preferably something the equivalence oracle captures anyway.
 - Local probes (read-only commands run against the real images) go in a
-  table with the date, the command and the result per image.
+  table with the date, the command and the result. One column per image
+  when the results differ per image; grouped by outcome ("absent on all
+  four Debian images, present on the rest") when they do not.
+- An installer row needs the tool run once for its version output. A
+  remote script piped to a shell is refused by the shell hook, so
+  download the script to a file first and mount it read-only into a
+  throwaway container (`docker run --rm -v ./install.sh:/i.sh:ro <image>
+  sh /i.sh`), then run the tool's own version command.
 
 ## 7. Recommendation and decision
 
@@ -143,6 +176,8 @@ the port and in what the oracle sees. Then the four lists:
 - After equivalence (change what the oracle sees; not made yet).
 - Primitive gaps, carried from level 3, each with "build first" or
   "marked hack" and the reason.
+- Built-primitive defects, carried from level 3, each with the hack the
+  port uses until telepatch is fixed.
 
 End with one `Decision:` line. Interactive: who decided and when.
 Agent-alone: take the recommendation and write
@@ -166,6 +201,6 @@ check-understanding` accepts it and requires it only with
 - `tp check-understanding conversion/<playbook>.md` prints `ok`.
 - Every citation was spot-checked against the file.
 - Counts in Outcomes were rechecked by command, not by eye.
-- Task intent has as many rows as the YAML has tasks (count them with
-  `grep -c '^- name:'` across the role's task files, plus the playbook's
-  own tasks), and no row has an empty Adequate or Primitive column.
+- `tp check-understanding <doc> --playbook <mirrored playbook>
+  --roles-path <mirrored roles>` prints `ok`: it counts the Task intent
+  rows against the playbook and rejects empty judgment cells.
