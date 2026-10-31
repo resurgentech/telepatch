@@ -1,116 +1,199 @@
 # telepatch
 
-Configuration management for people who are tired of waiting for Ansible.
+Configuration management in Rust, for people who are tired of waiting for
+Ansible.
 
-Roles and tasks are plain Rust. Running a playbook traces it into a per-host
-graph, merges what can be merged, checks everything that can fail before
-touching a host, and then streams the result into persistent shells over SSH.
-Nothing is installed on the targets.
+A role is an `async fn`. Running a playbook traces it into a per-host graph,
+merges what can be merged, checks everything that can fail before touching a
+host, and streams the result into a persistent shell. Nothing is installed on
+the target.
 
-**Status: design.** There is no code yet. The design is in
-[`docs/execution-model.html`](docs/execution-model.html) and this README is a
-summary of it.
+**Status: experimental, 0.1.** The engine, the local and `docker exec`
+transports, three primitives and the Ansible conversion tooling exist and are
+tested. SSH, rollback, secrets and the rest of the primitive set are designed
+but not built yet. See [What exists today](#what-exists-today) before you
+depend on anything.
 
 ## Why
 
 Ansible pays a full connect, copy module, run, collect, disconnect cycle per
-task per host, buffers output until a task finishes, and has no way to see
-that five roles each want to `apt install` something and do it once. For a
-forty-task playbook on a hundred hosts that is thousands of round trips and
-tens of `apt` invocations per host, and you cannot tell whether a slow task is
-working or hung.
+task per host, buffers output until a task finishes, and cannot see that five
+roles each want to `apt install` something and do it once. For a forty-task
+playbook on a hundred hosts that is thousands of round trips, and you cannot
+tell whether a slow task is working or hung.
 
-telepatch keeps the vocabulary (variables, roles, tasks, playbooks, inventory)
-and changes the execution model:
+telepatch keeps the vocabulary (roles, playbooks, vars, hosts) and changes the
+execution model:
 
-- **Code, not YAML.** A role is an `async fn`. Distro dispatch is a `match`,
-  per-user work is a `for`, parsing stdout is `.split(':')`.
-- **Trace, then plan.** Ops record themselves instead of running. The engine
-  sees the whole playbook before anything executes, so package installs
-  across all roles collapse into one `apt` call per host.
-- **Persistent shells.** One SSH connection per host, a root shell and a
-  login shell per user the playbook touches, opened once. Ops are pipelined
-  into them the way an operator would type them.
-- **A terminal per op.** Ops that a human might watch get a PTY; the raw
-  stream is logged with timestamps and replayable in a TUI or web UI.
-- **Fail before you change anything.** Secrets, downloads, template
-  rendering, facts and permission checks all run and must pass on every host
-  before the first mutation.
-- **Roles roll back.** Each primitive captures what it is about to change.
-  A failed role on a host is undone on that host, and the plan says up front
-  which ops are not reversible.
+- **Code, not YAML.** Distro dispatch is a `match`, per-user work is a `for`,
+  a condition is an `if`. The compiler checks it.
+- **Trace, then plan.** Ops record themselves instead of running, so the
+  engine sees the whole playbook before anything executes. Package installs
+  across roles collapse into one package manager call per host.
+- **Persistent shells.** One shell per host, plus a login shell per user the
+  playbook touches, opened once. Ops are pipelined into them the way an
+  operator would type them, and each reports a typed result.
+- **Fail before you change anything.** Facts, package state and permissions
+  are gathered up front. A host that cannot complete the plan is not started.
+- **Live output.** Every op streams as it runs, prefixed by host, and the run
+  is logged as JSONL for replay.
 
-## What a role looks like
+## A role
 
 ```rust
-#[role]
-async fn rust_build(h: &Host) {
-    match h.os.family {
-        Debian => h.pkg(["build-essential", "libclang-dev"]),
-        RedHat => h.pkg(["gcc", "clang-devel"]),
-        Arch   => h.pkg(["base-devel", "clang"]),
-    }.installed();
+use serde::Deserialize;
+use std::process::ExitCode;
+use telepatch::facts::os::Family;
+use telepatch::{Host, Playbook, PlaybookFuture, TraceError, role, sh};
 
-    for u in h.vars.admin_users.iter().chain(["root"]) {
+#[derive(Deserialize, Default)]
+struct Vars {
+    #[serde(default)]
+    admin_users: Vec<String>,
+}
+
+#[role]
+async fn rust_build(h: &Host<Vars>) -> Result<(), TraceError> {
+    match h.os.family {
+        Family::Debian => h.pkg(["g++", "libssl-dev", "pkg-config", "clang", "musl-tools"]),
+        Family::RedHat => h.pkg(["gcc-c++", "openssl-devel", "pkgconf-pkg-config", "clang"]),
+        Family::Arch => h.pkg(["openssl", "pkgconf", "clang", "musl"]),
+        Family::Other(_) => return Err(TraceError::new("unsupported distro")),
+    };
+
+    for u in h.vars.admin_users.iter().map(String::as_str).chain(["root"]) {
         let s = h.as_user(u);
-        let want = &h.vars.rust_version;
-        sh!(s, "curl -sSf https://sh.rustup.rs | sh -s -- -y", unless = "which cargo");
-        sh!(s, "rustup update", unless = "rustc --version | grep -q {want}");
+        if !s.bin_exists("cargo").await {
+            sh!(s, "curl -sSf https://sh.rustup.rs | sh -s -- -y");
+        }
         for tool in ["cargo-deb", "cargo-generate-rpm"] {
             sh!(s, "cargo install --locked {tool}", creates = "~/.cargo/bin/{tool}");
         }
     }
+    Ok(())
+}
+
+fn entry(h: Host<Vars>) -> PlaybookFuture {
+    Box::pin(async move { rust_build(&h).await })
+}
+
+fn main() -> ExitCode {
+    telepatch::cli::main(&[Playbook { name: "rust_build", run: entry }])
 }
 ```
 
-Structured ops (`pkg`, `file`, `git`, `fetch`, `svc`, `user`) are builders
-with typed options and known inverses. Anything that is really a shell line is
-`sh!`, with shell-quoted interpolation and `unless` / `creates` / `changed_if`
-so check-then-act is one line.
+That is a complete playbook binary. Nothing in the role runs when it is
+called: `h.pkg` and `sh!` append nodes to the host's trace and return
+handles. A fact read such as `bin_exists` is answered from the trace when the
+playbook itself wrote the answer, and from the host otherwise. Structured ops
+are builders with typed options; anything that is really a shell line is
+`sh!`, with shell-quoted interpolation and `unless`, `creates` and
+`changed_if` so check-then-act is one line.
+
+The binary it builds has three commands:
+
+```
+rust_build list                                  # playbook names
+rust_build plan rust_build --distro rockylinux10 # the optimized plan, nothing applied
+rust_build run  rust_build --local --vars v.toml # apply to this machine
+```
+
+`plan --distro` renders against an embedded os-release fixture for any of the
+thirteen supported distros, so you can see what a host would get without
+having one. `run --local` applies to the machine the binary is on, as root or
+through `sudo -n`.
 
 ## How it runs
 
-1. **Trace.** The playbook runs on the controller and records ops. Fact reads
-   about state the playbook itself wrote are answered from the trace; reads of
-   pre-existing state sync with the host. Conditionals on whether an op
-   changed something are guards on the dependent op, not control flow.
-2. **Prepare.** Per host, in parallel: resolve secrets, fetch downloads to the
-   host and verify checksums, render templates, gather facts in bulk, check
-   `sudo`. Any failure stops the run with nothing changed.
-3. **Apply.** The per-host graph is optimized (effect-based ordering, merge
-   of same-kind ops, hosts in parallel) and streamed into the host's shells.
-   Each op reports a typed result in a nonce-tagged trailer.
-4. **Roll back** a role on a host if one of its ops fails, from an undo log
-   built as the role ran.
+1. **Trace.** The playbook runs on the controller and records ops. Reads of
+   state the playbook already wrote are answered from the trace; reads of
+   pre-existing state cost one round trip. A read that needs a pending
+   mutation's effect forces that mutation to apply first.
+2. **Prepare.** Per host: gather the os, check package state, check what the
+   plan will install, verify permissions. A host that fails here is not
+   touched.
+3. **Apply.** The per-host graph is ordered by effect (what each op reads and
+   writes), same-kind ops are merged, and the windows are streamed into the
+   host's shells. Each op runs in a subshell and ends with a nonce-tagged
+   trailer carrying its typed result. A failure halts that host inside the
+   shell itself; later roles on it are reported as not run.
 
-## Primitives
+The full design, including the parts not built yet, is in
+[`docs/execution-model.html`](docs/execution-model.html).
 
-Sized to the roles in the existing Ansible repo this replaces.
+## What exists today
 
-| Primitive | Replaces |
+| Area | State |
 |---|---|
-| `pkg` | apt, dnf, yum, pacman, build-dep, pip |
-| `repo` | apt_key, apt_repository, the keyring + sources.list dance |
-| `file` | file, template, copy, lineinfile, replace |
-| `sh` | shell, command, and the hand-rolled check-then-act around them |
-| `svc` | systemd, every `shell: systemctl …`, daemon-reload handlers |
-| `user` | user, authorized_key |
-| `as_user` | become_user + `getent passwd` + `$SHELL -lc` |
-| `secret` | vars_prompt, `bao read` via delegate_to |
-| `fetch` | get_url, uri, local_action get_url |
-| `git` | `shell: git clone …` with `creates:` |
+| Trace, resolver, engine loop, optimizer | Built, with snapshot tests and an adversarial plan suite |
+| `pkg` (apt, dnf, yum, pacman, pip, apt build-dep) | Built; merged across roles; apt cache refreshed once when stale |
+| `file` (content, line, line_re, dir, absent, mode, owner) | Built |
+| `sh!` with `unless`, `creates`, `changed_if`; `raw`; `barrier` | Built |
+| `as_user` | Built; each op runs in a fresh login shell of that user |
+| Facts: `os`, `exists`, `bin_exists`, `bin_version` | Built; `os` from os-release across 13 distros |
+| Transports | Local (`bash`, `sudo -n bash`) and `docker exec` |
+| CLI, JSONL log, static musl binaries | Built |
+| Guards (`.when(op.changed())`) | Traced and planned; the executor refuses them at prepare |
+| SSH transport, per-user persistent shells | Designed, not built |
+| `repo`, `svc`, `user`, `fetch`, `git`, `secret` | Designed, not built |
+| Role rollback, templates, multi-host runs | Designed, not built |
 
-## Documentation
+The first real playbooks are in [`tp_basic`](https://github.com/resurgentech/tp_basic),
+which ports a set of Ansible container-build playbooks and proves each port
+equivalent by building the same image both ways and diffing the result.
 
-- [`docs/execution-model.html`](docs/execution-model.html): the design note.
-  Tracing and the fact resolver, shells over SSH, the engine loop and
-  optimizer, the Ansible corpus survey, primitives, syntax, prepare phase,
-  transactions, error handling, and what to prototype first.
+## Porting from Ansible
 
-## Non-goals, for now
+The `tp` binary and the `ansible-port` skill turn an Ansible playbook into
+telepatch code in two phases, understand then port:
 
-- Running anything other than a shell on the target.
-- Non-Linux targets beyond what their shell happens to support.
-- Resuming a run after connection loss (it rolls back instead).
-- Speculative planning across runs. The design leaves room for it; the
-  measured count of blocking fact reads decides whether it is ever built.
+```
+tp classify playbooks/container/rust.yml   # which Ansible patterns each task uses
+tp import roles/rust_build --report        # a Rust draft with TODO(port) where the mapping is not mechanical
+tp check-understanding conversion/rust.md  # lint an understanding doc: levels, dated sources, a decision
+```
+
+The skill in [`.claude/skills/ansible-port/`](.claude/skills/ansible-port/)
+drives the process, with a human reviewing each level or an agent alone. It
+writes down what a playbook is for, whether its method is still current, and
+what the port kept, dropped and fixed, then folds that into the code's
+comments and deletes the YAML.
+
+## Building and testing
+
+Rust stable (pinned by `rust-toolchain.toml`), and `just`. Docker is needed
+only for the live tests.
+
+```
+just test            # cargo test --workspace: the gate
+just lint            # clippy with -D warnings, rustfmt check
+just test-live-os    # read `os` through docker exec on all 13 images
+just test-live-pkg   # the package playbook end to end on ubuntu:24.04 and rockylinux:10
+just musl-example    # build examples/hello static for x86_64-unknown-linux-musl
+```
+
+Playbook binaries are meant to be built static and copied anywhere:
+`tp_basic` bind-mounts one into a `docker build`.
+
+## Layout
+
+```
+crates/telepatch         the engine: trace, resolver, optimizer, executor, shell pool, transports, ops, facts, cli
+crates/telepatch-macros  sh! and #[role]
+crates/tp                classify, import, check-understanding
+.claude/skills/          the ansible-port skill
+docs/execution-model.html
+```
+
+Playbooks and roles never live here. They are programs that depend on
+`telepatch`, like `tp_basic`.
+
+## Contributing
+
+Issues and pull requests are welcome. The design note is the contract: a
+change to the engine, a primitive or the shell protocol should match it or
+change it. Keep `just test` and `just lint` green, and add a test first.
+
+## License
+
+MIT. See [LICENSE](LICENSE).
