@@ -14,9 +14,9 @@ OUT = sys.argv[2]
 GREEN = "#36e836"
 
 
-UP = 3  # trace at 3x: the JPEGs are 1152 px wide and their edges are ragged
-INK = 128  # luminance below this is ink; the midpoint keeps stroke weight after the blur
-BLUR = 0.5  # gaussian radius in source pixels, enough to hide JPEG noise on the edges
+UP = 4  # trace at 4x so the curve fit has room
+INK = 150  # luminance below this is ink; a little above the midpoint keeps thin hatching through the blur
+BLUR = 1.1  # gaussian radius in source pixels: smooths the raster's edge roughness before the trace
 
 
 def channel(arr):
@@ -37,8 +37,10 @@ def layers(path):
     return black, green
 
 
-def frame_box(black):
-    """Inner box of the drawn border: rows/cols that are nearly all ink."""
+def frame_box(path):
+    """Inner box of the drawn border, from the raw image: rows/cols that are nearly all ink."""
+    im = np.asarray(Image.open(path).convert("L")).astype(int)
+    black = im < 100
     h, w = black.shape
     rows = np.where(black.mean(axis=1) > 0.6)[0]
     cols = np.where(black.mean(axis=0) > 0.6)[0]
@@ -46,7 +48,7 @@ def frame_box(black):
     bot = rows[rows > 3 * h // 4].min() if (rows > 3 * h // 4).any() else h
     left = cols[cols < w // 4].max() + 1 if (cols < w // 4).any() else 0
     right = cols[cols > 3 * w // 4].min() if (cols > 3 * w // 4).any() else w
-    return left, top, right, bot
+    return left * UP, top * UP, right * UP, bot * UP
 
 
 def content_box(mask, pad=8):
@@ -54,7 +56,7 @@ def content_box(mask, pad=8):
     return max(xs.min() - pad, 0), max(ys.min() - pad, 0), xs.max() + pad, ys.max() + pad
 
 
-def trace(mask, turd=4 * UP * UP, alphamax=1.0, opttolerance=0.6):
+def trace(mask, turd=4 * UP * UP, alphamax=1.3334, opttolerance=1.2):
     bmp = potrace.Bitmap(~mask)  # potracer: zero is ink
     path = bmp.trace(turdsize=turd, alphamax=alphamax, opticurve=True, opttolerance=opttolerance)
     parts = []
@@ -81,7 +83,7 @@ def crop(mask, box):
 
 # Man: drop the drawn frame.
 m_black, m_green = layers(f"{DOCS}/telepath simple.jpg")
-mb = frame_box(m_black)
+mb = frame_box(f"{DOCS}/telepath simple.jpg")
 mb = (mb[0] + 6 * UP, mb[1] + 6 * UP, mb[2] - 6 * UP, mb[3] - 6 * UP)
 m_black, m_green = crop(m_black, mb), crop(m_green, mb)
 m_h, m_w = m_black.shape
@@ -97,8 +99,7 @@ print(f"man {m_w}x{m_h} box {mb}; computer {c_w}x{c_h} box {cb}", file=sys.stder
 man_black = trace(m_black)
 man_green = trace(m_green, turd=2 * UP * UP)
 comp_black = trace(c_black)
-# The screen text is a pixel font: straight edges and square corners, so no curve smoothing.
-comp_green = trace(c_green, turd=2 * UP * UP, alphamax=0.0, opttolerance=0.2)
+comp_green = trace(c_green, turd=2 * UP * UP)
 
 # Canvas.
 W, H = 2200, 1000
