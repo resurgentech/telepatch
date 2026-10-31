@@ -1,7 +1,7 @@
 ---
 name: ansible-port
 description: Port an Ansible playbook or role to telepatch Rust in two phases, an understanding doc reviewed level by level, then the port and its equivalence test.
-version: 1
+version: 2
 ---
 
 # ansible-port
@@ -16,8 +16,11 @@ agent (agent-alone mode).
 
 1. **Understand.** Write one understanding doc per playbook. Method:
    `references/UNDERSTAND.md`. Template: `templates/understanding.md`.
-2. **Port.** Write the Rust, dry-run it with `plan`, prove it equivalent.
-   Method and the Ansible-to-telepatch mapping: `references/PORT.md`.
+2. **Port.** (v2) Run `tp import` for a first draft, resolve each
+   `TODO(port)` against the YAML and the doc, rewrite into idiomatic Rust,
+   dry-run with `plan`, prove it equivalent on the images and present the
+   diff. Method, the TODO table and the Ansible-to-telepatch mapping:
+   `references/PORT.md`. The understanding phase is unchanged from v1.
 
 ## When to use
 
@@ -125,7 +128,9 @@ the mechanical rules; the rest is the reviewer's.
 3. Follow `references/UNDERSTAND.md` level by level.
 4. `tp check-understanding conversion/<playbook>.md` until it prints `ok`.
 5. Review (interactive) or record the decision (agent-alone).
-6. Follow `references/PORT.md`.
+6. Follow `references/PORT.md`: `tp import`, resolve the TODOs, rewrite,
+   `cargo build`, `tp-basic plan`, plan snapshots on all 13 distros,
+   `ANSIBLE_SHA=<SOURCE commit> just test-container`, present the diff.
 7. When equivalence passes, move the understanding into code comments and
    remove the role from `conversion/`.
 
@@ -140,6 +145,15 @@ the mechanical rules; the rest is the reviewer's.
 - Filling a section to fill it. If there are no bugs the oracle cannot
   see, write "none found". Invented findings cost the reviewer more than
   an empty section.
+- Trusting the emitter. It never guesses, but it copies: dead branches,
+  duplicate package names, and a `changed_if` text the YAML never
+  matched all come through. `if false /* TODO */` is inert code, not a
+  port. A role with mostly TODOs (`rust_build`) is a redesign.
+- Running the equivalence test against ansible `master` for a port of
+  an older commit. Set `ANSIBLE_SHA` to the `conversion/SOURCE` commit.
+- Accepting a plan snapshot to make a test pass. Read it against
+  Outcomes first; on a re-port, a changed snapshot is a failure.
 - Treating this skill as finished: v1 was built from one trial
-  (`dev_base.yml`). Record what got in the way in a `## skill-feedback`
+  (`dev_base.yml`); v2's port phase awaits its own (a blind re-port of
+  `rust_kernel`). Record what got in the way in a `## skill-feedback`
   section of the trial doc.
