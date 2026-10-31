@@ -144,3 +144,12 @@ are appended, never edited in; a hook refuses rewrites.
   `src_repos.rs`, `kernel_build.rs`, `rust_build.rs`; docs and playbook
   mirrors removed. Playbook renamed `container/rust` (oracle naming).
 - Commits: tp_basic 875b5da, 1a5d208, cf00682, 1af5940
+
+## 2026-10-30 — T21 `latest_kernel_build.yml`; goal 1 closes
+
+- `rust_kernel` port (`changed_if` on what rustup prints, `creates` for
+  bindgen); `just test-acceptance` green end to end (7/7 identical);
+  `conversion/` holds no ported role; `just test-matrix`: 34/40 pass,
+  debian13 diff (`sq`, merge alternative, OQ4), fedora43/44 error
+  (dnf5 rejects `@Development Tools` by name).
+- Commits: tp_basic 875b5da, b84bb7f, 18e28ab
