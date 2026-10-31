@@ -16,6 +16,7 @@
 mod modules;
 mod patterns;
 mod render;
+mod signals;
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -66,10 +67,27 @@ pub struct CategoryCount {
     pub primitives: Vec<String>,
 }
 
+/// One row of the `## Task intent` skeleton: the factual columns the tool
+/// fills (task, method, signals). The judgment columns (intent, shape,
+/// adequate, primitive) are left to the agent; the tool never guesses them.
+#[derive(Debug, Clone, Serialize)]
+pub struct IntentRow {
+    pub file: String,
+    pub line: usize,
+    pub name: Option<String>,
+    /// The module and the arguments that matter, in a phrase.
+    pub method: String,
+    /// Observations about the task, not verdicts: `pipes network to sh`,
+    /// `no creates`, `reports changed every run`, `register x, read by ...`.
+    pub signals: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct Report {
     /// The command, as shown in the provenance line.
     pub command: String,
+    /// The Task intent skeleton, one row per in-scope task in load order.
+    pub intent_rows: Vec<IntentRow>,
     /// In-scope tasks (excludes skipped ones).
     pub total_tasks: usize,
     /// In-scope tasks that matched no pattern and have a mapped module.
@@ -222,8 +240,20 @@ pub fn classify_playbook(opts: &Options) -> Result<Report, ClassifyError> {
         .filter_map(|c| cats.remove(c))
         .collect();
 
+    let intent_rows = tasks
+        .iter()
+        .map(|t| IntentRow {
+            file: t.file.clone(),
+            line: t.line,
+            name: t.name.clone(),
+            method: signals::method(t),
+            signals: signals::signals(t, &tasks),
+        })
+        .collect();
+
     Ok(Report {
         command,
+        intent_rows,
         total_tasks: tasks.len(),
         plain_tasks: plain,
         patterns: groups,
@@ -240,5 +270,11 @@ impl Report {
 
     pub fn to_json(&self) -> String {
         serde_json::to_string_pretty(self).expect("report serializes")
+    }
+
+    /// The `## Task intent` skeleton for the understanding doc: factual
+    /// columns filled, judgment columns empty.
+    pub fn to_intent_skeleton(&self) -> String {
+        render::intent_skeleton(self)
     }
 }

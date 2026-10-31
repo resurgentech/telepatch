@@ -16,3 +16,4 @@ serde_json = "1.0.154"
 [dev-dependencies]
 assert_cmd = "2"
 insta = "1.49.0"
+tempfile = "3"

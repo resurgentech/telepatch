@@ -32,6 +32,11 @@ enum Command {
         /// Print JSON instead of Markdown.
         #[arg(long)]
         json: bool,
+        /// Print the `## Task intent` skeleton instead: one row per task
+        /// with Task, Method and Signals filled and the judgment columns
+        /// (Intent, Shape, Adequate, Primitive) left empty.
+        #[arg(long, conflicts_with = "json")]
+        intent_skeleton: bool,
     },
     /// Emit telepatch Rust from an Ansible role, a directory of roles or a
     /// playbook: one module per role, `// TODO(port)` where the mapping is
@@ -129,6 +134,7 @@ fn main() -> ExitCode {
             roles_path,
             base,
             json,
+            intent_skeleton,
         }) => {
             match classify_playbook(&Options {
                 playbook,
@@ -138,6 +144,8 @@ fn main() -> ExitCode {
                 Ok(report) => {
                     if json {
                         println!("{}", report.to_json());
+                    } else if intent_skeleton {
+                        print!("{}", report.to_intent_skeleton());
                     } else {
                         print!("{}", report.to_markdown());
                     }

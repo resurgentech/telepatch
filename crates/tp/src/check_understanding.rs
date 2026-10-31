@@ -31,6 +31,10 @@ pub const REQUIRED_HEADINGS: [&str; 9] = [
 pub const FEEDBACK_HEADING: &str = "## skill-feedback";
 
 const CURRENT_METHOD: &str = "## Current method";
+const TASK_INTENT: &str = "## Task intent";
+/// Columns of the Task intent table the agent must fill; the tool's
+/// skeleton leaves them empty.
+const JUDGMENT_COLUMNS: [&str; 4] = ["Intent", "Shape", "Adequate", "Primitive"];
 const DECISION_SECTION: &str = "## Recommendation and decision";
 
 /// Words that state doubt instead of a fact (whole word, any case).
@@ -76,6 +80,9 @@ pub fn check(name: &str, text: &str, opts: Options) -> Vec<String> {
     // heading -> line number of first occurrence outside fences
     let mut headings: Vec<(String, usize)> = Vec::new();
     let mut has_decision = false;
+    // Task intent table: (column index, column name) of the judgment columns,
+    // taken from the header row; None until the header is seen.
+    let mut intent_cols: Option<Vec<(usize, String)>> = None;
 
     for (i, line) in text.lines().enumerate() {
         let n = i + 1;
@@ -86,6 +93,42 @@ pub fn check(name: &str, text: &str, opts: Options) -> Vec<String> {
         if !fenced && line.starts_with("## ") {
             section = line.trim_end().to_string();
             headings.push((section.clone(), n));
+        }
+        if !fenced && section == TASK_INTENT {
+            if line.starts_with('|') {
+                let cells: Vec<&str> = line
+                    .trim()
+                    .trim_matches('|')
+                    .split('|')
+                    .map(str::trim)
+                    .collect();
+                match &intent_cols {
+                    None => {
+                        intent_cols = Some(
+                            cells
+                                .iter()
+                                .enumerate()
+                                .filter(|(_, c)| JUDGMENT_COLUMNS.contains(c))
+                                .map(|(i, c)| (i, (*c).to_string()))
+                                .collect(),
+                        );
+                    }
+                    Some(cols) if !cells.iter().all(|c| c.chars().all(|ch| ch == '-')) => {
+                        for (i, col) in cols {
+                            if cells.get(*i).is_none_or(|c| c.is_empty()) {
+                                problems.push(format!(
+                                    "{name}:{n}: Task intent row has an empty '{col}' cell"
+                                ));
+                            }
+                        }
+                    }
+                    Some(_) => {}
+                }
+            } else if line.trim() == "Primitive gaps:" {
+                problems.push(format!(
+                    "{name}:{n}: 'Primitive gaps:' says nothing (write the gaps, or 'none')"
+                ));
+            }
         }
         if !fenced
             && section == DECISION_SECTION
@@ -162,6 +205,41 @@ mod tests {
     #[test]
     fn good_passes() {
         assert_eq!(run(GOOD), Vec::<String>::new());
+    }
+
+    const TABLE: &str = "| Task | Intent | Shape | Method | Signals | Adequate | Primitive |\n|---|---|---|---|---|---|---|\n| `a.yml:1` x | x present | package | `apt` | | yes | pkg |\n\nPrimitive gaps: none.\n";
+
+    #[test]
+    fn filled_intent_table_passes() {
+        let t = GOOD.replace(
+            "## Task intent\n\nx\n",
+            &format!("## Task intent\n\n{TABLE}"),
+        );
+        assert_eq!(run(&t), Vec::<String>::new());
+    }
+
+    #[test]
+    fn empty_judgment_cell_is_reported() {
+        let table = TABLE.replace("| x present | package |", "| x present |  |");
+        let t = GOOD.replace(
+            "## Task intent\n\nx\n",
+            &format!("## Task intent\n\n{table}"),
+        );
+        assert_eq!(
+            run(&t),
+            ["d.md:15: Task intent row has an empty 'Shape' cell"]
+        );
+    }
+
+    #[test]
+    fn empty_primitive_gaps_is_reported() {
+        let table = TABLE.replace("Primitive gaps: none.", "Primitive gaps:");
+        let t = GOOD.replace(
+            "## Task intent\n\nx\n",
+            &format!("## Task intent\n\n{table}"),
+        );
+        assert_eq!(run(&t).len(), 1);
+        assert!(run(&t)[0].contains("Primitive gaps"));
     }
 
     #[test]

@@ -1,0 +1,25 @@
+---
+source: crates/tp/tests/classify.rs
+expression: body
+---
+## Task intent
+
+
+| Task | Intent | Shape | Method | Signals | Adequate | Primitive |
+|---|---|---|---|---|---|---|
+| `roles/dev_common/tasks/main.yml:4` dev_common_debian |  |  | `include_tasks` debian.yml | when `debian_based\|bool` |  |  |
+| `roles/dev_common/tasks/debian.yml:2` Debian Install python |  |  | `apt` 2 name(s), state present | included when `debian_based\|bool` |  |  |
+| `roles/dev_common/tasks/debian.yml:7` Debian Common development tools |  |  | `apt` 32 name(s), state present | included when `debian_based\|bool` |  |  |
+| `roles/dev_common/tasks/debian.yml:44` Ubuntu2404 python deps |  |  | `apt` 4 name(s) | included when `debian_based\|bool` |  |  |
+| `roles/dev_common/tasks/main.yml:8` dev_common_redhat |  |  | `include_tasks` redhat.yml | when `redhat_based\|bool` |  |  |
+| `roles/dev_common/tasks/redhat.yml:2` RedHat Common development tools |  |  | `dnf` 26 name(s), state present | included when `redhat_based\|bool` |  |  |
+| `roles/dev_common/tasks/main.yml:12` dev_common_amazonlinux2 |  |  | `include_tasks` amazonlinux2.yml | when `amazonlinux2_based\|bool` |  |  |
+| `roles/dev_common/tasks/amazonlinux2.yml:2` AmazonLinux2 Common development tools |  |  | `yum` 15 name(s), state present | included when `amazonlinux2_based\|bool` |  |  |
+| `roles/dev_common/tasks/main.yml:16` dev_common_amazonlinux2023 |  |  | `include_tasks` amazonlinux2023.yml | when `amazonlinux2023_based\|bool` |  |  |
+| `roles/dev_common/tasks/amazonlinux2023.yml:2` AmazonLinux2023 Common development tools |  |  | `dnf` 20 name(s), state present | included when `amazonlinux2023_based\|bool` |  |  |
+| `roles/dev_common/tasks/main.yml:20` dev_common_archlinux |  |  | `include_tasks` archlinux.yml | when `arch_based\|bool` |  |  |
+| `roles/dev_common/tasks/archlinux.yml:2` Arch Common development tools |  |  | `pacman` 19 name(s), state present | included when `arch_based\|bool` |  |  |
+| `roles/dev_common/tasks/main.yml:26` Various python dependancies |  |  | `pip` 3 name(s) | when `not (debian_based\|bool or arch_based\|bool)` |  |  |
+| `roles/dev_common/tasks/main.yml:34` Installing uv for python |  |  | `shell: set -o pipefail && curl -LsSf https://astral.sh/uv/install.sh \| UV_INSTALL_DIR=/usr/local/…` | downloads from the network and executes it; no creates; reports changed every run |  |  |
+
+Primitive gaps:
