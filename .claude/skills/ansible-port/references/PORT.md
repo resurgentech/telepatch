@@ -24,7 +24,11 @@ The emitter is good on package lists, distro `include_tasks`, and
 `--report` before starting and budget from it:
 
 - `rust_kernel`: 3 tasks, 0 TODO. The port is review plus structure
-  (users, comments). Minutes.
+  (users, comments). Minutes, but "0 TODO" is not "done": the emitter's
+  silent choices (step 2, end) carry the role's one real bug — the
+  YAML's `changed_when: 'installing' in …` never matches what rustup
+  prints, and the emitter copies it into `changed_if`. Check it against
+  the doc's probe, and deduplicate the two user loops.
 - `dev_common`, `kernel_build`: 1-2 TODOs, all "unreachable branch".
   The port is deleting the dead branches, restructuring the flag chain
   into `if/else if`, deduplicating, and moving the understanding in.
@@ -47,6 +51,11 @@ facts (`bin_exists`, `bin_version`) and an if/else, not to translate it.
 ```
 tp import <roles-dir>/<role> --roles-path <roles-dir> --out <scratch> --report
 ```
+
+`tp` is not installed; from the playbook repo run it from the sibling
+telepatch checkout: `cargo run -q --manifest-path ../telepatch/Cargo.toml
+-p tp -- import …` (the same form `scripts/check-conversion.sh` uses for
+`check-understanding`).
 
 - The input is a role directory, a directory of roles, or a playbook.
   `--roles-path` says where roles live when it cannot be derived.
@@ -109,6 +118,20 @@ not TODOs:
 - Task-level `when` on an include scope the emitter understood may still
   encode a precedence you have to read (`a and not b`).
 
+Checklist after import, before step 3 (each is a standard edit, not a
+judgment call; do all of them even when the report says 0 TODO):
+
+1. Merge the two user loops (`admin_users`, then `["root"]`) into one
+   `for u in users(&h.vars)` with the deduplicating `users()` fn.
+2. Rename the emitter's `item` to `u` (or the YAML's `loop_var`).
+3. Collapse independent flag `if`s into one `if/else if` chain.
+4. Check every `changed_if` against what the tool prints (doc probe).
+5. Drop flag fns the role no longer uses; keep only those its branches
+   test (an unused `redhat_based` is noise, not documentation).
+6. For each branch the doc drops, write the module-comment line — also
+   when the drop is an absence (the role has no task for a family), so a
+   reader sees it was considered.
+
 ### 3. Rewrite into idiomatic Rust in the playbook repo
 
 The emitted file is a first draft. The result lives in the playbook
@@ -139,7 +162,22 @@ conventions the hand ports settled:
   literal. Literal braces are doubled (`{{` `}}`, `${{HOME}}`).
 - **`~` under `as_user`.** In `creates = "~/.cargo/bin/bindgen"` the
   tilde is left unquoted so `u`'s shell expands it. Do not rewrite to
-  `/home/{u}`: the home comes from the passwd entry, not a guess.
+  `/home/{u}`: the home comes from the passwd entry, not a guess. If the
+  understanding doc says `creates` has no tilde expansion (an earlier doc
+  did), check the rendered plan: `[ -e ~/… ]` runs in `u`'s login shell,
+  so the plan wins; record the correction in the doc's Review.
+- **Playbook entry.** A playbook is `Playbook { name, run }` where `run`
+  is a plain fn returning a boxed future:
+
+  ```rust
+  fn entry(h: Host<Vars>) -> PlaybookFuture {
+      Box::pin(async move { dev_common(&h).await?; my_role(&h).await })
+  }
+  // in playbooks(): Playbook { name: "container/<playbook>", run: entry }
+  ```
+
+  Outside `src/` (a test or trial module) the vars type is
+  `tp_basic::vars::Vars`, not `crate::vars::Vars`.
 - **Facts.** `s.bin_exists("cargo").await`, `s.bin_version("rustc").await`
   and `h.exists(p).await` are a round trip to the host. A fact read
   forces the ops it depends on to complete first (an implicit barrier),
@@ -189,6 +227,18 @@ When re-porting a role that already has snapshots, run the tests with
 `INSTA_UPDATE=no`: any difference is a failure to explain, not a
 snapshot to accept.
 
+- insta prefixes the test file's name: `assert_snapshot!(format!("dev_base__{d}"), …)`
+  in `tests/plans.rs` writes `plans__dev_base__<d>.snap`. Don't repeat
+  the file name in the snapshot name.
+- A renamed snapshot leaves the old file behind; remove stale ones with
+  `cargo insta test --unreferenced=delete` (or by name), never by glob
+  from memory.
+- Reading a plan against Outcomes, check at least: the package op comes
+  first in its role and holds exactly the Outcomes' names for that
+  family; one group of per-user ops per user (root once); families the
+  doc gives no branch have no op; each `sh!` shows the `unless`/
+  `creates`/`changed_if` the doc decided.
+
 ### 5. Equivalence on the images
 
 ```
@@ -200,9 +250,12 @@ ansible `master`: the oracle compares the Ansible run of that commit with
 the telepatch run. Without it the script warns when `master` differs from
 SOURCE; heed the warning. It needs docker, the base image
 `resurgentech/base-<distro>:latest` built locally, and `build/tp-basic`
-from `just musl` (rebuild after every code change). Run it for each
-acceptance distro the doc names (every image family at least: one
-Debian-family, one RedHat-family, Arch) and for `<container>` as named in
+from `just musl` (rebuild after every code change). Run it for the
+acceptance set: `ubuntu2404` and `rockylinux10` for every container in
+the `default` set, plus `ubuntu2604` for `latest_kernel_build` (the only
+image in the `latest` set); `just test-acceptance` runs exactly that, and
+`just test-matrix` runs every container on every distro as a non-gating
+report. Name `<container>` as in
 `../docker_images/docker-bake.hcl` (the container name is not always the
 playbook name: `rust.yml` is `rust_build`).
 
