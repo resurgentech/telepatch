@@ -6,7 +6,7 @@ Run from an isolated venv with pillow, numpy and potracer:
 """
 import sys
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageFilter
 import potrace
 
 DOCS = sys.argv[1]
@@ -14,11 +14,23 @@ OUT = sys.argv[2]
 GREEN = "#36e836"
 
 
+UP = 3  # trace at 3x: the JPEGs are 1152 px wide and their edges are ragged
+
+
+def channel(arr):
+    """A 0..255 channel, upscaled and lightly blurred so the threshold edge is smooth."""
+    im = Image.fromarray(np.clip(arr, 0, 255).astype(np.uint8), "L")
+    im = im.resize((im.width * UP, im.height * UP), Image.LANCZOS)
+    im = im.filter(ImageFilter.GaussianBlur(UP * 0.7))
+    return np.asarray(im).astype(int)
+
+
 def layers(path):
     im = np.asarray(Image.open(path).convert("RGB")).astype(int)
     r, g, b = im[..., 0], im[..., 1], im[..., 2]
-    lum = (r * 299 + g * 587 + b * 114) // 1000
-    green = (g - np.maximum(r, b) > 60) & (g > 120)
+    lum = channel((r * 299 + g * 587 + b * 114) // 1000)
+    greenness = channel(g - np.maximum(r, b))
+    green = greenness > 110  # the glow around the text stays below this
     black = (lum < 140) & ~green
     return black, green
 
@@ -40,9 +52,9 @@ def content_box(mask, pad=8):
     return max(xs.min() - pad, 0), max(ys.min() - pad, 0), xs.max() + pad, ys.max() + pad
 
 
-def trace(mask, turd=4):
+def trace(mask, turd=4 * UP * UP):
     bmp = potrace.Bitmap(~mask)  # potracer: zero is ink
-    path = bmp.trace(turdsize=turd, alphamax=1.0, opticurve=True, opttolerance=0.3)
+    path = bmp.trace(turdsize=turd, alphamax=1.0, opticurve=True, opttolerance=0.6)
     parts = []
     for curve in path:
         sp = curve.start_point
@@ -68,35 +80,36 @@ def crop(mask, box):
 # Man: drop the drawn frame.
 m_black, m_green = layers(f"{DOCS}/telepath simple.jpg")
 mb = frame_box(m_black)
-mb = (mb[0] + 6, mb[1] + 6, mb[2] - 6, mb[3] - 6)
+mb = (mb[0] + 6 * UP, mb[1] + 6 * UP, mb[2] - 6 * UP, mb[3] - 6 * UP)
 m_black, m_green = crop(m_black, mb), crop(m_green, mb)
 m_h, m_w = m_black.shape
 
 # Computer: crop to its ink.
 c_black, c_green = layers(f"{DOCS}/computer.jpg")
-cb = content_box(c_black | c_green, pad=12)
+cb = content_box(c_black | c_green, pad=12 * UP)
 c_black, c_green = crop(c_black, cb), crop(c_green, cb)
 c_h, c_w = c_black.shape
 
 print(f"man {m_w}x{m_h} box {mb}; computer {c_w}x{c_h} box {cb}", file=sys.stderr)
 
 man_black = trace(m_black)
-man_green = trace(m_green, turd=2)
+man_green = trace(m_green, turd=2 * UP * UP)
 comp_black = trace(c_black)
-comp_green = trace(c_green, turd=2)
+comp_green = trace(c_green, turd=2 * UP * UP)
 
 # Canvas.
 W, H = 2200, 1000
 M = 40  # margin
+IN = 150  # both figures step in from the edges toward the middle
 
 # Man fills the height on the left.
 ms = (H - 2 * M) / m_h
-mx, my = M, M
+mx, my = M + IN, M
 man_right = mx + m_w * ms
 
 # Computer sits on the right, a little smaller, floor-aligned with the man.
 cs = (H - 2 * M) * 0.9 / c_h
-cx = W - M - c_w * cs
+cx = W - M - IN - c_w * cs
 cy = H - M - c_h * cs
 
 # Temple: where the fingers touch, in man-image pixels.
