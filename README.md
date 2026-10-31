@@ -1,5 +1,9 @@
 # telepatch
 
+<p align="center">
+  <img src="docs/hero.svg" alt="A man with two fingers to his temple sends green waves to a retro computer whose screen reads telepatch" width="100%">
+</p>
+
 Configuration management in Rust, for people who are tired of waiting for
 Ansible.
 
