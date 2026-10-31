@@ -11,11 +11,32 @@ and how you write what it did not.
 
 What is built: `#[role]`, `Host` and its facts, `h.pkg`/`h.yum`/`h.pip`,
 `h.file`, `sh!`, `as_user`, `barrier`, `.reads/.writes/.allow_fail`,
-the `plan` command, and the equivalence harness. Not built, and written
-as a note in the role instead of faked: guards and `notify`, and the
-`repo`, `svc`, `user`, `fetch`, `tpl!` and `git` primitives. Use `sh!`
-with `unless`/`creates` for those and say in Port notes which primitive
-replaces it later.
+the `plan` command, and the equivalence harness. Not built: guards and
+`notify`, and the `repo`, `svc`, `user`, `fetch`, `tpl!`, `git` and
+`tool` primitives.
+
+## The `sh!` rule
+
+Every `sh!` in the port is justified or marked. The doc's Task intent
+table already says what shape each task has. A `sh!` is justified when
+the row's Shape is `glue`, or `sh` was the row's Primitive. For every
+other row that ends up as `sh!`, the line carries a marker naming the
+primitive it stands in for:
+
+```rust
+// HACK(tool): uv installer; see conversion/dev_base.md, Task intent row 7.
+sh!(h, "...", creates = "/usr/local/bin/uv");
+```
+
+and `## Port notes` lists it under "Hacks" with the row. `creates` and
+`unless` make a hack idempotent; they do not turn it into the primitive,
+because the engine still knows nothing about the state (no key, no
+postcondition, no version). A port is allowed to have hacks. It is not
+allowed to have unmarked ones, and when the doc's Decision said "build
+first" for that gap, the port does not start until the primitive exists.
+
+The marker is what a search for `HACK(` under `src/roles` finds later,
+which is how a primitive's arrival turns into a list of lines to replace.
 
 ## Budget the work
 
@@ -83,7 +104,7 @@ says. The reasons the emitter produces, and only those:
 | Reason in the report | What it means | Resolve by |
 |---|---|---|
 | `unreachable branch` `` `flag` `` | A distro flag no image reaches (`debian10_based`, `amazonlinux2_based`). The code is emitted anyway, under the flag | Confirm in the doc that it was dropped (Open question 3 default). Delete the branch and write one line in the module comment saying which YAML lines were dropped and why |
-| `unmapped module` `` `x` `` | No emitter mapping (`find`, `get_url`, `uri`, `template`, `service`, `user`, `git`, ...). The task is a comment with its arguments | Read what the task is for in the understanding doc, then write the idiomatic form: a `sh!` with `unless`/`creates`; a `h.file(..)` op; or fold it away when the doc says it only fed a later `when` (`find` + `matched > 0` becomes a guard inside the op's `unless`). `get_url` + run script becomes one `curl ... \| sh` in a `( set -o pipefail && ... )` subshell |
+| `unmapped module` `` `x` `` | No emitter mapping (`find`, `get_url`, `uri`, `template`, `service`, `user`, `git`, ...). The task is a comment with its arguments | Open the task's row in Task intent. If its Primitive is built, write that op. If not, either stop (the Decision said build first) or write the `sh!` with its `HACK(<primitive>)` marker and the `unless`/`creates` that makes it idempotent. A `find` that only fed a later `when` folds into that op's `unless` |
 | `unsupported arguments` | The module is mapped but an argument is not (`apt` with `cache_valid_time`, `update_cache`) | `update_cache` after a sources edit is the engine's apt cache rule: declare what the edit writes (step 3) and drop the task. Other arguments: decide against the doc; say which in Port notes |
 | `when not translated` | A `when` the emitter could not turn into Rust. The statement is emitted inert, under `if false /* TODO */`, so it is never traced | Never leave `if false`. Decide what the condition means: a distro flag it did not know becomes a flag fn; a test on a registered command's output becomes a fact (`s.bin_exists(..).await`, `s.bin_version(..).await`, `h.exists(..).await`) and an `if`; `rc != 0` on a check the emitter could not fold (`check not foldable`: different user, several consumers) becomes `unless = ".."` on the acting op, spelled by hand |
 | `Jinja not translated` | An expression other than `{{ var }}` of a known variable, `item`, or a loop var (`{{ user_shell }}` from a `set_fact`, filters, concatenations) | Replace with a Rust value (`h.vars.field`, a local `let`) interpolated as `{name}` in `sh!`, or remove it when the doc says the value is telepatch's job (the login shell is `bash -l` inside the persistent shell, so `{{ user_shell }} -lc` goes away) |
@@ -194,10 +215,12 @@ conventions the hand ports settled:
   a shell line needs a package the plan must install first.
   `h.barrier()` only where order must hold across roles and no key
   expresses it.
-- **Idempotency.** Keep what the YAML had. `creates`/`unless` the YAML
-  did not have are an "after equivalence" change (the `uv` installer
-  stays unconditional on the first port). Comment it, change it
-  afterwards in its own change.
+- **Idempotency.** An op that reruns when its end state is already
+  reached is a bug the oracle cannot see, and the doc lists it as one;
+  the port fixes it (`creates`, `unless`, or the right primitive) and
+  says so in the comment. Only a change that alters what the oracle
+  compares (a different package, a pinned version where the YAML took
+  latest) waits for "after equivalence".
 - **Comments are the understanding.** Each kept fact becomes one comment
   naming the reason, with the YAML `file:line` range (`debian.yml:1-50`),
   next to what implements it. Do not paste YAML.
@@ -277,7 +300,9 @@ are not equivalence.
 ### 6. Present the diff
 
 In `## Port notes` write: the code files; what each YAML task became (by
-`file:line`); each TODO and how it was resolved; the plan snapshot files;
+`file:line`); each TODO and how it was resolved; under "Hacks", every
+`sh!` that stands in for a primitive, with its marker and the Task intent
+row; the plan snapshot files;
 per distro run, the gating diff verbatim or "empty", and a one-line read
 of the versions diff; each decision that was the agent's (agent-alone);
 each "after equivalence" item left as a comment. A port with TODOs left
@@ -303,7 +328,8 @@ equivalence" changes, each in its own change with its own oracle diff.
 | `lineinfile` | `h.file(p).line("..")`; with `regexp:` `h.file(p).line_re("^re", "..")` |
 | `copy` with `content:` | `h.file(p).content("..")`, then `.mode(0o644)` and `.owner("u")` if the YAML sets them |
 | `file` `state: directory` / `absent` | `h.file(p).dir()` / `.absent()` |
-| `shell`/`command` | `sh!(h, "cmd {var}")`; `{var}` is quoted by the macro, `{{` and `}}` are literal braces |
+| `shell`/`command` | First the Task intent row's Shape. `glue` or `sh`: `sh!(h, "cmd {var}")`; `{var}` is quoted by the macro, `{{` and `}}` are literal braces. Any other shape: that shape's primitive, or `sh!` with a `HACK(<primitive>)` marker |
+| installer (`curl \| sh`, `rustup`, `cargo install`, `get_url` then run) | `tool` when built: binary, installed-version probe, wanted version (pinned or latest from a named source), install and update commands. Until then `sh!` with `creates = <binary>` and `// HACK(tool)` |
 | `args: creates:` | `sh!(h, "..", creates = "path")` |
 | `register` + `changed_when: false` + `when: rc != 0` (check, then act) | one `sh!(h, "act", unless = "check")` |
 | `changed_when: "<text>" in stdout` | `sh!(h, "..", changed_if = "regex")` |
@@ -318,7 +344,7 @@ equivalence" changes, each in its own change with its own oracle diff.
 | ordering that must hold across roles | `h.barrier()` |
 | `vars`/`defaults` | fields of the vars struct behind `h.vars` |
 | `notify` / `handlers` | not built: `// TODO(guard)` where the restart goes, order kept |
-| `git`, `service`, `user`, `get_url`/`uri`, `template`, `find` | not built: `sh!` with `unless`/`creates`; say in Port notes which primitive replaces it later |
+| `git`, `service`, `user`, `get_url`/`uri`, `template`, `find` | not built: `sh!` with `unless`/`creates` and a `// HACK(git)` / `HACK(svc)` / `HACK(user)` / `HACK(fetch)` / `HACK(tpl)` marker; listed under Hacks in Port notes |
 
 ### Sketch
 
@@ -332,14 +358,17 @@ pub async fn dev_common(h: &Host<Vars>) -> Result<(), TraceError> {
     } else if arch_based(&h.os) {
         h.pkg(["base-devel", "cmake"]);
     }
+    // HACK(tool): installer with no version probe; see the doc's Task
+    // intent row for this task and the Primitive gaps decision.
     sh!(
         h,
-        "(set -o pipefail && curl -LsSf https://astral.sh/uv/install.sh | UV_INSTALL_DIR=/usr/local/bin sh)"
+        "(set -o pipefail && curl -LsSf https://astral.sh/uv/install.sh | UV_INSTALL_DIR=/usr/local/bin sh)",
+        creates = "/usr/local/bin/uv"
     );
     Ok(())
 }
 ```
 
-(The installer stays unconditional on the first port, as the YAML ran
-it; a `creates = "/usr/local/bin/uv"` guard is an "after equivalence"
-change.)
+(The YAML ran the installer unconditionally, which the doc lists as a
+bug the oracle cannot see; `creates` fixes the rerun, and the marker
+says the real fix is the `tool` primitive.)

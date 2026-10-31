@@ -37,7 +37,7 @@ fn bad_fixture_fails_with_one_line_per_problem() {
         s.contains(&format!("{f}:6: source line without a YYYY-MM-DD date")),
         "{s}"
     );
-    assert!(s.contains(&format!("{f}:22:could be")), "{s}");
+    assert!(s.contains(&format!("{f}:30:could be")), "{s}");
     assert!(
         s.contains("missing heading '## Is the method current'"),
         "{s}"

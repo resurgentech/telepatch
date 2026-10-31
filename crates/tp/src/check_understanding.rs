@@ -15,9 +15,10 @@ use std::sync::OnceLock;
 use regex::Regex;
 
 /// Level headings every doc carries, in review order.
-pub const REQUIRED_HEADINGS: [&str; 8] = [
+pub const REQUIRED_HEADINGS: [&str; 9] = [
     "## Purpose",
     "## Outcomes",
+    "## Task intent",
     "## Current method",
     "## Preserved knowledge",
     "## Is the method current",
@@ -152,7 +153,7 @@ pub fn check_file(path: &Path, opts: Options) -> Result<Vec<String>, String> {
 mod tests {
     use super::*;
 
-    const GOOD: &str = "# t\n\n## Purpose\n\nx\n\n## Outcomes\n\nx\n\n## Current method\n\ng\n\n## Preserved knowledge\n\nx\n\n## Is the method current\n\nx\n\n## Recommendation and decision\n\nDecision: take option 1.\n\n## Port notes\n\n## Review\n\nx\n";
+    const GOOD: &str = "# t\n\n## Purpose\n\nx\n\n## Outcomes\n\nx\n\n## Task intent\n\nx\n\n## Current method\n\ng\n\n## Preserved knowledge\n\nx\n\n## Is the method current\n\nx\n\n## Recommendation and decision\n\nDecision: take option 1.\n\n## Port notes\n\n## Review\n\nx\n";
 
     fn run(t: &str) -> Vec<String> {
         check("d.md", t, Options::default())

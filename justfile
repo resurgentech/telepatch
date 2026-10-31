@@ -6,9 +6,9 @@ lint:
     cargo clippy --workspace --all-targets -- -D warnings
     cargo fmt --all --check
 
-# tp check-understanding passes the real trial doc and fails the bad fixture.
+# tp check-understanding passes the good fixture and fails the bad one.
 skill-check:
-    cargo run -q -p tp -- check-understanding ../tp_basic/conversion/dev_base.md
+    cargo run -q -p tp -- check-understanding crates/tp/tests/fixtures/understanding/good.md
     ! cargo run -q -p tp -- check-understanding crates/tp/tests/fixtures/understanding/bad.md
 
 # Classify the container playbooks in ../ansible (prints; not a gate).

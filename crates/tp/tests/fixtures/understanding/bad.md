@@ -9,6 +9,14 @@ Source: https://example.com/doc
 
 - `curl` is installed.
 
+## Task intent
+
+| Task | Intent | Shape | Method | Adequate | Primitive |
+|---|---|---|---|---|---|
+| `a.yml:1` x | x present | package | apt | yes | pkg |
+
+Primitive gaps: none.
+
 ## Current method
 
 generated
