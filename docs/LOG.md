@@ -153,3 +153,23 @@ are appended, never edited in; a hook refuses rewrites.
   debian13 diff (`sq`, merge alternative, OQ4), fedora43/44 error
   (dnf5 rejects `@Development Tools` by name).
 - Commits: tp_basic 875b5da, b84bb7f, 18e28ab
+
+## 2026-10-31 — ansible-port skill v3: understand the task before the method
+
+- Review of the `dev_base` port found the uv installer reproduced as an
+  unguarded, unpinned `sh!` because nobody had asked what the task was.
+  Skill v3 adds a `## Task intent` level (one row per task: intent,
+  shape, adequate, primitive), the `sh!`-is-a-hack rule with
+  `// HACK(<primitive>)` markers, primitive gaps and built-primitive
+  defects lists, and "build a primitive first" as a normal phase-1
+  outcome. `tp classify --intent-skeleton` fills the factual columns;
+  `tp check-understanding --playbook` checks the judgment columns and
+  the row count. Two blind trials (`dev_base.yml`, `rust.yml`) in fresh
+  contexts; 22 skill-feedback items folded into v3.1 and v3.2.
+- Trial 2 recommends a `tool` primitive (installer shape: binary,
+  installed version, wanted version, source, install vs update) before
+  `rust_build` is re-ported; `tool` is not yet in the design note.
+- tp_basic 01ae9aa: uv guarded (`HACK(tool)`), rsync once, dnf5 group id
+  per distro; 7/7 acceptance identical, second pass CHANGED 0;
+  `conversion/rust.md` holds the trial-2 case.
+- Commits: 1cf4461, ffd6776, a9bd000, 03c0199
