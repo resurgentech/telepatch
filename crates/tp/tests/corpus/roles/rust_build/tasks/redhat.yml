@@ -1,0 +1,17 @@
+---
+- name: RedHat rust build Dependancies
+  dnf:
+    name:
+      - gcc-c++
+      - openssl-devel
+      - pkgconf-pkg-config
+      - clang
+    state: present
+
+# musl-gcc is only packaged for Fedora and EL10+ (EPEL). Pure Rust musl builds
+# work without it; crates that compile C code for musl need it.
+- name: RedHat musl-gcc for the musl target
+  dnf:
+    name: musl-gcc
+    state: present
+  when: ansible_distribution == 'Fedora' or ansible_distribution_major_version|int >= 10

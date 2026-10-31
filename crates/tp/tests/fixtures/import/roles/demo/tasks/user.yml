@@ -1,0 +1,30 @@
+---
+- name: As the user
+  shell: whoami
+  become: yes
+  become_user: "{{ item }}"
+
+- name: As root
+  shell: id
+
+- name: Is cargo there
+  shell: |
+    bash -lc 'which cargo'
+  become: yes
+  become_user: "{{ item }}"
+  register: cargo_check
+  changed_when: false
+  ignore_errors: yes
+
+- name: Install thing unless there
+  shell: cargo install thing
+  become: yes
+  become_user: "{{ item }}"
+  when: cargo_check.rc != 0
+
+- name: Versions and a brace
+  shell: echo {{ rustup_version }} ${HOME} { a; }
+  args:
+    creates: "~{{ item }}/.thing"
+  become: yes
+  become_user: "{{ item }}"

@@ -1,0 +1,21 @@
+---
+
+# This installs packages required for rust development
+- include_tasks: debian.yml
+  when: debian_based|bool
+
+- include_tasks: redhat.yml
+  when: redhat_based|bool
+
+- include_tasks: amazonlinux2023.yml
+  when: amazonlinux2023_based|bool
+
+- include_tasks: archlinux.yml
+  when: arch_based|bool
+
+# Installing rust is actually a per user task
+- include_tasks: per_user.yml
+  loop: "{{ admin_users }}"
+
+- include_tasks: per_user.yml
+  loop: [root]

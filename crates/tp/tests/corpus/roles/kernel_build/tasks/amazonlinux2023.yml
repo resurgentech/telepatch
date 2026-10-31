@@ -1,0 +1,38 @@
+---
+- name: AmazonLinux2023 Kernel Build Dependencies
+  dnf:
+    name:
+      - rpmdevtools
+      - rpm-build
+      - audit-libs-devel
+      - binutils-devel
+      - elfutils-devel
+      - elfutils-libelf-devel
+      - libcap-devel
+      - ncurses-devel
+      - newt-devel
+      - numactl-devel
+      - openssl-devel
+      - pciutils-devel
+      - xz-devel
+      - zlib-devel
+      - perl-interpreter
+      - perl-devel
+      - perl-generators
+      - perl-Carp
+      - "perl(ExtUtils::Embed)"
+      - python3-sphinx
+      - dwarves
+      - libbpf-devel
+      - libcap-ng-devel
+      - libmnl-devel
+      - bpftool
+    state: present
+
+# This is required for the our build scripts
+- name: AmazonLinux2023 python dependancies
+  pip:
+    name:
+      - jinja2
+      - GitPython
+      - pyaml

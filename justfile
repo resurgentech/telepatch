@@ -61,3 +61,18 @@ musl-example:
         echo "static: NO" >&2; exit 1
     fi
     "$bin" plan hello --distro ubuntu2404 | head -5
+
+# Regenerate crates/tp/tests/emitted/src from the corpus roles (then review
+# the diff; the test `checked_in_emitted_code_is_current` guards it).
+import-regen:
+    UPDATE_EMITTED=1 cargo test -q -p tp --test import checked_in_emitted_code_is_current
+
+# Informative: diff what `tp import` emits for each corpus role against the
+# hand port in ../tp_basic. Always exits 0.
+import-diff:
+    #!/usr/bin/env bash
+    for r in dev_common src_repos kernel_build rust_build rust_kernel; do
+        echo "=== $r"
+        diff -u "crates/tp/tests/emitted/src/$r.rs" "../tp_basic/src/roles/$r.rs" || true
+    done
+    exit 0

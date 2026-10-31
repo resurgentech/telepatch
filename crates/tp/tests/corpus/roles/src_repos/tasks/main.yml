@@ -1,0 +1,15 @@
+# Adds source package repos
+---
+
+- name: Look for deb822 style apt sources
+  find:
+    paths: /etc/apt/sources.list.d
+    patterns: "*.sources"
+  register: apt_deb822_sources
+  when: debian_based|bool
+
+- include_tasks: apt_sources_deb822.yml
+  when: debian_based|bool and apt_deb822_sources.matched > 0
+
+- include_tasks: apt_sources_list.yml
+  when: debian_based|bool and apt_deb822_sources.matched == 0

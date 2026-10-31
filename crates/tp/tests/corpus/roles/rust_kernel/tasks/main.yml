@@ -1,0 +1,16 @@
+---
+# Adds what the kernel's Rust support needs on top of a rustup toolchain from
+# rust_build: the rust-src component, bindgen-cli, and libclang for bindgen.
+# Check with `make rustavailable` in a kernel tree.
+
+- name: Debian libclang for bindgen
+  apt:
+    name: libclang-dev
+    state: present
+  when: debian_based|bool
+
+- include_tasks: per_user.yml
+  loop: "{{ admin_users }}"
+
+- include_tasks: per_user.yml
+  loop: [root]

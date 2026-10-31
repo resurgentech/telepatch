@@ -1,0 +1,196 @@
+---
+source: crates/tp/tests/import.rs
+expression: "format!(\"{}\\n=====\\n{}\", out.file(\"demo.rs\").unwrap(), out.report())"
+---
+//! `demo`: imported by `tp import`. Generated; do not edit.
+//! Regenerate with `just import-regen`, then resolve the `TODO(port)` lines.
+
+use telepatch::facts::os::Distro;
+use telepatch::{Host, TraceError, role, sh};
+
+use crate::flags::*;
+use crate::vars::Vars;
+
+#[role]
+pub async fn demo(h: &Host<Vars>) -> Result<(), TraceError> {
+    // roles/demo/tasks/main.yml:2 Package with a notify
+    // TODO(port): roles/demo/tasks/main.yml:2 guard: notify: restart thing
+    h.pkg(["git", "curl"]);
+
+    // roles/demo/tasks/main.yml:8 Yum one
+    h.yum(["wget"]);
+
+    // roles/demo/tasks/main.yml:12 Build deps
+    h.pkg(["linux"]).build_dep();
+
+    // roles/demo/tasks/main.yml:17 Pip latest
+    h.pip(["pip"]).latest();
+
+    // roles/demo/tasks/main.yml:22 Remove a file
+    h.file("/tmp/old").absent();
+
+    // roles/demo/tasks/main.yml:27 Make a dir
+    h.file("/opt/x").dir().mode(0o755).owner("root");
+
+    // roles/demo/tasks/main.yml:34 Unknown jinja
+    // TODO(port): roles/demo/tasks/main.yml:34 Jinja not translated: {{ somevar | default('x') }}
+    sh!(h, "echo {{{{ somevar | default('x') }}}}");
+
+    // roles/demo/tasks/main.yml:37 Pipefail
+    // subshell keeps `pipefail` out of the persistent shell
+    sh!(h, "(set -o pipefail && curl -s x | sh)");
+
+    // roles/demo/tasks/main.yml:42 Output marker
+    sh!(
+        h,
+        "do-it",
+        changed_if = "DONE",
+    );
+
+    // roles/demo/tasks/main.yml:47 Failed when
+    // TODO(port): roles/demo/tasks/main.yml:47 failed_when: false
+    sh!(h, "maybe");
+
+    // roles/demo/tasks/main.yml:51 Fetch
+    // TODO(port): roles/demo/tasks/main.yml:51 unmapped module `get_url`: no emitter mapping
+    // get_url: {"dest":"/tmp/x","url":"http://x"}
+
+    // roles/demo/tasks/main.yml:56 Set a fact
+    // TODO(port): roles/demo/tasks/main.yml:56 set_fact: runtime variable; no mechanical mapping
+    // set_fact: {"a":1}
+
+    // roles/demo/tasks/main.yml:60 Say
+    // dropped: no effect on the host
+
+    // roles/demo/tasks/main.yml:64 Remote
+    // TODO(port): roles/demo/tasks/main.yml:64 delegate_to: delegated to `other`, never guessed
+    // shell: "ls"
+
+    // roles/demo/tasks/main.yml:68 Fedora only
+    if (h.os.distro == Distro::Fedora || h.os.version.major().is_some_and(|v| v >= 10)) {
+        h.pkg(["musl-gcc"]);
+    }
+
+    // roles/demo/tasks/main.yml:73 Odd condition
+    // TODO(port): roles/demo/tasks/main.yml:73 when not translated: something_unknown (variable `something_unknown` is not a distro flag)
+    if false /* TODO(port): something_unknown (variable `something_unknown` is not a distro flag) */ {
+        h.pkg(["odd"]);
+    }
+
+    // roles/demo/tasks/main.yml:78 Old debian
+    // TODO(port): roles/demo/tasks/main.yml:78 unreachable branch: `debian10_based`: no image reaches it; the design doc drops it
+    if debian10_based(&h.os) {
+        h.pkg(["old"]);
+    }
+
+    // roles/demo/tasks/main.yml:83 a loop on a task
+    // TODO(port): roles/demo/tasks/main.yml:83 task-level loop: `["a","b"]` (Jinja not translated: in path `{{ item }}`)
+    // file: {"path":"{{ item }}","state":"absent"}
+
+    // roles/demo/tasks/main.yml:89 include user.yml
+    for item in h.vars.admin_users.iter() {
+        let s = h.as_user(item);
+        // roles/demo/tasks/user.yml:2 As the user
+        sh!(s, "whoami");
+
+        // roles/demo/tasks/user.yml:7 As root
+        sh!(h, "id");
+
+        // roles/demo/tasks/user.yml:10 Is cargo there
+        // folded into the `unless =` of the task that tests it
+
+        // roles/demo/tasks/user.yml:19 Install thing unless there
+        sh!(
+            s,
+            "cargo install thing",
+            unless = "bash -lc 'which cargo'",
+        );
+
+        // roles/demo/tasks/user.yml:25 Versions and a brace
+        // `~{{ item }}` is `~` in the user's own shell
+        {
+            let rustup_version = &h.vars.rustup_version;
+            sh!(
+                s,
+                "echo {rustup_version} ${{HOME}} {{ a; }}",
+                creates = "~/.thing",
+            );
+        }
+    }
+
+    // roles/demo/tasks/main.yml:92 include user.yml
+    for item in ["root"] {
+        let s = h.as_user(item);
+        if debian_based(&h.os) && !(ubuntu_based(&h.os)) {
+            // roles/demo/tasks/user.yml:2 As the user
+            sh!(s, "whoami");
+
+            // roles/demo/tasks/user.yml:7 As root
+            sh!(h, "id");
+
+            // roles/demo/tasks/user.yml:10 Is cargo there
+            // folded into the `unless =` of the task that tests it
+
+            // roles/demo/tasks/user.yml:19 Install thing unless there
+            sh!(
+                s,
+                "cargo install thing",
+                unless = "bash -lc 'which cargo'",
+            );
+
+            // roles/demo/tasks/user.yml:25 Versions and a brace
+            // `~{{ item }}` is `~` in the user's own shell
+            {
+                let rustup_version = &h.vars.rustup_version;
+                sh!(
+                    s,
+                    "echo {rustup_version} ${{HOME}} {{ a; }}",
+                    creates = "~/.thing",
+                );
+            }
+        }
+    }
+
+    // roles/demo/tasks/main.yml:96 Restart handler is a TODO
+    sh!(h, "nothing");
+
+    // roles/demo/handlers/main.yml:2 restart thing
+    // TODO(port): roles/demo/handlers/main.yml:2 handler: handlers are not built; notify guards come later
+    // service: {"name":"thing","state":"restarted"}
+    Ok(())
+}
+
+=====
+# tp import report
+
+## demo
+
+- tasks: 25
+- mapped: 15
+- TODO: 10
+
+TODO by reason:
+
+- Jinja not translated: 1
+- delegate_to: 1
+- failed_when: 1
+- guard: 1
+- handler: 1
+- set_fact: 1
+- task-level loop: 1
+- unmapped module `get_url`: 1
+- unreachable branch: 1
+- when not translated: 1
+
+Listing:
+
+- roles/demo/tasks/main.yml:2 guard: notify: restart thing
+- roles/demo/tasks/main.yml:34 Jinja not translated: {{ somevar | default('x') }}
+- roles/demo/tasks/main.yml:47 failed_when: false
+- roles/demo/tasks/main.yml:51 unmapped module `get_url`: no emitter mapping
+- roles/demo/tasks/main.yml:56 set_fact: runtime variable; no mechanical mapping
+- roles/demo/tasks/main.yml:64 delegate_to: delegated to `other`, never guessed
+- roles/demo/tasks/main.yml:73 when not translated: something_unknown (variable `something_unknown` is not a distro flag)
+- roles/demo/tasks/main.yml:78 unreachable branch: `debian10_based`: no image reaches it; the design doc drops it
+- roles/demo/tasks/main.yml:83 task-level loop: `["a","b"]` (Jinja not translated: in path `{{ item }}`)
+- roles/demo/handlers/main.yml:2 handler: handlers are not built; notify guards come later

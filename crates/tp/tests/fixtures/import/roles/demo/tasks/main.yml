@@ -1,0 +1,97 @@
+---
+- name: Package with a notify
+  apt:
+    name: [git, curl]
+    state: present
+  notify: restart thing
+
+- name: Yum one
+  yum:
+    name: wget
+
+- name: Build deps
+  apt:
+    name: linux
+    state: build-dep
+
+- name: Pip latest
+  pip:
+    name: pip
+    state: latest
+
+- name: Remove a file
+  file:
+    path: /tmp/old
+    state: absent
+
+- name: Make a dir
+  file:
+    path: /opt/x
+    state: directory
+    mode: "0755"
+    owner: root
+
+- name: Unknown jinja
+  command: echo {{ somevar | default('x') }}
+
+- name: Pipefail
+  shell: set -o pipefail && curl -s x | sh
+  args:
+    executable: /bin/bash
+
+- name: Output marker
+  shell: do-it
+  register: out
+  changed_when: "'DONE' in out.stdout"
+
+- name: Failed when
+  shell: maybe
+  failed_when: false
+
+- name: Fetch
+  get_url:
+    url: http://x
+    dest: /tmp/x
+
+- name: Set a fact
+  set_fact:
+    a: 1
+
+- name: Say
+  debug:
+    msg: hi
+
+- name: Remote
+  shell: ls
+  delegate_to: other
+
+- name: Fedora only
+  dnf:
+    name: musl-gcc
+  when: ansible_distribution == 'Fedora' or ansible_distribution_major_version|int >= 10
+
+- name: Odd condition
+  dnf:
+    name: odd
+  when: something_unknown
+
+- name: Old debian
+  apt:
+    name: old
+  when: debian10_based|bool
+
+- name: a loop on a task
+  file:
+    path: "{{ item }}"
+    state: absent
+  loop: [a, b]
+
+- include_tasks: user.yml
+  loop: "{{ admin_users }}"
+
+- include_tasks: user.yml
+  loop: [root]
+  when: debian_based|bool and not ubuntu_based|bool
+
+- name: Restart handler is a TODO
+  shell: nothing

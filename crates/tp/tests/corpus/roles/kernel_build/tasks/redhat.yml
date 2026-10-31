@@ -1,0 +1,48 @@
+---
+- name: RedHat Update pip3
+  pip:
+    name: pip
+    state: latest
+
+- name: RedHat Kernel Build Dependencies
+  dnf:
+    name:
+      - rpmdevtools
+      - rpm-build
+      - redhat-rpm-config
+      - audit-libs-devel
+      - binutils-devel
+      - elfutils-devel
+      - elfutils-libelf-devel
+      - java-devel
+      - libcap-devel
+      - ncurses-devel
+      - newt-devel
+      - numactl-devel
+      - openssl-devel
+      - pciutils-devel
+      - libnl3-devel
+      - xz-devel
+      - zlib-devel
+      - perl-interpreter
+      - perl-devel
+      - perl-generators
+      - perl-Carp
+      - "perl(ExtUtils::Embed)"
+      - python3-sphinx
+      - dwarves
+      - kabi-dw
+      - libbabeltrace-devel
+      - libbpf-devel
+      - libcap-ng-devel
+      - libmnl-devel
+      - bpftool
+    state: present
+
+# This is required for the our build scripts
+- name: Various python dependancies
+  pip:
+    name:
+      - jinja2
+      - GitPython
+      - pyaml

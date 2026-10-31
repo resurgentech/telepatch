@@ -1,0 +1,25 @@
+---
+- name: AmazonLinux2023 Common development tools
+  dnf:
+    name:
+      - "@Development Tools"
+      - cmake
+      - clang
+      - llvm
+      - lld
+      - git
+      - rsync
+      - gcc
+      - zlib-devel
+      - bc
+      - newt
+      - slang
+      - xmlto
+      - net-tools
+      - rpm-build
+      - zstd
+      - wget
+      - python3
+      - python3-devel
+      - python3-pip
+    state: present

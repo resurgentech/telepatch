@@ -1,0 +1,10 @@
+---
+# No musl-gcc on AmazonLinux2023. Pure Rust musl builds work without it.
+- name: AmazonLinux2023 rust build Dependancies
+  dnf:
+    name:
+      - gcc-c++
+      - openssl-devel
+      - pkgconf-pkg-config
+      - clang
+    state: present

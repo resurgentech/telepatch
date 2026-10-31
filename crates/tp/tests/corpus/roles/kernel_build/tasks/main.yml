@@ -1,0 +1,30 @@
+---
+# This installs packages required for building kernel distro packages
+
+- name: kernel_build_ubuntu
+  include_tasks: ubuntu.yml
+  when: ubuntu_based|bool
+
+- name: kernel_build_debian10
+  include_tasks: debian10.yml
+  when: debian10_based|bool
+
+- name: kernel_build_debian
+  include_tasks: debian.yml
+  when: debian_based|bool and not ubuntu_based|bool
+
+- name: kernel_build_redhat
+  include_tasks: redhat.yml
+  when: redhat_based|bool
+
+- name: kernel_build_amazonlinux2
+  include_tasks: amazonlinux2.yml
+  when: amazonlinux2_based|bool
+
+- name: kernel_build_amazonlinux2023
+  include_tasks: amazonlinux2023.yml
+  when: amazonlinux2023_based|bool
+
+- name: kernel_build_archlinux
+  include_tasks: archlinux.yml
+  when: arch_based|bool

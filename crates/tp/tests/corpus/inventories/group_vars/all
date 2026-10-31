@@ -1,0 +1,45 @@
+
+## distro
+### Only Ubuntu 2404 is fully implemented at the moment
+redhat_based: "{{ (ansible_distribution in ['CentOS', 'RedHat', 'Fedora', 'Rocky', 'AlmaLinux']) }}"
+arch_based: "{{ (ansible_os_family in ['Archlinux']) }}"
+debian_based: "{{ (ansible_distribution in ['Ubuntu', 'Pop!_OS', 'Debian']) }}"
+debian10_based: "{{ ((ansible_distribution in ['Debian']) and (ansible_distribution_version in ['10'])) }}"
+ubuntu_based: "{{ (ansible_distribution in ['Ubuntu', 'Pop!_OS']) }}"
+amazonlinux2_based: "{{ ((ansible_distribution in ['Amazon']) and (ansible_distribution_version in ['2'])) }}"
+amazonlinux2023_based: "{{ ((ansible_distribution in ['Amazon']) and (ansible_distribution_version in ['2023'])) }}"
+ubuntu2004_based: "{{ ((ansible_distribution in ['Ubuntu', 'Pop!_OS']) and (ansible_distribution_version in ['20.04'])) }}"
+ubuntu2204_based: "{{ ((ansible_distribution in ['Ubuntu', 'Pop!_OS']) and (ansible_distribution_version in ['22.04'])) }}"
+ubuntu2404_based: "{{ ((ansible_distribution in ['Ubuntu', 'Pop!_OS']) and (ansible_distribution_version in ['24.04'])) }}"
+
+## admin users
+admin_users: ["{{ ansible_user }}"]
+
+## vnc users
+vnc_users: ["{{ ansible_user }}"]
+
+# these users have the UI tools installed
+full_users: ["{{ ansible_user }}"]
+
+# This is a hashed (using `openssl passwd -6`) password for all newly created admin users.
+# Must be changed using `./run user password`
+default_password: ""
+
+## minikube stuff
+minikube_systemd_dir: "{{ '/lib/systemd/system/' if debian_based else 'notsure' }}"
+minikube_binary: /usr/local/bin/minikube
+kubectl_binary: /usr/local/bin/kubectl
+
+## nvm/node/npm
+nvm_version: 0.40.4
+nvm_node_version: lts
+nvm_install_path: /var/lib/nvm
+nvm_shell_init_file: /etc/bash.bashrc
+
+## Go language SDK version number
+golang_version: '1.26.1'
+
+## Rust toolchain versions
+rustup_version: "1.29.0"
+cargo_version: "1.94.0"
+rustc_version: "1.94.0"

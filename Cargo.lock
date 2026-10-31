@@ -739,6 +739,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "tp-emitted"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "telepatch",
+]
+
+[[package]]
 name = "trybuild"
 version = "1.0.122"
 source = "registry+https://github.com/rust-lang/crates.io-index"

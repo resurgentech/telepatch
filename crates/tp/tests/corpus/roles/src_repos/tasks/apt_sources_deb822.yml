@@ -1,0 +1,22 @@
+---
+# For APT based distros that use deb822 /etc/apt/sources.list.d/*.sources files
+# (Ubuntu 24.04+, Debian 12+), adds deb-src to every entry. Skips the change
+# when any entry already has deb-src, e.g. a ubuntu-src.sources from the older
+# version of this role.
+
+- name: Turn on source repos in /etc/apt/sources.list.d/*.sources
+  shell: |
+    if grep -qs '^Types:.*deb-src' /etc/apt/sources.list.d/*.sources; then
+      exit 0
+    fi
+    sed -i 's/^Types: deb$/Types: deb deb-src/' /etc/apt/sources.list.d/*.sources
+    echo "SOURCES_CHANGED"
+  register: apt_deb822_changed
+  changed_when: "'SOURCES_CHANGED' in apt_deb822_changed.stdout"
+
+- name: Update apt package cache again
+  apt:
+    update_cache: yes
+    cache_valid_time: 1
+  become: true
+  when: apt_deb822_changed.changed

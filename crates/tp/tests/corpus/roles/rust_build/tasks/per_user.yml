@@ -1,0 +1,183 @@
+---
+
+# We need the users prefered shell to tell if cargo is installed
+- name: Get default shell for '{{ item }}'
+  command: getent passwd {{ item }}
+  register: passwd_info
+  changed_when: false
+
+- name: Parse default shell for '{{ item }}'
+  set_fact:
+    user_shell: "{{ passwd_info.stdout.split(':')[-1] | trim }}"
+
+- name: Check if cargo is installed for '{{ item }}' who uses '{{ user_shell }}'"
+  shell: |
+    {{ user_shell }} -lc 'which cargo'
+  become: yes
+  become_user: "{{ item }}"
+  register: cargo_check
+  changed_when: false
+  ignore_errors: yes
+
+# Get versions when cargo is installed
+- name: Get rustup version for '{{ item }}'
+  shell: |
+    {{ user_shell }} -lc 'rustup --version | head -n 1 | cut -d " " -f 2'
+  become: yes
+  become_user: "{{ item }}"
+  register: rustup_version_result
+  changed_when: false
+  ignore_errors: yes
+  when: cargo_check.rc == 0
+
+- name: Get cargo version for '{{ item }}'
+  shell: |
+    {{ user_shell }} -lc 'cargo --version | cut -d " " -f 2'
+  become: yes
+  become_user: "{{ item }}"
+  register: cargo_version_result
+  changed_when: false
+  ignore_errors: yes
+  when: cargo_check.rc == 0
+
+- name: Get rustc version for '{{ item }}'
+  shell: |
+    {{ user_shell }} -lc 'rustc --version | cut -d " " -f 2'
+  become: yes
+  become_user: "{{ item }}"
+  register: rustc_version_result
+  changed_when: false
+  ignore_errors: yes
+  when: cargo_check.rc == 0
+
+- name: Check for broken Rust installation
+  set_fact:
+    rust_installation_broken: "{{ cargo_check.rc == 0 and (rustc_version_result.stdout is defined and rustc_version_result.stdout == '') }}"
+
+- name: Display Rust toolchain versions for '{{ item }}'
+  debug:
+    msg:
+      - "rustup version: {{ rustup_version_result.stdout | default('not installed') }} (target: {{ rustup_version }})"
+      - "cargo version: {{ cargo_version_result.stdout | default('not installed') }} (target: {{ cargo_version }})"
+      - "rustc version: {{ rustc_version_result.stdout | default('not installed') }} (target: {{ rustc_version }})"
+  when: cargo_check.rc == 0
+
+- name: Check if rustup needs update for '{{ item }}'
+  set_fact:
+    rustup_needs_update: "{{ cargo_check.rc == 0 and (rustup_version_result.stdout is defined and rustup_version_result.stdout != rustup_version) }}"
+
+- name: Check if cargo/rustc needs update for '{{ item }}'
+  set_fact:
+    rust_needs_update: "{{ cargo_check.rc == 0 and ((cargo_version_result.stdout is defined and cargo_version_result.stdout != cargo_version) or (rustc_version_result.stdout is defined and rustc_version_result.stdout != rustc_version)) }}"
+
+- name: Repair broken Rust installation for '{{ item }}'
+  block:
+    - name: Remove broken Rust installation
+      file:
+        path: "{{ item_path }}"
+        state: absent
+      loop:
+        - "/home/{{ item }}/.rustup"
+        - "/home/{{ item }}/.cargo"
+      loop_control:
+        loop_var: item_path
+      become: yes
+      become_user: "{{ item }}"
+
+    - name: Download rustup script for repair
+      get_url:
+        url: https://sh.rustup.rs
+        dest: /tmp/rustup.sh
+        mode: 0755
+
+    - name: Reinstall Rust toolchain
+      command: /tmp/rustup.sh -y
+      become: yes
+      become_user: "{{ item }}"
+  when: rust_installation_broken
+
+- name: Update rustup if needed for '{{ item }}'
+  shell: |
+    {{ user_shell }} -lc 'rustup self update'
+  become: yes
+  become_user: "{{ item }}"
+  when: rustup_needs_update and not rust_installation_broken
+  register: rustup_update_result
+
+- name: Update Rust toolchain if needed for '{{ item }}'
+  shell: |
+    {{ user_shell }} -lc 'rustup update'
+  become: yes
+  become_user: "{{ item }}"
+  when: rust_needs_update and not rust_installation_broken
+  register: rust_update_result
+
+- name: Display update results for '{{ item }}'
+  debug:
+    msg:
+      - "Rustup update: {{ 'Updated' if rustup_update_result.changed | default(false) else 'No update needed' }}"
+      - "Rust toolchain update: {{ 'Updated' if rust_update_result.changed | default(false) else 'No update needed' }}"
+  when: cargo_check.rc == 0 and (rustup_needs_update or rust_needs_update) and not rust_installation_broken
+
+- name: Download rustup script for '{{ item }}'
+  get_url:
+    url: https://sh.rustup.rs
+    dest: /tmp/rustup.sh
+    mode: 0755
+  when: cargo_check.rc != 0
+
+# Install rust
+- name: Install rust and tools with the rustup script for '{{ item }}'
+  command: /tmp/rustup.sh -y
+  become: yes
+  become_user: "{{ item }}"
+  when: cargo_check.rc != 0
+
+# Install cargo-deb
+- name: Check if cargo-deb is installed for '{{ item }}'
+  shell: |
+    {{ user_shell }} -lc 'which cargo-deb'
+  become: yes
+  become_user: "{{ item }}"
+  register: cargodeb_check
+  changed_when: false
+  ignore_errors: yes
+  when: not rust_installation_broken
+
+- name: Install cargo-deb
+  shell: . ~/.cargo/env && cargo install cargo-deb
+  become: yes
+  become_user: "{{ item }}"
+  when: cargodeb_check.rc != 0 and not rust_installation_broken
+
+# Install cargo-generate-rpm
+- name: Check if cargo-generate-rpm is installed for '{{ item }}'
+  shell: |
+    {{ user_shell }} -lc 'which cargo-generate-rpm'
+  become: yes
+  become_user: "{{ item }}"
+  register: cargorpm_check
+  changed_when: false
+  ignore_errors: yes
+  when: not rust_installation_broken
+
+- name: Install cargo-generate-rpm for '{{ item }}'
+  shell: . ~/.cargo/env && cargo install cargo-generate-rpm
+  become: yes
+  become_user: "{{ item }}"
+  when: cargorpm_check.rc != 0 and not rust_installation_broken
+
+- name: Check if x86_64-unknown-linux-musl is installed for '{{ item }}'
+  shell: . ~/.cargo/env && rustup target list | grep x86_64-unknown-linux-musl | grep installed
+  become: yes
+  become_user: "{{ item }}"
+  register: musl_check
+  changed_when: false
+  ignore_errors: yes
+  when: not rust_installation_broken
+
+- name: Install rustup target x86_64-unknown-linux-musl for '{{ item }}'
+  shell: . ~/.cargo/env && rustup target add x86_64-unknown-linux-musl
+  become: yes
+  become_user: "{{ item }}"
+  when: musl_check.rc != 0 and not rust_installation_broken

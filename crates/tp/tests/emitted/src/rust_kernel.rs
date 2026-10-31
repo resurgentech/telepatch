@@ -1,0 +1,57 @@
+//! `rust_kernel`: imported by `tp import`. Generated; do not edit.
+//! Regenerate with `just import-regen`, then resolve the `TODO(port)` lines.
+
+use telepatch::facts::os::Distro;
+use telepatch::{Host, TraceError, role, sh};
+
+use crate::flags::*;
+use crate::vars::Vars;
+
+#[role]
+pub async fn rust_kernel(h: &Host<Vars>) -> Result<(), TraceError> {
+    // roles/rust_kernel/tasks/main.yml:6 Debian libclang for bindgen
+    if debian_based(&h.os) {
+        h.pkg(["libclang-dev"]);
+    }
+
+    // roles/rust_kernel/tasks/main.yml:12 include per_user.yml
+    for item in h.vars.admin_users.iter() {
+        let s = h.as_user(item);
+        // roles/rust_kernel/tasks/per_user.yml:3 Add rustup component rust-src for '{{ item }}'
+        // the YAML tested stderr; changed_if sees combined output
+        sh!(
+            s,
+            ". ~/.cargo/env && rustup component add rust-src",
+            changed_if = "installing",
+        );
+
+        // roles/rust_kernel/tasks/per_user.yml:10 Install bindgen-cli for '{{ item }}'
+        // `~{{ item }}` is `~` in the user's own shell
+        sh!(
+            s,
+            ". ~/.cargo/env && cargo install --locked bindgen-cli",
+            creates = "~/.cargo/bin/bindgen",
+        );
+    }
+
+    // roles/rust_kernel/tasks/main.yml:15 include per_user.yml
+    for item in ["root"] {
+        let s = h.as_user(item);
+        // roles/rust_kernel/tasks/per_user.yml:3 Add rustup component rust-src for '{{ item }}'
+        // the YAML tested stderr; changed_if sees combined output
+        sh!(
+            s,
+            ". ~/.cargo/env && rustup component add rust-src",
+            changed_if = "installing",
+        );
+
+        // roles/rust_kernel/tasks/per_user.yml:10 Install bindgen-cli for '{{ item }}'
+        // `~{{ item }}` is `~` in the user's own shell
+        sh!(
+            s,
+            ". ~/.cargo/env && cargo install --locked bindgen-cli",
+            creates = "~/.cargo/bin/bindgen",
+        );
+    }
+    Ok(())
+}

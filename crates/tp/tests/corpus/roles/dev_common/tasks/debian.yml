@@ -1,0 +1,50 @@
+---
+- name: Debian Install python
+  apt:
+    name: [ python3-apt, python3-pip ]
+    state: present
+
+- name: Debian Common development tools
+  apt:
+    name:
+      - build-essential
+      - cmake
+      - clang
+      - llvm
+      - lld
+      - git
+      - rsync
+      - gcc
+      - gnupg
+      - rpm
+      - cppcheck
+      - autoconf
+      - asciidoc
+      - bc
+      - cpio
+      - bison
+      - flex
+      - gawk
+      - gettext
+      - gzip
+      - hostname
+      - m4
+      - net-tools
+      - openssl
+      - rsync
+      - xmlto
+      - zstd
+      - diffstat
+      - sshpass
+      - btop
+      - acl
+      - curl
+    state: present
+
+- name: Ubuntu2404 python deps
+  apt:
+    name:
+      - python3-jinja2
+      - python3-git
+      - python3-yaml
+      - python3-hvac # for vault/openbao in ansible

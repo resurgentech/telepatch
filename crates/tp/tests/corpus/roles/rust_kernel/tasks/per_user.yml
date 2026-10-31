@@ -1,0 +1,15 @@
+---
+
+- name: Add rustup component rust-src for '{{ item }}'
+  shell: . ~/.cargo/env && rustup component add rust-src
+  become: yes
+  become_user: "{{ item }}"
+  register: rust_src_result
+  changed_when: "'installing' in rust_src_result.stderr"
+
+- name: Install bindgen-cli for '{{ item }}'
+  shell: . ~/.cargo/env && cargo install --locked bindgen-cli
+  args:
+    creates: "~{{ item }}/.cargo/bin/bindgen"
+  become: yes
+  become_user: "{{ item }}"

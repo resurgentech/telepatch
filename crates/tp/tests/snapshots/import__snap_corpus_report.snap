@@ -1,0 +1,104 @@
+---
+source: crates/tp/tests/import.rs
+expression: corpus().report()
+---
+# tp import report
+
+## dev_common
+
+- tasks: 9
+- mapped: 9
+- TODO: 1
+
+TODO by reason:
+
+- unreachable branch: 1
+
+Listing:
+
+- roles/dev_common/tasks/main.yml:12 unreachable branch: `amazonlinux2_based`: no image reaches it; the design doc drops it
+
+## kernel_build
+
+- tasks: 16
+- mapped: 16
+- TODO: 2
+
+TODO by reason:
+
+- unreachable branch: 2
+
+Listing:
+
+- roles/kernel_build/tasks/main.yml:8 unreachable branch: `debian10_based`: no image reaches it; the design doc drops it
+- roles/kernel_build/tasks/main.yml:20 unreachable branch: `amazonlinux2_based`: no image reaches it; the design doc drops it
+
+## rust_build
+
+- tasks: 29
+- mapped: 8
+- TODO: 28
+
+TODO by reason:
+
+- Jinja not translated: 8
+- set_fact: 4
+- task-level loop: 1
+- unmapped module `get_url`: 2
+- when not translated: 13
+
+Listing:
+
+- roles/rust_build/tasks/per_user.yml:9 set_fact: runtime variable; no mechanical mapping
+- roles/rust_build/tasks/per_user.yml:13 Jinja not translated: {{ user_shell }}
+- roles/rust_build/tasks/per_user.yml:23 Jinja not translated: {{ user_shell }}
+- roles/rust_build/tasks/per_user.yml:23 when not translated: cargo_check.rc == 0 (comparison not understood)
+- roles/rust_build/tasks/per_user.yml:33 Jinja not translated: {{ user_shell }}
+- roles/rust_build/tasks/per_user.yml:33 when not translated: cargo_check.rc == 0 (comparison not understood)
+- roles/rust_build/tasks/per_user.yml:43 Jinja not translated: {{ user_shell }}
+- roles/rust_build/tasks/per_user.yml:43 when not translated: cargo_check.rc == 0 (comparison not understood)
+- roles/rust_build/tasks/per_user.yml:53 set_fact: runtime variable; no mechanical mapping
+- roles/rust_build/tasks/per_user.yml:65 set_fact: runtime variable; no mechanical mapping
+- roles/rust_build/tasks/per_user.yml:69 set_fact: runtime variable; no mechanical mapping
+- roles/rust_build/tasks/per_user.yml:75 task-level loop: `["/home/{{ item }}/.rustup","/home/{{ item }}/.cargo"]` (Jinja not translated: in path `{{ item_path }}`)
+- roles/rust_build/tasks/per_user.yml:87 unmapped module `get_url`: no emitter mapping
+- roles/rust_build/tasks/per_user.yml:93 when not translated: rust_installation_broken (variable `rust_installation_broken` is not a distro flag)
+- roles/rust_build/tasks/per_user.yml:99 Jinja not translated: {{ user_shell }}
+- roles/rust_build/tasks/per_user.yml:99 when not translated: rustup_needs_update and not rust_installation_broken (variable `rustup_needs_update` is not a distro flag; variable `rust_installation_broken` is not a distro flag)
+- roles/rust_build/tasks/per_user.yml:107 Jinja not translated: {{ user_shell }}
+- roles/rust_build/tasks/per_user.yml:107 when not translated: rust_needs_update and not rust_installation_broken (variable `rust_needs_update` is not a distro flag; variable `rust_installation_broken` is not a distro flag)
+- roles/rust_build/tasks/per_user.yml:122 unmapped module `get_url`: no emitter mapping
+- roles/rust_build/tasks/per_user.yml:130 when not translated: cargo_check.rc != 0 (check not foldable)
+- roles/rust_build/tasks/per_user.yml:137 Jinja not translated: {{ user_shell }}
+- roles/rust_build/tasks/per_user.yml:137 when not translated: not rust_installation_broken (variable `rust_installation_broken` is not a distro flag)
+- roles/rust_build/tasks/per_user.yml:147 when not translated: cargodeb_check.rc != 0 and not rust_installation_broken (variable `rust_installation_broken` is not a distro flag); cargodeb_check.rc != 0 (check not foldable)
+- roles/rust_build/tasks/per_user.yml:154 Jinja not translated: {{ user_shell }}
+- roles/rust_build/tasks/per_user.yml:154 when not translated: not rust_installation_broken (variable `rust_installation_broken` is not a distro flag)
+- roles/rust_build/tasks/per_user.yml:164 when not translated: cargorpm_check.rc != 0 and not rust_installation_broken (variable `rust_installation_broken` is not a distro flag); cargorpm_check.rc != 0 (check not foldable)
+- roles/rust_build/tasks/per_user.yml:170 when not translated: not rust_installation_broken (variable `rust_installation_broken` is not a distro flag)
+- roles/rust_build/tasks/per_user.yml:179 when not translated: musl_check.rc != 0 and not rust_installation_broken (variable `rust_installation_broken` is not a distro flag); musl_check.rc != 0 (check not foldable)
+
+## rust_kernel
+
+- tasks: 3
+- mapped: 3
+- TODO: 0
+
+## src_repos
+
+- tasks: 4
+- mapped: 2
+- TODO: 4
+
+TODO by reason:
+
+- unmapped module `find`: 1
+- unsupported arguments: 1
+- when not translated: 2
+
+Listing:
+
+- roles/src_repos/tasks/main.yml:4 unmapped module `find`: no emitter mapping
+- roles/src_repos/tasks/main.yml:11 when not translated: debian_based|bool and apt_deb822_sources.matched > 0 (comparison not understood)
+- roles/src_repos/tasks/apt_sources_deb822.yml:17 unsupported arguments: `cache_valid_time`, `update_cache`
+- roles/src_repos/tasks/main.yml:14 when not translated: debian_based|bool and apt_deb822_sources.matched == 0 (comparison not understood)

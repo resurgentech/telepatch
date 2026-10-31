@@ -1,0 +1,19 @@
+---
+- name: Debian Kernel Build Dependencies Dependencies
+  apt:
+    name:
+      - libncurses-dev
+      - libssl-dev
+      - libelf-dev
+      - libudev-dev
+      - libpci-dev
+      - libiberty-dev
+      - equivs
+      - dwarves
+      - dkms
+    state: present
+
+- name: Debian Kernel Build Dependencies
+  apt:
+    name: linux
+    state: build-dep

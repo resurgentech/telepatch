@@ -1,0 +1,321 @@
+---
+source: crates/tp/tests/import.rs
+expression: "out.file(concat! (\"rust_build\", \".rs\")).unwrap()"
+---
+//! `rust_build`: imported by `tp import`. Generated; do not edit.
+//! Regenerate with `just import-regen`, then resolve the `TODO(port)` lines.
+
+use telepatch::facts::os::Distro;
+use telepatch::{Host, TraceError, role, sh};
+
+use crate::flags::*;
+use crate::vars::Vars;
+
+#[role]
+pub async fn rust_build(h: &Host<Vars>) -> Result<(), TraceError> {
+    // roles/rust_build/tasks/main.yml:4 include debian.yml
+    if debian_based(&h.os) {
+        // roles/rust_build/tasks/debian.yml:2 Debian rust build Dependancies
+        h.pkg(["g++", "libssl-dev", "pkg-config", "clang", "musl-tools"]);
+    }
+
+    // roles/rust_build/tasks/main.yml:7 include redhat.yml
+    if redhat_based(&h.os) {
+        // roles/rust_build/tasks/redhat.yml:2 RedHat rust build Dependancies
+        h.pkg(["gcc-c++", "openssl-devel", "pkgconf-pkg-config", "clang"]);
+
+        // roles/rust_build/tasks/redhat.yml:13 RedHat musl-gcc for the musl target
+        if (h.os.distro == Distro::Fedora || h.os.version.major().is_some_and(|v| v >= 10)) {
+            h.pkg(["musl-gcc"]);
+        }
+    }
+
+    // roles/rust_build/tasks/main.yml:10 include amazonlinux2023.yml
+    if amazonlinux2023_based(&h.os) {
+        // roles/rust_build/tasks/amazonlinux2023.yml:3 AmazonLinux2023 rust build Dependancies
+        h.pkg(["gcc-c++", "openssl-devel", "pkgconf-pkg-config", "clang"]);
+    }
+
+    // roles/rust_build/tasks/main.yml:13 include archlinux.yml
+    if arch_based(&h.os) {
+        // roles/rust_build/tasks/archlinux.yml:2 Arch rust build Dependancies
+        h.pkg(["openssl", "pkgconf", "clang", "musl"]);
+    }
+
+    // roles/rust_build/tasks/main.yml:17 include per_user.yml
+    for item in h.vars.admin_users.iter() {
+        let s = h.as_user(item);
+        // roles/rust_build/tasks/per_user.yml:4 Get default shell for '{{ item }}'
+        // changed_when: false (read-only in the YAML)
+        sh!(h, "getent passwd {item}");
+
+        // roles/rust_build/tasks/per_user.yml:9 Parse default shell for '{{ item }}'
+        // TODO(port): roles/rust_build/tasks/per_user.yml:9 set_fact: runtime variable; no mechanical mapping
+        // set_fact: {"user_shell":"{{ passwd_info.stdout.split(':')[-1] | trim }}"}
+
+        // roles/rust_build/tasks/per_user.yml:13 Check if cargo is installed for '{{ item }}' who uses '{{ user_shell }}'"
+        // TODO(port): roles/rust_build/tasks/per_user.yml:13 Jinja not translated: {{ user_shell }}
+        // changed_when: false (read-only in the YAML)
+        sh!(s, "{{{{ user_shell }}}} -lc 'which cargo'").allow_fail();
+
+        // roles/rust_build/tasks/per_user.yml:23 Get rustup version for '{{ item }}'
+        // TODO(port): roles/rust_build/tasks/per_user.yml:23 Jinja not translated: {{ user_shell }}
+        // changed_when: false (read-only in the YAML)
+        // TODO(port): roles/rust_build/tasks/per_user.yml:23 when not translated: cargo_check.rc == 0 (comparison not understood)
+        if false /* TODO(port): cargo_check.rc == 0 (comparison not understood) */ {
+            sh!(s, "{{{{ user_shell }}}} -lc 'rustup --version | head -n 1 | cut -d \" \" -f 2'").allow_fail();
+        }
+
+        // roles/rust_build/tasks/per_user.yml:33 Get cargo version for '{{ item }}'
+        // TODO(port): roles/rust_build/tasks/per_user.yml:33 Jinja not translated: {{ user_shell }}
+        // changed_when: false (read-only in the YAML)
+        // TODO(port): roles/rust_build/tasks/per_user.yml:33 when not translated: cargo_check.rc == 0 (comparison not understood)
+        if false /* TODO(port): cargo_check.rc == 0 (comparison not understood) */ {
+            sh!(s, "{{{{ user_shell }}}} -lc 'cargo --version | cut -d \" \" -f 2'").allow_fail();
+        }
+
+        // roles/rust_build/tasks/per_user.yml:43 Get rustc version for '{{ item }}'
+        // TODO(port): roles/rust_build/tasks/per_user.yml:43 Jinja not translated: {{ user_shell }}
+        // changed_when: false (read-only in the YAML)
+        // TODO(port): roles/rust_build/tasks/per_user.yml:43 when not translated: cargo_check.rc == 0 (comparison not understood)
+        if false /* TODO(port): cargo_check.rc == 0 (comparison not understood) */ {
+            sh!(s, "{{{{ user_shell }}}} -lc 'rustc --version | cut -d \" \" -f 2'").allow_fail();
+        }
+
+        // roles/rust_build/tasks/per_user.yml:53 Check for broken Rust installation
+        // TODO(port): roles/rust_build/tasks/per_user.yml:53 set_fact: runtime variable; no mechanical mapping
+        // set_fact: {"rust_installation_broken":"{{ cargo_check.rc == 0 and (rustc_version_result.stdout is defined and rustc_version_result.stdout == '') }}"}
+
+        // roles/rust_build/tasks/per_user.yml:57 Display Rust toolchain versions for '{{ item }}'
+        // dropped: no effect on the host
+
+        // roles/rust_build/tasks/per_user.yml:65 Check if rustup needs update for '{{ item }}'
+        // TODO(port): roles/rust_build/tasks/per_user.yml:65 set_fact: runtime variable; no mechanical mapping
+        // set_fact: {"rustup_needs_update":"{{ cargo_check.rc == 0 and (rustup_version_result.stdout is defined and rustup_version_result.stdout != rustup_version) }}"}
+
+        // roles/rust_build/tasks/per_user.yml:69 Check if cargo/rustc needs update for '{{ item }}'
+        // TODO(port): roles/rust_build/tasks/per_user.yml:69 set_fact: runtime variable; no mechanical mapping
+        // set_fact: {"rust_needs_update":"{{ cargo_check.rc == 0 and ((cargo_version_result.stdout is defined and cargo_version_result.stdout != cargo_version) or (rustc_version_result.stdout is defined and rustc_version...
+
+        // roles/rust_build/tasks/per_user.yml:75 Remove broken Rust installation
+        // TODO(port): roles/rust_build/tasks/per_user.yml:75 task-level loop: `["/home/{{ item }}/.rustup","/home/{{ item }}/.cargo"]` (Jinja not translated: in path `{{ item_path }}`)
+        // file: {"path":"{{ item_path }}","state":"absent"}
+
+        // roles/rust_build/tasks/per_user.yml:87 Download rustup script for repair
+        // TODO(port): roles/rust_build/tasks/per_user.yml:87 unmapped module `get_url`: no emitter mapping
+        // get_url: {"dest":"/tmp/rustup.sh","mode":755,"url":"https://sh.rustup.rs"}
+
+        // roles/rust_build/tasks/per_user.yml:93 Reinstall Rust toolchain
+        // TODO(port): roles/rust_build/tasks/per_user.yml:93 when not translated: rust_installation_broken (variable `rust_installation_broken` is not a distro flag)
+        if false /* TODO(port): rust_installation_broken (variable `rust_installation_broken` is not a distro flag) */ {
+            sh!(s, "/tmp/rustup.sh -y");
+        }
+
+        // roles/rust_build/tasks/per_user.yml:99 Update rustup if needed for '{{ item }}'
+        // TODO(port): roles/rust_build/tasks/per_user.yml:99 Jinja not translated: {{ user_shell }}
+        // TODO(port): roles/rust_build/tasks/per_user.yml:99 when not translated: rustup_needs_update and not rust_installation_broken (variable `rustup_needs_update` is not a distro flag; variable `rust_installation_broken` is not a distro flag)
+        if false /* TODO(port): rustup_needs_update and not rust_installation_broken (variable `rustup_needs_update` is not a distro flag; variable `rust_installation_broken` is not a distro flag) */ {
+            sh!(s, "{{{{ user_shell }}}} -lc 'rustup self update'");
+        }
+
+        // roles/rust_build/tasks/per_user.yml:107 Update Rust toolchain if needed for '{{ item }}'
+        // TODO(port): roles/rust_build/tasks/per_user.yml:107 Jinja not translated: {{ user_shell }}
+        // TODO(port): roles/rust_build/tasks/per_user.yml:107 when not translated: rust_needs_update and not rust_installation_broken (variable `rust_needs_update` is not a distro flag; variable `rust_installation_broken` is not a distro flag)
+        if false /* TODO(port): rust_needs_update and not rust_installation_broken (variable `rust_needs_update` is not a distro flag; variable `rust_installation_broken` is not a distro flag) */ {
+            sh!(s, "{{{{ user_shell }}}} -lc 'rustup update'");
+        }
+
+        // roles/rust_build/tasks/per_user.yml:115 Display update results for '{{ item }}'
+        // dropped: no effect on the host
+
+        // roles/rust_build/tasks/per_user.yml:122 Download rustup script for '{{ item }}'
+        // TODO(port): roles/rust_build/tasks/per_user.yml:122 unmapped module `get_url`: no emitter mapping
+        // get_url: {"dest":"/tmp/rustup.sh","mode":755,"url":"https://sh.rustup.rs"}
+
+        // roles/rust_build/tasks/per_user.yml:130 Install rust and tools with the rustup script for '{{ item }}'
+        // TODO(port): roles/rust_build/tasks/per_user.yml:130 when not translated: cargo_check.rc != 0 (check not foldable)
+        if false /* TODO(port): cargo_check.rc != 0 (check not foldable) */ {
+            sh!(s, "/tmp/rustup.sh -y");
+        }
+
+        // roles/rust_build/tasks/per_user.yml:137 Check if cargo-deb is installed for '{{ item }}'
+        // TODO(port): roles/rust_build/tasks/per_user.yml:137 Jinja not translated: {{ user_shell }}
+        // changed_when: false (read-only in the YAML)
+        // TODO(port): roles/rust_build/tasks/per_user.yml:137 when not translated: not rust_installation_broken (variable `rust_installation_broken` is not a distro flag)
+        if false /* TODO(port): not rust_installation_broken (variable `rust_installation_broken` is not a distro flag) */ {
+            sh!(s, "{{{{ user_shell }}}} -lc 'which cargo-deb'").allow_fail();
+        }
+
+        // roles/rust_build/tasks/per_user.yml:147 Install cargo-deb
+        // TODO(port): roles/rust_build/tasks/per_user.yml:147 when not translated: cargodeb_check.rc != 0 and not rust_installation_broken (variable `rust_installation_broken` is not a distro flag); cargodeb_check.rc != 0 (check not foldable)
+        if false /* TODO(port): cargodeb_check.rc != 0 and not rust_installation_broken (variable `rust_installation_broken` is not a distro flag); cargodeb_check.rc != 0 (check not foldable) */ {
+            sh!(s, ". ~/.cargo/env && cargo install cargo-deb");
+        }
+
+        // roles/rust_build/tasks/per_user.yml:154 Check if cargo-generate-rpm is installed for '{{ item }}'
+        // TODO(port): roles/rust_build/tasks/per_user.yml:154 Jinja not translated: {{ user_shell }}
+        // changed_when: false (read-only in the YAML)
+        // TODO(port): roles/rust_build/tasks/per_user.yml:154 when not translated: not rust_installation_broken (variable `rust_installation_broken` is not a distro flag)
+        if false /* TODO(port): not rust_installation_broken (variable `rust_installation_broken` is not a distro flag) */ {
+            sh!(s, "{{{{ user_shell }}}} -lc 'which cargo-generate-rpm'").allow_fail();
+        }
+
+        // roles/rust_build/tasks/per_user.yml:164 Install cargo-generate-rpm for '{{ item }}'
+        // TODO(port): roles/rust_build/tasks/per_user.yml:164 when not translated: cargorpm_check.rc != 0 and not rust_installation_broken (variable `rust_installation_broken` is not a distro flag); cargorpm_check.rc != 0 (check not foldable)
+        if false /* TODO(port): cargorpm_check.rc != 0 and not rust_installation_broken (variable `rust_installation_broken` is not a distro flag); cargorpm_check.rc != 0 (check not foldable) */ {
+            sh!(s, ". ~/.cargo/env && cargo install cargo-generate-rpm");
+        }
+
+        // roles/rust_build/tasks/per_user.yml:170 Check if x86_64-unknown-linux-musl is installed for '{{ item }}'
+        // changed_when: false (read-only in the YAML)
+        // TODO(port): roles/rust_build/tasks/per_user.yml:170 when not translated: not rust_installation_broken (variable `rust_installation_broken` is not a distro flag)
+        if false /* TODO(port): not rust_installation_broken (variable `rust_installation_broken` is not a distro flag) */ {
+            sh!(s, ". ~/.cargo/env && rustup target list | grep x86_64-unknown-linux-musl | grep installed").allow_fail();
+        }
+
+        // roles/rust_build/tasks/per_user.yml:179 Install rustup target x86_64-unknown-linux-musl for '{{ item }}'
+        // TODO(port): roles/rust_build/tasks/per_user.yml:179 when not translated: musl_check.rc != 0 and not rust_installation_broken (variable `rust_installation_broken` is not a distro flag); musl_check.rc != 0 (check not foldable)
+        if false /* TODO(port): musl_check.rc != 0 and not rust_installation_broken (variable `rust_installation_broken` is not a distro flag); musl_check.rc != 0 (check not foldable) */ {
+            sh!(s, ". ~/.cargo/env && rustup target add x86_64-unknown-linux-musl");
+        }
+    }
+
+    // roles/rust_build/tasks/main.yml:20 include per_user.yml
+    for item in ["root"] {
+        let s = h.as_user(item);
+        // roles/rust_build/tasks/per_user.yml:4 Get default shell for '{{ item }}'
+        // changed_when: false (read-only in the YAML)
+        sh!(h, "getent passwd {item}");
+
+        // roles/rust_build/tasks/per_user.yml:9 Parse default shell for '{{ item }}'
+        // TODO(port): roles/rust_build/tasks/per_user.yml:9 set_fact: runtime variable; no mechanical mapping
+        // set_fact: {"user_shell":"{{ passwd_info.stdout.split(':')[-1] | trim }}"}
+
+        // roles/rust_build/tasks/per_user.yml:13 Check if cargo is installed for '{{ item }}' who uses '{{ user_shell }}'"
+        // TODO(port): roles/rust_build/tasks/per_user.yml:13 Jinja not translated: {{ user_shell }}
+        // changed_when: false (read-only in the YAML)
+        sh!(s, "{{{{ user_shell }}}} -lc 'which cargo'").allow_fail();
+
+        // roles/rust_build/tasks/per_user.yml:23 Get rustup version for '{{ item }}'
+        // TODO(port): roles/rust_build/tasks/per_user.yml:23 Jinja not translated: {{ user_shell }}
+        // changed_when: false (read-only in the YAML)
+        // TODO(port): roles/rust_build/tasks/per_user.yml:23 when not translated: cargo_check.rc == 0 (comparison not understood)
+        if false /* TODO(port): cargo_check.rc == 0 (comparison not understood) */ {
+            sh!(s, "{{{{ user_shell }}}} -lc 'rustup --version | head -n 1 | cut -d \" \" -f 2'").allow_fail();
+        }
+
+        // roles/rust_build/tasks/per_user.yml:33 Get cargo version for '{{ item }}'
+        // TODO(port): roles/rust_build/tasks/per_user.yml:33 Jinja not translated: {{ user_shell }}
+        // changed_when: false (read-only in the YAML)
+        // TODO(port): roles/rust_build/tasks/per_user.yml:33 when not translated: cargo_check.rc == 0 (comparison not understood)
+        if false /* TODO(port): cargo_check.rc == 0 (comparison not understood) */ {
+            sh!(s, "{{{{ user_shell }}}} -lc 'cargo --version | cut -d \" \" -f 2'").allow_fail();
+        }
+
+        // roles/rust_build/tasks/per_user.yml:43 Get rustc version for '{{ item }}'
+        // TODO(port): roles/rust_build/tasks/per_user.yml:43 Jinja not translated: {{ user_shell }}
+        // changed_when: false (read-only in the YAML)
+        // TODO(port): roles/rust_build/tasks/per_user.yml:43 when not translated: cargo_check.rc == 0 (comparison not understood)
+        if false /* TODO(port): cargo_check.rc == 0 (comparison not understood) */ {
+            sh!(s, "{{{{ user_shell }}}} -lc 'rustc --version | cut -d \" \" -f 2'").allow_fail();
+        }
+
+        // roles/rust_build/tasks/per_user.yml:53 Check for broken Rust installation
+        // TODO(port): roles/rust_build/tasks/per_user.yml:53 set_fact: runtime variable; no mechanical mapping
+        // set_fact: {"rust_installation_broken":"{{ cargo_check.rc == 0 and (rustc_version_result.stdout is defined and rustc_version_result.stdout == '') }}"}
+
+        // roles/rust_build/tasks/per_user.yml:57 Display Rust toolchain versions for '{{ item }}'
+        // dropped: no effect on the host
+
+        // roles/rust_build/tasks/per_user.yml:65 Check if rustup needs update for '{{ item }}'
+        // TODO(port): roles/rust_build/tasks/per_user.yml:65 set_fact: runtime variable; no mechanical mapping
+        // set_fact: {"rustup_needs_update":"{{ cargo_check.rc == 0 and (rustup_version_result.stdout is defined and rustup_version_result.stdout != rustup_version) }}"}
+
+        // roles/rust_build/tasks/per_user.yml:69 Check if cargo/rustc needs update for '{{ item }}'
+        // TODO(port): roles/rust_build/tasks/per_user.yml:69 set_fact: runtime variable; no mechanical mapping
+        // set_fact: {"rust_needs_update":"{{ cargo_check.rc == 0 and ((cargo_version_result.stdout is defined and cargo_version_result.stdout != cargo_version) or (rustc_version_result.stdout is defined and rustc_version...
+
+        // roles/rust_build/tasks/per_user.yml:75 Remove broken Rust installation
+        // TODO(port): roles/rust_build/tasks/per_user.yml:75 task-level loop: `["/home/{{ item }}/.rustup","/home/{{ item }}/.cargo"]` (Jinja not translated: in path `{{ item_path }}`)
+        // file: {"path":"{{ item_path }}","state":"absent"}
+
+        // roles/rust_build/tasks/per_user.yml:87 Download rustup script for repair
+        // TODO(port): roles/rust_build/tasks/per_user.yml:87 unmapped module `get_url`: no emitter mapping
+        // get_url: {"dest":"/tmp/rustup.sh","mode":755,"url":"https://sh.rustup.rs"}
+
+        // roles/rust_build/tasks/per_user.yml:93 Reinstall Rust toolchain
+        // TODO(port): roles/rust_build/tasks/per_user.yml:93 when not translated: rust_installation_broken (variable `rust_installation_broken` is not a distro flag)
+        if false /* TODO(port): rust_installation_broken (variable `rust_installation_broken` is not a distro flag) */ {
+            sh!(s, "/tmp/rustup.sh -y");
+        }
+
+        // roles/rust_build/tasks/per_user.yml:99 Update rustup if needed for '{{ item }}'
+        // TODO(port): roles/rust_build/tasks/per_user.yml:99 Jinja not translated: {{ user_shell }}
+        // TODO(port): roles/rust_build/tasks/per_user.yml:99 when not translated: rustup_needs_update and not rust_installation_broken (variable `rustup_needs_update` is not a distro flag; variable `rust_installation_broken` is not a distro flag)
+        if false /* TODO(port): rustup_needs_update and not rust_installation_broken (variable `rustup_needs_update` is not a distro flag; variable `rust_installation_broken` is not a distro flag) */ {
+            sh!(s, "{{{{ user_shell }}}} -lc 'rustup self update'");
+        }
+
+        // roles/rust_build/tasks/per_user.yml:107 Update Rust toolchain if needed for '{{ item }}'
+        // TODO(port): roles/rust_build/tasks/per_user.yml:107 Jinja not translated: {{ user_shell }}
+        // TODO(port): roles/rust_build/tasks/per_user.yml:107 when not translated: rust_needs_update and not rust_installation_broken (variable `rust_needs_update` is not a distro flag; variable `rust_installation_broken` is not a distro flag)
+        if false /* TODO(port): rust_needs_update and not rust_installation_broken (variable `rust_needs_update` is not a distro flag; variable `rust_installation_broken` is not a distro flag) */ {
+            sh!(s, "{{{{ user_shell }}}} -lc 'rustup update'");
+        }
+
+        // roles/rust_build/tasks/per_user.yml:115 Display update results for '{{ item }}'
+        // dropped: no effect on the host
+
+        // roles/rust_build/tasks/per_user.yml:122 Download rustup script for '{{ item }}'
+        // TODO(port): roles/rust_build/tasks/per_user.yml:122 unmapped module `get_url`: no emitter mapping
+        // get_url: {"dest":"/tmp/rustup.sh","mode":755,"url":"https://sh.rustup.rs"}
+
+        // roles/rust_build/tasks/per_user.yml:130 Install rust and tools with the rustup script for '{{ item }}'
+        // TODO(port): roles/rust_build/tasks/per_user.yml:130 when not translated: cargo_check.rc != 0 (check not foldable)
+        if false /* TODO(port): cargo_check.rc != 0 (check not foldable) */ {
+            sh!(s, "/tmp/rustup.sh -y");
+        }
+
+        // roles/rust_build/tasks/per_user.yml:137 Check if cargo-deb is installed for '{{ item }}'
+        // TODO(port): roles/rust_build/tasks/per_user.yml:137 Jinja not translated: {{ user_shell }}
+        // changed_when: false (read-only in the YAML)
+        // TODO(port): roles/rust_build/tasks/per_user.yml:137 when not translated: not rust_installation_broken (variable `rust_installation_broken` is not a distro flag)
+        if false /* TODO(port): not rust_installation_broken (variable `rust_installation_broken` is not a distro flag) */ {
+            sh!(s, "{{{{ user_shell }}}} -lc 'which cargo-deb'").allow_fail();
+        }
+
+        // roles/rust_build/tasks/per_user.yml:147 Install cargo-deb
+        // TODO(port): roles/rust_build/tasks/per_user.yml:147 when not translated: cargodeb_check.rc != 0 and not rust_installation_broken (variable `rust_installation_broken` is not a distro flag); cargodeb_check.rc != 0 (check not foldable)
+        if false /* TODO(port): cargodeb_check.rc != 0 and not rust_installation_broken (variable `rust_installation_broken` is not a distro flag); cargodeb_check.rc != 0 (check not foldable) */ {
+            sh!(s, ". ~/.cargo/env && cargo install cargo-deb");
+        }
+
+        // roles/rust_build/tasks/per_user.yml:154 Check if cargo-generate-rpm is installed for '{{ item }}'
+        // TODO(port): roles/rust_build/tasks/per_user.yml:154 Jinja not translated: {{ user_shell }}
+        // changed_when: false (read-only in the YAML)
+        // TODO(port): roles/rust_build/tasks/per_user.yml:154 when not translated: not rust_installation_broken (variable `rust_installation_broken` is not a distro flag)
+        if false /* TODO(port): not rust_installation_broken (variable `rust_installation_broken` is not a distro flag) */ {
+            sh!(s, "{{{{ user_shell }}}} -lc 'which cargo-generate-rpm'").allow_fail();
+        }
+
+        // roles/rust_build/tasks/per_user.yml:164 Install cargo-generate-rpm for '{{ item }}'
+        // TODO(port): roles/rust_build/tasks/per_user.yml:164 when not translated: cargorpm_check.rc != 0 and not rust_installation_broken (variable `rust_installation_broken` is not a distro flag); cargorpm_check.rc != 0 (check not foldable)
+        if false /* TODO(port): cargorpm_check.rc != 0 and not rust_installation_broken (variable `rust_installation_broken` is not a distro flag); cargorpm_check.rc != 0 (check not foldable) */ {
+            sh!(s, ". ~/.cargo/env && cargo install cargo-generate-rpm");
+        }
+
+        // roles/rust_build/tasks/per_user.yml:170 Check if x86_64-unknown-linux-musl is installed for '{{ item }}'
+        // changed_when: false (read-only in the YAML)
+        // TODO(port): roles/rust_build/tasks/per_user.yml:170 when not translated: not rust_installation_broken (variable `rust_installation_broken` is not a distro flag)
+        if false /* TODO(port): not rust_installation_broken (variable `rust_installation_broken` is not a distro flag) */ {
+            sh!(s, ". ~/.cargo/env && rustup target list | grep x86_64-unknown-linux-musl | grep installed").allow_fail();
+        }
+
+        // roles/rust_build/tasks/per_user.yml:179 Install rustup target x86_64-unknown-linux-musl for '{{ item }}'
+        // TODO(port): roles/rust_build/tasks/per_user.yml:179 when not translated: musl_check.rc != 0 and not rust_installation_broken (variable `rust_installation_broken` is not a distro flag); musl_check.rc != 0 (check not foldable)
+        if false /* TODO(port): musl_check.rc != 0 and not rust_installation_broken (variable `rust_installation_broken` is not a distro flag); musl_check.rc != 0 (check not foldable) */ {
+            sh!(s, ". ~/.cargo/env && rustup target add x86_64-unknown-linux-musl");
+        }
+    }
+    Ok(())
+}

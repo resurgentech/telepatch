@@ -1,0 +1,22 @@
+---
+# For APT based distros that use /etc/apt/sources.list, older version mostly
+
+- name: Turn on source repos to /etc/apt/sources.list
+  shell: |
+    cp /etc/apt/sources.list /etc/apt/sources.list.ansible
+    if [ -z "$( cat /etc/apt/sources.list | grep deb-src )" ]; then
+      sed -Ei 's/^deb /deb-src /' /etc/apt/sources.list.ansible-src
+      cat /etc/apt/sources.list.ansible-src | grep deb-src >> /etc/apt/sources.list.ansible
+      rm /etc/apt/sources.list.ansible-src
+    else
+      # Some distros have src repos commented out
+      sed -Ei 's/^# deb-src /deb-src /' /etc/apt/sources.list.ansible
+    fi
+    if [ -z "$(diff /etc/apt/sources.list /etc/apt/sources.list.ansible)" ]; then
+      rm /etc/apt/sources.list.ansible
+    else
+      mv /etc/apt/sources.list.ansible /etc/apt/sources.list
+      echo "SOURCES_LIST_CHANGED"
+    fi
+  register: shell_output
+  changed_when: "'SOURCES_LIST_CHANGED' in shell_output.stdout"

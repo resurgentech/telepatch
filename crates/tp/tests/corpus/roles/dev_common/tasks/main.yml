@@ -1,0 +1,37 @@
+---
+# This installs development tools
+
+- name: dev_common_debian
+  include_tasks: debian.yml
+  when: debian_based|bool
+
+- name: dev_common_redhat
+  include_tasks: redhat.yml
+  when: redhat_based|bool
+
+- name: dev_common_amazonlinux2
+  include_tasks: amazonlinux2.yml
+  when: amazonlinux2_based|bool
+
+- name: dev_common_amazonlinux2023
+  include_tasks: amazonlinux2023.yml
+  when: amazonlinux2023_based|bool
+
+- name: dev_common_archlinux
+  include_tasks: archlinux.yml
+  when: arch_based|bool
+
+# Debian and Arch python is externally managed (PEP 668), their tasks install
+# these as distro packages instead
+- name: Various python dependancies
+  pip:
+    name:
+      - jinja2
+      - GitPython
+      - pyaml
+  when: not (debian_based|bool or arch_based|bool)
+
+- name: Installing uv for python
+  shell: set -o pipefail && curl -LsSf https://astral.sh/uv/install.sh | UV_INSTALL_DIR=/usr/local/bin sh
+  args:
+    executable: /bin/bash

@@ -1,0 +1,14 @@
+---
+# pkgctl (devtools) clones the kernel PKGBUILDs, the rest are kernel makedeps
+# that makepkg --syncdeps would otherwise download on every build
+- name: Arch Kernel Build Dependencies
+  pacman:
+    name:
+      - devtools
+      - pacman-contrib
+      - bc
+      - pahole
+      - rust
+      - rust-bindgen
+      - rust-src
+    state: present

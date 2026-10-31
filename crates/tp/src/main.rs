@@ -4,6 +4,7 @@ use std::process::ExitCode;
 use clap::{Parser, Subcommand};
 use tp::check_understanding;
 use tp::classify::{Options, classify_playbook};
+use tp::import;
 
 /// telepatch tooling: understand and port Ansible roles.
 #[derive(Parser)]
@@ -31,6 +32,24 @@ enum Command {
         /// Print JSON instead of Markdown.
         #[arg(long)]
         json: bool,
+    },
+    /// Emit telepatch Rust from an Ansible role, a directory of roles or a
+    /// playbook: one module per role, `// TODO(port)` where the mapping is
+    /// not mechanical.
+    Import {
+        /// Role directory, directory of roles, or playbook.
+        input: PathBuf,
+        /// Directory holding the roles (default: derived from the input).
+        #[arg(long)]
+        roles_path: Option<PathBuf>,
+        /// Write the files (`lib.rs`, `flags.rs`, `<role>.rs`) into this
+        /// directory instead of printing them.
+        #[arg(long)]
+        out: Option<PathBuf>,
+        /// Print the per-role report (Markdown). Without `--out` the code is
+        /// then not printed.
+        #[arg(long)]
+        report: bool,
     },
     /// Check an understanding doc: required levels in order, dated sources,
     /// no hedge words, a `Decision:` line. Prints one line per problem and
@@ -67,6 +86,41 @@ fn main() -> ExitCode {
             }
             Err(e) => {
                 eprintln!("tp check-understanding: {e}");
+                ExitCode::FAILURE
+            }
+        },
+        Some(Command::Import {
+            input,
+            roles_path,
+            out,
+            report,
+        }) => match import::import(&import::Options {
+            input,
+            roles_path,
+            base: None,
+        }) {
+            Ok(o) => {
+                if let Some(dir) = &out {
+                    if let Err(e) = std::fs::create_dir_all(dir).and_then(|()| {
+                        o.files
+                            .iter()
+                            .try_for_each(|(n, t)| std::fs::write(dir.join(n), t))
+                    }) {
+                        eprintln!("tp import: {}: {e}", dir.display());
+                        return ExitCode::FAILURE;
+                    }
+                } else if !report {
+                    for (n, t) in &o.files {
+                        println!("// ===== {n} =====\n{t}");
+                    }
+                }
+                if report {
+                    print!("{}", o.report());
+                }
+                ExitCode::SUCCESS
+            }
+            Err(e) => {
+                eprintln!("tp import: {e}");
                 ExitCode::FAILURE
             }
         },

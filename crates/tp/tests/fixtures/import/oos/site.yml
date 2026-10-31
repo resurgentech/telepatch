@@ -1,0 +1,15 @@
+---
+- name: Mixed play
+  hosts: all
+  vars_prompt:
+    - name: password
+      prompt: "Password?"
+  roles:
+    - geerlingguy.docker
+    - missing_role
+  tasks:
+    - name: On the controller
+      shell: date
+      delegate_to: localhost
+    - name: Plain
+      shell: uptime

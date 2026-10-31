@@ -1,0 +1,29 @@
+---
+- name: Ubuntu Kernel Build Dependencies
+  apt:
+    name: linux
+    state: build-dep
+
+- name: Ubuntu Kernel Build Dependencies Dependencies
+  apt:
+    name:
+      - libperl-dev
+      - libzstd-dev
+      - libpython3-dev
+      - binutils-dev
+      - equivs
+      - dwarves
+      - systemtap-sdt-dev
+      - libbabeltrace-dev
+      - libbabeltrace-ctf-dev
+      - python3-pip
+      - python3-jinja2
+      - python3-yaml
+      - python3-git
+      - python3-lxml
+    state: present
+
+# - name: Ubuntu python-config hack
+#   shell: python3 -m pip install python-config && \
+#          rm -f /usr/bin/python-config && \
+#          ln -s /usr/bin/python3-config /usr/bin/python-config

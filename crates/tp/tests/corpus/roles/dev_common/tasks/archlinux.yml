@@ -1,0 +1,24 @@
+---
+- name: Arch Common development tools
+  pacman:
+    name:
+      - base-devel
+      - cmake
+      - clang
+      - llvm
+      - lld
+      - git
+      - rsync
+      - gnupg
+      - bc
+      - cpio
+      - xmlto
+      - zstd
+      - wget
+      - python
+      - python-pip
+      - python-yaml
+      - python-jinja
+      - python-gitpython
+      - python-pytest
+    state: present

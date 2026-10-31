@@ -1,0 +1,11 @@
+[package]
+name = "tp-emitted"
+description = "What `tp import` emits for the five corpus roles; checked in, compiled by the workspace"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+telepatch = { workspace = true }
+serde = { version = "1.0.229", features = ["derive"] }

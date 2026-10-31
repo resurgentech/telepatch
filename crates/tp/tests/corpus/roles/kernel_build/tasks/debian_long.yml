@@ -1,0 +1,31 @@
+---
+- name: Debian Kernel Build Dependencies Dependencies Long form
+  apt:
+    name:
+      - libncurses-dev
+      - libssl-dev
+      - libelf-dev
+      - libudev-dev
+      - libpci-dev
+      - libiberty-dev
+      - equivs
+      - dwarves
+      - dkms
+      - debhelper
+      - dh-exec
+      - dh-python
+      - quilt
+      - xz-utils
+      - dvipng
+      - graphviz
+      - patchutils
+      - python3-sphinx
+      - python3-sphinx-rtd-theme
+      - texlive-latex-base
+      - texlive-latex-extra
+    state: present
+
+- name: Debian Kernel Build Dependencies from Long form
+  apt:
+    name: linux
+    state: build-dep
