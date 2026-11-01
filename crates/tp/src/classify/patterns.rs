@@ -31,7 +31,7 @@ pub const PATTERNS: &[Pattern] = &[
     Pattern {
         id: "installer",
         title: "Installer outside the package manager",
-        primitive: "`tool` (binary, installed version, wanted version, source, install/update); not built",
+        primitive: "`pkg` with a non-distro source (`Script`, `Cargo`, `Rustup`, `Pip`)",
     },
     Pattern {
         id: "per_user_loop",

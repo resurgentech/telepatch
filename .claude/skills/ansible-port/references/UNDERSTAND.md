@@ -67,7 +67,7 @@ changed every run" is not a verdict. The shape and the verdict are yours.
 | Method | tool | The module and the arguments that matter. Add to it when the tool missed something that matters (`bash with pipefail`) |
 | Signals | tool | Observations: network execution, tool installers, `creates`, change reporting, registers and their readers, conditions, loops, users, handlers |
 | Adequate | you | `yes`, or `no:` and the reason. The test is whether the method can tell when the end state is already reached, and whether it reaches the *intended* state rather than whatever the source serves today |
-| Primitive | you | The telepatch primitive that fits the shape: `pkg`, `file`, `sh`, or one of the designed-not-built ones (`repo`, `svc`, `user`, `fetch`, `git`, `secret`, `tool`), or `none` with a one-line sketch of what it would need. Control flow has fixed spellings: `dispatch` rows are `match`, `log` rows are `dropped`, a `check` row names the op that absorbs it (`unless on :130`), a `derived fact` row names the fact or scope that replaces it |
+| Primitive | you | The telepatch primitive that fits the shape: `pkg`, `file`, `sh`, or one of the designed-not-built ones (`repo`, `svc`, `user`, `fetch`, `git`, `secret`), or `pkg` with its source for an installer (`pkg: Script`, `pkg: Cargo`, `pkg: Rustup`, `pkg: Pip`), or `none` with a one-line sketch of what it would need. Control flow has fixed spellings: `dispatch` rows are `match`, `log` rows are `dropped`, a `check` row names the op that absorbs it (`unless on :130`), a `derived fact` row names the fact or scope that replaces it |
 
 `tp check-understanding <doc> --playbook <mirrored playbook> --roles-path
 <mirrored roles>` fails on an empty judgment cell and on a row count that
@@ -83,7 +83,9 @@ Shapes that are easy to misread:
   truth for "latest" (a releases page, an API, the installer script's own
   version), and the install-versus-update commands. A method that has
   none of the five is `no: reinstalls every run, cannot detect drift,
-  version is whatever the source serves`. The primitive is `tool`.
+  version is whatever the source serves`. The primitive is `pkg` with a
+  non-distro source; the five parts map onto `Script`'s fields (binary,
+  version probe, pin or latest, install, update).
 - **check** (`register` a command, `changed_when: false`, later `when:
   rc != 0`). The intent belongs to the task it guards; the check row's
   Primitive column says which task absorbs it (`unless` on that op, or a
@@ -134,7 +136,7 @@ moved on (an installer one-liner, a package group name, a module's
 requirements). For every `installer` row in Task intent this level also
 answers: what version does the source serve today, how is a version
 pinned with this installer, and what does the tool print for its own
-version. Those three facts are what the `tool` primitive, or the hack
+version. Those three facts are what a `pkg` source, or the hack
 standing in for it, needs.
 
 - Source line form: `Source: <url> (accessed YYYY-MM-DD)`, always on one

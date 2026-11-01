@@ -10,10 +10,12 @@ proof. The mapping table stays: it is how you read what the emitter wrote
 and how you write what it did not.
 
 What is built: `#[role]`, `Host` and its facts, `h.pkg`/`h.yum`/`h.pip`,
-`h.file`, `sh!`, `as_user`, `barrier`, `.reads/.writes/.allow_fail`,
-the `plan` command, and the equivalence harness. Not built: guards and
-`notify`, and the `repo`, `svc`, `user`, `fetch`, `tpl!`, `git` and
-`tool` primitives.
+`h.cargo`, `h.rustup` and `h.script` (the `pkg` sources: Distro, Pip,
+Cargo, Rustup, Script), `h.file`, `sh!`, `as_user`, `barrier`,
+`.reads/.writes/.allow_fail`, the `plan` command, and the equivalence
+harness. Not built: guards and `notify`, the `repo`, `svc`, `user`,
+`fetch`, `tpl!` and `git` primitives, and any other `pkg` source (for
+example `Npm`).
 
 ## The `sh!` rule
 
@@ -24,8 +26,8 @@ other row that ends up as `sh!`, the line carries a marker naming the
 primitive it stands in for:
 
 ```rust
-// HACK(tool): uv installer; see conversion/dev_base.md, Task intent row 7.
-sh!(h, "...", creates = "/usr/local/bin/uv");
+// HACK(pkg: no Npm source yet): prettier; see conversion/dev_base.md, Task intent row 7.
+sh!(h, "npm install -g prettier", creates = "/usr/local/bin/prettier");
 ```
 
 and `## Port notes` lists it under "Hacks" with the row. `creates` and
@@ -329,7 +331,7 @@ equivalence" changes, each in its own change with its own oracle diff.
 | `copy` with `content:` | `h.file(p).content("..")`, then `.mode(0o644)` and `.owner("u")` if the YAML sets them |
 | `file` `state: directory` / `absent` | `h.file(p).dir()` / `.absent()` |
 | `shell`/`command` | First the Task intent row's Shape. `glue` or `sh`: `sh!(h, "cmd {var}")`; `{var}` is quoted by the macro, `{{` and `}}` are literal braces. Any other shape: that shape's primitive, or `sh!` with a `HACK(<primitive>)` marker |
-| installer (`curl \| sh`, `rustup`, `cargo install`, `get_url` then run) | `tool` when built: binary, installed-version probe, wanted version (pinned or latest from a named source), install and update commands. Until then `sh!` with `creates = <binary>` and `// HACK(tool)` |
+| installer (`curl \| sh`, `rustup`, `cargo install`, `get_url` then run) | `h.script(name, ScriptSpec::new()..)` (or `h.cargo`, `h.rustup`, `h.pip`): `.bin(..)`, `.version(..)` (the installed-version probe), the wanted version (`.pin(v)`, or `.latest(Latest::github_release(..) \| Latest::command(..))`), `.install(..)`, `.update(..)`. A source that does not exist yet (`npm`, say): `sh!` with `creates = <binary>` and `// HACK(pkg: no <Source> source yet)` |
 | `args: creates:` | `sh!(h, "..", creates = "path")` |
 | `register` + `changed_when: false` + `when: rc != 0` (check, then act) | one `sh!(h, "act", unless = "check")` |
 | `changed_when: "<text>" in stdout` | `sh!(h, "..", changed_if = "regex")` |
@@ -358,17 +360,23 @@ pub async fn dev_common(h: &Host<Vars>) -> Result<(), TraceError> {
     } else if arch_based(&h.os) {
         h.pkg(["base-devel", "cmake"]);
     }
-    // HACK(tool): installer with no version probe; see the doc's Task
-    // intent row for this task and the Primitive gaps decision.
-    sh!(
-        h,
-        "(set -o pipefail && curl -LsSf https://astral.sh/uv/install.sh | UV_INSTALL_DIR=/usr/local/bin sh)",
-        creates = "/usr/local/bin/uv"
+    h.script(
+        "uv",
+        ScriptSpec::new()
+            .bin("/usr/local/bin/uv")
+            .version("uv self version --short")
+            .latest(Latest::github_release("astral-sh/uv"))
+            .install(
+                "(set -o pipefail && curl -LsSf https://astral.sh/uv/install.sh | UV_INSTALL_DIR=/usr/local/bin sh)",
+            )
+            .update("uv self update"),
     );
     Ok(())
 }
 ```
 
 (The YAML ran the installer unconditionally, which the doc lists as a
-bug the oracle cannot see; `creates` fixes the rerun, and the marker
-says the real fix is the `tool` primitive.)
+bug the oracle cannot see; the `Script` source probes the binary and
+installs only when it is absent, since wanted is `Present`. With `.latest()` it
+would also compare the installed version with the latest release and
+update on drift.)

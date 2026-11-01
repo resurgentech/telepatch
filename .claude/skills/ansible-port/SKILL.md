@@ -38,8 +38,9 @@ its source, and a rule for when they should differ. Behind
 rc != 0` is a check that belongs inside the op that acts on it. Name the
 shape before you name the method. The shapes telepatch has primitives for
 are `pkg`, `file`, `sh`; the shapes it has designed but not built are
-`repo`, `svc`, `user`, `fetch`, `git`, `secret`, `tool`. A task whose
-shape has no primitive is a finding, not an inconvenience.
+`repo`, `svc`, `user`, `fetch`, `git`, `secret`. An installer is a `pkg`
+whose source is not the distro (`Pip`, `Cargo`, `Rustup`, `Script`). A
+task whose shape has no primitive is a finding, not an inconvenience.
 
 **`sh!` is a hack until proven otherwise.** It is the right primitive for
 a command that is really a command (`make -j`, `rustup update` when the
@@ -122,12 +123,6 @@ difference is skill feedback. `tp check-understanding <doc> --playbook
 <mirrored playbook>` checks the mechanical rules, including that every
 judgment cell is filled and the row count matches the YAML; the rest is
 the reviewer's.
-
-`tool` is this skill's proposal for the installer shape. The design note
-(`docs/execution-model.html`) lists `repo`, `svc`, `user`, `fetch`,
-`git` and `secret` as designed primitives and does not yet name `tool`;
-until it does, the shape in `references/UNDERSTAND.md` level 3 is the
-definition.
 
 ## Rules for the doc
 

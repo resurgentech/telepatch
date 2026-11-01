@@ -35,7 +35,7 @@ or none with a sketch. Signals are the tool's observations, not shapes.
 
 | Task | Intent | Shape | Method | Signals | Adequate | Primitive |
 |---|---|---|---|---|---|---|
-| `<file>:<line>` <name> | <end state> | <shape> | <tool: module and arguments> | <tool: observations> | <yes / no: reason> | <pkg / file / sh / repo / svc / user / fetch / git / secret / tool / none: sketch> |
+| `<file>:<line>` <name> | <end state> | <shape> | <tool: module and arguments> | <tool: observations> | <yes / no: reason> | <pkg / file / sh / repo / svc / user / fetch / git / secret / pkg with its source (Script, Cargo, Rustup, Pip) / none: sketch> |
 
 Primitive gaps: <one line per shape the role needs that has no built
 primitive, naming the rows; or none>.
