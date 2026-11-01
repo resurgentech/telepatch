@@ -6,9 +6,26 @@
 //! 1. open the root shell (`want` 1) and read `os` before the playbook
 //!    future starts ([`crate::transport::read_os`]);
 //! 2. the engine drives the playbook; [`Executor::read_facts`] sends the
-//!    fact probes through the same shell in one batch; [`Executor::apply`]
-//!    runs prepare ([`crate::prepare`]), then pipelines every op of the
-//!    window and collects results in order, streaming output live.
+//!    fact probes in one batch, each to its principal's shell;
+//!    [`Executor::apply`] runs prepare ([`crate::prepare`]), then pipelines
+//!    the window's ops and collects results in order, streaming output
+//!    live;
+//! 3. at the end of the host's run (also when it is blocked or failed) the
+//!    user shells close, then the root shell, then the transport's
+//!    connections (SSH).
+//!
+//! # Principals
+//!
+//! The host keeps the root shell plus one shell per user, opened the first
+//! time a window's ops or a fact read address that user (after the
+//! `getent` check; on SSH `sudo -n -iu u bash`, a refusal blocks the host).
+//! An op goes to its `run_as.principal`'s shell: `Root` (including
+//! `as_user("root")`) to the root shell, `User(u)` to `u`'s. Local and
+//! docker open no user shells: a window that needs one is blocked with the
+//! transport's limit. Consecutive ops of one principal form a run; a run
+//! is pipelined and collected in full before the next run is sent, so a
+//! change of principal waits for the previous shell (every switch is
+//! treated as a dependency edge).
 //!
 //! # Failure gating
 //!
@@ -16,7 +33,8 @@
 //! to the shell. Each op is therefore sent as
 //! `if [ -z "${__tp_halt-}" ]; then <op>; [ $? -eq 0 ] || __tp_halt=1;
 //! else <skip trailer>; fi`. `__tp_halt` lives in the persistent shell and
-//! is never reset: after a failure no later op on the host runs. An
+//! is never reset: after a failure no later op on that shell runs, and the
+//! executor sends nothing more on any of the host's shells. An
 //! `allow_fail` op never sets it. After a failure the executor stops
 //! sending windows but lets the engine finish tracing, so the report can
 //! list every skipped role; fact reads still run (they only read).
@@ -30,7 +48,7 @@
 //! `facts`, `host_status`.
 
 use std::cell::RefCell;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io::Write as _;
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -50,12 +68,14 @@ use crate::trace::{OpNode, OpSpec, Principal};
 use crate::trailer::{OpKind, Trailer, wrap};
 use crate::transport::docker::DockerTransport;
 use crate::transport::local::LocalTransport;
+use crate::transport::ssh::SshTransport;
 use crate::transport::{Limit, Shells, Transport, read_os};
 
 /// Where to reach a host.
 pub enum Target {
     Local(LocalTransport),
     Docker(DockerTransport),
+    Ssh(SshTransport),
 }
 
 impl Transport for Target {
@@ -63,6 +83,7 @@ impl Transport for Target {
         match self {
             Target::Local(t) => t.open(host, principal, want).await,
             Target::Docker(t) => t.open(host, principal, want).await,
+            Target::Ssh(t) => t.open(host, principal, want).await,
         }
     }
 }
@@ -143,10 +164,105 @@ struct Live {
     tail: Vec<u8>,
 }
 
+/// A host's open shells: the root shell, one per user opened so far, and
+/// the target that opens more.
+struct HostShells {
+    host: String,
+    target: Rc<Target>,
+    root: Shell,
+    users: BTreeMap<String, Shell>,
+}
+
+impl HostShells {
+    /// Close the user shells, then the root shell, then the transport's
+    /// connections (SSH).
+    async fn close(self) {
+        for (_, sh) in self.users {
+            sh.close().await;
+        }
+        self.root.close().await;
+        close_target(&self.target).await;
+    }
+}
+
+async fn close_target(t: &Target) {
+    if let Target::Ssh(t) = t {
+        t.close().await;
+    }
+}
+
+/// Why `target` could not open `who`'s shell on `host`, from the `Limit`
+/// and (SSH) the ssh-side text.
+fn refusal(target: &Target, host: &str, who: &Principal, limit: Option<Limit>) -> String {
+    let msg = match target {
+        Target::Ssh(t) => t.message(host),
+        _ => None,
+    };
+    let with = |s: String| match &msg {
+        Some(m) if !m.is_empty() => format!("{s}: {m}"),
+        _ => s,
+    };
+    match (who, target, limit) {
+        (Principal::User(u), Target::Ssh(_), Some(Limit::SudoRefused)) => {
+            with(format!("sudo -n -iu {u} refused"))
+        }
+        (Principal::User(_), _, Some(Limit::Other(m))) => m,
+        (Principal::User(u), _, l) => with(format!("could not open a shell for user {u}: {l:?}")),
+        (Principal::Root, Target::Ssh(_), Some(Limit::ConnectRefused)) => {
+            with("ssh could not connect".to_string())
+        }
+        (Principal::Root, Target::Ssh(_), Some(Limit::AuthFailed)) => {
+            with("ssh authentication failed (BatchMode: key or agent only)".to_string())
+        }
+        (Principal::Root, Target::Ssh(_), Some(Limit::SudoRefused)) => with(
+            "sudo refused: `sudo -n` needs passwordless sudo for the ssh user (or log in as root)"
+                .to_string(),
+        ),
+        (Principal::Root, Target::Ssh(_), Some(Limit::Other(m))) => {
+            format!("could not open a root shell: {m}")
+        }
+        (Principal::Root, Target::Ssh(_), Some(l)) => {
+            with(format!("could not open a root shell: {l:?}"))
+        }
+        (Principal::Root, _, Some(Limit::SudoRefused)) => {
+            "sudo refused: `sudo -n` needs passwordless sudo (or run as root)".to_string()
+        }
+        (Principal::Root, _, Some(l)) => format!("could not open a root shell: {l:?}"),
+        (Principal::Root, _, None) => "could not open a root shell".to_string(),
+    }
+}
+
+impl prepare::ShellSet for HostShells {
+    fn shell(&mut self, who: &Principal) -> Option<&mut Shell> {
+        match who {
+            Principal::Root => Some(&mut self.root),
+            Principal::User(u) => self.users.get_mut(u),
+        }
+    }
+
+    async fn open_user(&mut self, u: &str) -> Result<(), String> {
+        if self.users.contains_key(u) {
+            return Ok(());
+        }
+        let who = Principal::User(u.to_string());
+        let mut s = self.target.open(&self.host, &who, 1).await;
+        if s.got.is_empty() {
+            return Err(refusal(&self.target, &self.host, &who, s.limit));
+        }
+        let sh = s.got.remove(0);
+        // More than asked for is not expected; close the rest.
+        for extra in s.got {
+            extra.close().await;
+        }
+        self.users.insert(u.to_string(), sh);
+        Ok(())
+    }
+}
+
 pub struct HostExec {
     name: String,
     sink: Rc<Sink>,
-    shell: Shell,
+    shells: HostShells,
     report: HostReport,
     /// Failed or blocked: nothing more runs on this host.
     halted: bool,
@@ -243,11 +359,11 @@ fn last_lines(bytes: &[u8], n: usize) -> String {
 }
 
 impl HostExec {
-    fn new(name: &str, shell: Shell, sink: Rc<Sink>) -> HostExec {
+    fn new(name: &str, shells: HostShells, sink: Rc<Sink>) -> HostExec {
         HostExec {
             name: name.to_string(),
             sink,
-            shell,
+            shells,
             report: HostReport::new(name),
             halted: false,
             verdict: None,
@@ -363,31 +479,41 @@ impl HostExec {
         self.finish_op(w, &desc, Outcome::NotRun, 0, false, "");
     }
 
-    /// Verify the users `users` exist; `Err` blocks the host.
+    /// Verify the users `users` exist (on the root shell), then open the
+    /// shell of each that is not open yet; `Err` blocks the host.
     async fn ensure_users(&mut self, users: &BTreeSet<String>) -> Result<(), String> {
+        use prepare::ShellSet as _;
         let new: Vec<&String> = users
             .iter()
             .filter(|u| !self.users_ok.contains(*u))
             .collect();
-        if new.is_empty() {
-            return Ok(());
+        if !new.is_empty() {
+            self.seq += 1;
+            let script = prepare::users_script(new.iter().copied());
+            let (_, out) = prepare::probe(&mut self.shells.root, self.seq, &script).await?;
+            let missing = prepare::missing_users(&out);
+            if !missing.is_empty() {
+                return Err(format!(
+                    "user {} does not exist on the host",
+                    missing.join(", ")
+                ));
+            }
+            let ok: Vec<String> = new.into_iter().cloned().collect();
+            self.users_ok.extend(ok);
         }
-        self.seq += 1;
-        let script = prepare::users_script(new.iter().copied());
-        let (_, out) = prepare::probe(&mut self.shell, self.seq, &script).await?;
-        let missing = prepare::missing_users(&out);
-        if !missing.is_empty() {
-            return Err(format!(
-                "user {} does not exist on the host",
-                missing.join(", ")
-            ));
+        for u in users {
+            self.shells.open_user(u).await?;
         }
-        let ok: Vec<String> = new.into_iter().cloned().collect();
-        self.users_ok.extend(ok);
         Ok(())
     }
 
-    fn finish(mut self, res: Result<(), EngineError>) -> (HostReport, Shell) {
+    /// The shell `who`'s ops run in (opened by prepare or `ensure_users`).
+    fn shell_for(&mut self, who: &Principal) -> Option<&mut Shell> {
+        use prepare::ShellSet as _;
+        self.shells.shell(who)
+    }
+
+    fn finish(mut self, res: Result<(), EngineError>) -> (HostReport, HostShells) {
         let mut rep = std::mem::replace(&mut self.report, HostReport::new(&self.name));
         if let Err(e) = res
             && self.verdict.is_none()
@@ -413,7 +539,7 @@ impl HostExec {
                 }
             }
         }
-        (rep, self.shell)
+        (rep, self.shells)
     }
 }
 
@@ -460,17 +586,30 @@ impl Executor for HostExec {
                 post: Default::default(),
                 allow_fail: false,
             };
-            match self.shell.send_op(&node, self.seq, &host.os).await {
-                Ok(()) => ids.push(self.seq),
+            let id = self.seq;
+            let who = &q.run_as.principal;
+            let sent = match self.shell_for(who) {
+                Some(sh) => sh
+                    .send_op(&node, id, &host.os)
+                    .await
+                    .map_err(|e| e.to_string()),
+                None => Err(format!("no shell for {who:?}")),
+            };
+            match sent {
+                Ok(()) => ids.push(id),
                 Err(e) => {
-                    sent_err = Some(e.to_string());
+                    sent_err = Some(e);
                     break;
                 }
             }
         }
         let mut values = Vec::new();
         for (q, id) in queries.iter().zip(&ids) {
-            match prepare::collect(&mut self.shell, *id).await {
+            let got = match self.shell_for(&q.run_as.principal) {
+                Some(sh) => prepare::collect(sh, *id).await,
+                None => Err("no shell".to_string()),
+            };
+            match got {
                 Ok((_, out)) => values.push(q.fact.parse(&out)),
                 Err(e) => {
                     sent_err = sent_err.or(Some(e));
@@ -510,7 +649,6 @@ impl Executor for HostExec {
         }
 
         // Prepare: nothing is sent to be applied until all of it passes.
-        let mut scripts = Vec::new();
         for w in &window.ops {
             if w.node.guard.is_some() {
                 let why = format!(
@@ -520,23 +658,9 @@ impl Executor for HostExec {
                 self.block(why.clone());
                 return Err(why);
             }
-            match crate::trailer::render_for(
-                &w.node,
-                w.id.0,
-                self.shell.nonce(),
-                &host.os,
-                self.shell.user(),
-            ) {
-                Ok(s) => scripts.push(s),
-                Err(e) => {
-                    let why = format!("op #{}: {e}", w.id.0);
-                    self.block(why.clone());
-                    return Err(why);
-                }
-            }
         }
         let prepared = prepare::prepare_window(
-            &mut self.shell,
+            &mut self.shells,
             window,
             &host.os,
             &mut self.users_ok,
@@ -574,26 +698,25 @@ impl Executor for HostExec {
             }
         }
 
-        // Send everything, gated on the host's halt flag.
-        let nonce = self.shell.nonce().to_string();
-        let mut send_err = None;
-        for (w, script) in window.ops.iter().zip(&scripts) {
-            let set = if w.node.allow_fail {
-                ""
-            } else {
-                "[ $? -eq 0 ] || __tp_halt=1\n"
+        // Render each op for its principal's shell (open now).
+        let mut scripts = Vec::new();
+        for w in &window.ops {
+            let who = &w.node.run_as.principal;
+            let Some(sh) = self.shell_for(who) else {
+                let why = format!("op #{}: no shell open for {who:?}", w.id.0);
+                self.block(why.clone());
+                return Err(why);
             };
-            let gated = format!(
-                "if [ -z \"${{__tp_halt-}}\" ]; then\n{script}{set}else\n{}fi\n",
-                skip_script(&w.node, w.id.0, &nonce)
-            );
-            if let Err(e) = self.shell.send(w.id.0, &gated).await {
-                send_err = Some(e.to_string());
-                break;
+            match crate::trailer::render_for(&w.node, w.id.0, sh.nonce(), &host.os, sh.user()) {
+                Ok(s) => scripts.push(s),
+                Err(e) => {
+                    let why = format!("op #{}: {e}", w.id.0);
+                    self.block(why.clone());
+                    return Err(why);
+                }
             }
         }
 
-        // Collect in order.
         let index: HashMap<usize, usize> = window
             .ops
             .iter()
@@ -612,70 +735,116 @@ impl Executor for HostExec {
             .collect();
         let mut done = vec![false; window.ops.len()];
         let mut failed_seen = false;
-        while let Some(ev) = self.shell.next_event().await {
-            match ev {
-                Event::Output(id, bytes) => {
-                    let Some(&i) = index.get(&id) else { continue };
-                    let w = &window.ops[i];
-                    self.header(&mut live[i], w, &descs[i]);
-                    self.output(&mut live[i], w, &bytes);
+        let mut send_err = None;
+
+        // Consecutive ops on the same principal's shell form a run. Each
+        // run is pipelined into its shell and collected in full before the
+        // next run is sent (Assumption A3); after a failure nothing more is
+        // sent on any shell.
+        let mut start = 0;
+        while start < window.ops.len() && !failed_seen && send_err.is_none() {
+            let who = window.ops[start].node.run_as.principal.clone();
+            let end = window.ops[start..]
+                .iter()
+                .position(|w| w.node.run_as.principal != who)
+                .map_or(window.ops.len(), |n| start + n);
+
+            // Send the run, gated on the shell's halt flag.
+            let Some(sh) = self.shell_for(&who) else {
+                break;
+            };
+            let nonce = sh.nonce().to_string();
+            for (w, script) in window.ops[start..end].iter().zip(&scripts[start..end]) {
+                let set = if w.node.allow_fail {
+                    ""
+                } else {
+                    "[ $? -eq 0 ] || __tp_halt=1\n"
+                };
+                let gated = format!(
+                    "if [ -z \"${{__tp_halt-}}\" ]; then\n{script}{set}else\n{}fi\n",
+                    skip_script(&w.node, w.id.0, &nonce)
+                );
+                if let Err(e) = sh.send(w.id.0, &gated).await {
+                    send_err = Some(e.to_string());
+                    break;
                 }
-                Event::Done(id, trailer) => {
-                    let Some(&i) = index.get(&id) else { continue };
-                    let w = &window.ops[i];
-                    self.header(&mut live[i], w, &descs[i]);
-                    self.flush_partial(&mut live[i]);
-                    done[i] = true;
-                    if failed_seen {
-                        self.finish_op(w, &descs[i], Outcome::NotRun, 0, false, "");
-                        continue;
+            }
+
+            // Collect the run in order.
+            while let Some(ev) = match self.shell_for(&who) {
+                Some(sh) => sh.next_event().await,
+                None => None,
+            } {
+                match ev {
+                    Event::Output(id, bytes) => {
+                        let Some(&i) = index.get(&id) else { continue };
+                        let w = &window.ops[i];
+                        self.header(&mut live[i], w, &descs[i]);
+                        self.output(&mut live[i], w, &bytes);
                     }
-                    match parse_result(w.node.spec.op_kind(), &trailer) {
-                        Ok((0, changed, skipped)) => {
-                            let o = if changed {
-                                Outcome::Changed
-                            } else {
-                                Outcome::Unchanged
-                            };
-                            let note = if skipped { "skipped" } else { "" };
-                            self.finish_op(w, &descs[i], o, 0, changed, note);
+                    Event::Done(id, trailer) => {
+                        let Some(&i) = index.get(&id) else { continue };
+                        let w = &window.ops[i];
+                        self.header(&mut live[i], w, &descs[i]);
+                        self.flush_partial(&mut live[i]);
+                        done[i] = true;
+                        if failed_seen {
+                            self.finish_op(w, &descs[i], Outcome::NotRun, 0, false, "");
+                            continue;
                         }
-                        Ok((rc, _, _)) if w.node.allow_fail => {
-                            self.finish_op(w, &descs[i], Outcome::AllowedFail, rc, false, "");
+                        match parse_result(w.node.spec.op_kind(), &trailer) {
+                            Ok((0, changed, skipped)) => {
+                                let o = if changed {
+                                    Outcome::Changed
+                                } else {
+                                    Outcome::Unchanged
+                                };
+                                let note = if skipped { "skipped" } else { "" };
+                                self.finish_op(w, &descs[i], o, 0, changed, note);
+                            }
+                            Ok((rc, _, _)) if w.node.allow_fail => {
+                                self.finish_op(w, &descs[i], Outcome::AllowedFail, rc, false, "");
+                            }
+                            Ok((rc, _, _)) => {
+                                failed_seen = true;
+                                let tail = last_lines(&live[i].tail, TAIL_LINES);
+                                self.finish_op(w, &descs[i], Outcome::Failed, rc, false, "");
+                                self.fail(w, &descs[i], rc, tail);
+                            }
+                            Err(msg) => {
+                                failed_seen = true;
+                                self.finish_op(w, &descs[i], Outcome::Failed, -1, false, "");
+                                self.fail(w, &descs[i], -1, msg);
+                            }
                         }
-                        Ok((rc, _, _)) => {
+                    }
+                    Event::Failed(id, err) => {
+                        let Some(&i) = index.get(&id) else { continue };
+                        let w = &window.ops[i];
+                        self.header(&mut live[i], w, &descs[i]);
+                        self.flush_partial(&mut live[i]);
+                        done[i] = true;
+                        if failed_seen {
+                            self.finish_op(w, &descs[i], Outcome::NotRun, 0, false, "");
+                        } else {
                             failed_seen = true;
-                            let tail = last_lines(&live[i].tail, TAIL_LINES);
-                            self.finish_op(w, &descs[i], Outcome::Failed, rc, false, "");
-                            self.fail(w, &descs[i], rc, tail);
-                        }
-                        Err(msg) => {
-                            failed_seen = true;
+                            let mut tail = last_lines(&live[i].tail, TAIL_LINES);
+                            if !tail.is_empty() {
+                                tail.push('\n');
+                            }
+                            tail.push_str(&err.to_string());
                             self.finish_op(w, &descs[i], Outcome::Failed, -1, false, "");
-                            self.fail(w, &descs[i], -1, msg);
+                            self.fail(w, &descs[i], -1, tail);
                         }
-                    }
-                }
-                Event::Failed(id, err) => {
-                    let Some(&i) = index.get(&id) else { continue };
-                    let w = &window.ops[i];
-                    self.header(&mut live[i], w, &descs[i]);
-                    self.flush_partial(&mut live[i]);
-                    done[i] = true;
-                    if failed_seen {
-                        self.finish_op(w, &descs[i], Outcome::NotRun, 0, false, "");
-                    } else {
-                        failed_seen = true;
-                        let mut tail = last_lines(&live[i].tail, TAIL_LINES);
-                        if !tail.is_empty() {
-                            tail.push('\n');
-                        }
-                        tail.push_str(&err.to_string());
-                        self.finish_op(w, &descs[i], Outcome::Failed, -1, false, "");
-                        self.fail(w, &descs[i], -1, tail);
                     }
                 }
             }
+            // An op of this run with no result was lost with the shell:
+            // stop here, the loop below reports it.
+            if done[start..end].iter().any(|d| !d) {
+                break;
+            }
+            start = end;
         }
         // Ops with no result: never sent, or lost with the shell.
         for (i, w) in window.ops.iter().enumerate() {
@@ -720,22 +889,22 @@ async fn run_one<V: 'static>(
         );
         r
     };
-    let mut shells = spec.target.open(&name, &Principal::Root, 1).await;
+    let target = Rc::new(spec.target);
+    let mut shells = target.open(&name, &Principal::Root, 1).await;
     if shells.got.is_empty() {
-        let why = match shells.limit {
-            Some(Limit::SudoRefused) => {
-                "sudo refused: `sudo -n` needs passwordless sudo (or run as root)".to_string()
-            }
-            Some(l) => format!("could not open a root shell: {l:?}"),
-            None => "could not open a root shell".to_string(),
-        };
+        let why = refusal(&target, &name, &Principal::Root, shells.limit);
+        close_target(&target).await;
         return blocked(why);
     }
     let mut shell = shells.got.remove(0);
+    for extra in shells.got {
+        extra.close().await;
+    }
     let os = match read_os(&mut shell).await {
         Ok(os) => os,
         Err(e) => {
             shell.close().await;
+            close_target(&target).await;
             return blocked(format!("reading os: {e}"));
         }
     };
@@ -744,10 +913,16 @@ async fn run_one<V: 'static>(
         name: pb_name,
         run: pb_run,
     };
-    let mut engine = Engine::new(HostExec::new(&name, shell, sink.clone()));
+    let shells = HostShells {
+        host: name.clone(),
+        target,
+        root: shell,
+        users: BTreeMap::new(),
+    };
+    let mut engine = Engine::new(HostExec::new(&name, shells, sink.clone()));
     let res = engine.run_host(&pb, host).await;
-    let (rep, shell) = engine.executor.finish(res);
-    shell.close().await;
+    let (rep, shells) = engine.executor.finish(res);
+    shells.close().await;
     sink.event(json!({"ev":"host_status","host":name,"status":rep.status.label(),"detail":rep.status_detail()}));
     rep
 }

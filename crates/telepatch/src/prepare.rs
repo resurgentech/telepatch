@@ -4,10 +4,11 @@
 //! The root shell opening is the permission check (`sudo -n` refusal is
 //! [`crate::transport::Limit::SudoRefused`], handled when the host opens).
 //! Per window this module checks that every user the window's ops address
-//! exists (`getent passwd`), and gathers package state: one query per
-//! manager over every name in the window's pkg ops, and one probe per
-//! non-distro op (script, cargo: installed version, and latest when wanted), sent
-//! in that op's `RunAs`.
+//! exists (`getent passwd`), opens each such user's shell (on SSH, `sudo -n
+//! -iu u bash`: the per-user permission check), and gathers package state:
+//! one query per manager over every name in the window's pkg ops, and one
+//! probe per non-distro op (script, cargo: installed version, and latest
+//! when wanted), sent in that op's `RunAs` on its principal's shell.
 //!
 //! Gathering versus asserting: package state is *gathered* and reported
 //! ("will install: ..."); it is never asserted. The pkg templates already
@@ -254,54 +255,88 @@ pub async fn collect(shell: &mut Shell, id: usize) -> Result<(i32, String), Stri
     Ok((rc, String::from_utf8_lossy(&out.output).into_owned()))
 }
 
+/// A host's shells as prepare sees them: the root shell, the shells of the
+/// users opened so far, and a way to open one more.
+#[allow(async_fn_in_trait)]
+pub trait ShellSet {
+    /// The shell ops of `who` run in: `Root` is the root shell, `User(u)`
+    /// is `u`'s shell once [`ShellSet::open_user`] has opened it.
+    fn shell(&mut self, who: &Principal) -> Option<&mut Shell>;
+    /// Open `u`'s shell unless it is open. `Err` is the reason the host is
+    /// blocked.
+    async fn open_user(&mut self, u: &str) -> Result<(), String>;
+}
+
+fn shell_of<'a, S: ShellSet>(shells: &'a mut S, who: &Principal) -> Result<&'a mut Shell, String> {
+    shells.shell(who).ok_or_else(|| match who {
+        Principal::Root => "no root shell".to_string(),
+        Principal::User(u) => format!("no shell open for user {u}"),
+    })
+}
+
 /// Check `window` on the host. Users already verified are in `users_ok`.
 /// `Err` is the reason the host is blocked. On success, the packages the
 /// window's pkg ops will install or change. `seq` hands out probe ids.
-pub async fn prepare_window(
-    shell: &mut Shell,
+///
+/// Order: the `getent` check for users not yet verified (root shell, one
+/// round trip); then the shell of every user the window addresses that is
+/// not open yet ([`ShellSet::open_user`]); then the package probes, sent
+/// all at once and collected (distro and pip on the root shell, each
+/// non-distro probe on its op's principal's shell).
+pub async fn prepare_window<S: ShellSet>(
+    shells: &mut S,
     window: &Window,
     os: &Os,
     users_ok: &mut BTreeSet<String>,
     seq: &mut usize,
 ) -> Result<Prepared, String> {
-    let new_users: Vec<String> = users_in(window)
-        .into_iter()
-        .filter(|u| !users_ok.contains(u))
+    let users = users_in(window);
+    let new_users: Vec<String> = users
+        .iter()
+        .filter(|u| !users_ok.contains(*u))
+        .cloned()
         .collect();
     let groups = pkg_names(window);
 
-    // Send every query, then collect: one round trip.
     let mut next = || {
         *seq += 1;
         *seq
     };
-    let user_id = if new_users.is_empty() {
-        None
-    } else {
+    if !new_users.is_empty() {
         let id = next();
-        let w = wrap(
-            OpKind::Sh,
-            &crate::ops::shell::raw_body(&users_script(&new_users)),
-            id,
-            shell.nonce(),
-        );
-        shell.send(id, &w).await.map_err(|e| e.to_string())?;
-        Some(id)
-    };
+        let root = shell_of(shells, &Principal::Root)?;
+        let (_, out) = probe(root, id, &users_script(&new_users)).await?;
+        let missing = missing_users(&out);
+        if !missing.is_empty() {
+            return Err(format!(
+                "user {} does not exist on the host (as_user in window {})",
+                missing.join(", "),
+                window.number
+            ));
+        }
+        users_ok.extend(new_users);
+    }
+    for u in &users {
+        shells.open_user(u).await?;
+    }
+
+    // Send every query, then collect: one round trip.
     let mut pkg_ids = Vec::new();
     for (m, names) in &groups {
         let id = next();
+        let root = shell_of(shells, &Principal::Root)?;
         let w = wrap(
             OpKind::Sh,
             &crate::ops::shell::raw_body(&pkg_probe(m, names)),
             id,
-            shell.nonce(),
+            root.nonce(),
         );
-        shell.send(id, &w).await.map_err(|e| e.to_string())?;
+        root.send(id, &w).await.map_err(|e| e.to_string())?;
         pkg_ids.push(id);
     }
-    // Non-distro probes, each in its op's RunAs (as `read_facts` does).
-    let mut src_ids: Vec<(&PkgSpec, Option<usize>)> = Vec::new();
+    // Non-distro probes, each in its op's RunAs and principal's shell (as
+    // `read_facts` does).
+    let mut src_ids: Vec<(&PkgSpec, &Principal, Option<usize>)> = Vec::new();
     for op in &window.ops {
         let OpSpec::Pkg(p) = &op.node.spec else {
             continue;
@@ -319,30 +354,21 @@ pub async fn prepare_window(
             post: Default::default(),
             allow_fail: false,
         };
-        match shell.send_op(&node, id, os).await {
-            Ok(()) => src_ids.push((p, Some(id))),
+        let who = &op.node.run_as.principal;
+        let sh = shell_of(shells, who)?;
+        match sh.send_op(&node, id, os).await {
+            Ok(()) => src_ids.push((p, who, Some(id))),
             // Not renderable for this shell: unknown, not blocked.
-            Err(ShellError::Render(_)) => src_ids.push((p, None)),
+            Err(ShellError::Render(_)) => src_ids.push((p, who, None)),
             Err(e) => return Err(e.to_string()),
         }
     }
 
-    if let Some(id) = user_id {
-        let (_, out) = collect(shell, id).await?;
-        let missing = missing_users(&out);
-        if !missing.is_empty() {
-            return Err(format!(
-                "user {} does not exist on the host (as_user in window {})",
-                missing.join(", "),
-                window.number
-            ));
-        }
-        users_ok.extend(new_users);
-    }
     let mut will = Prepared::default();
     for ((m, names), id) in groups.iter().zip(pkg_ids) {
         // Gather only: a failed probe means "unknown", not "blocked".
-        let missing = match collect(shell, id).await {
+        let root = shell_of(shells, &Principal::Root)?;
+        let missing = match collect(root, id).await {
             Ok((_, out)) => missing_names(names, &out),
             Err(_) => names.clone(),
         };
@@ -354,9 +380,9 @@ pub async fn prepare_window(
             });
         }
     }
-    for (p, id) in src_ids {
+    for (p, who, id) in src_ids {
         let out = match id {
-            Some(id) => match collect(shell, id).await {
+            Some(id) => match collect(shell_of(shells, who)?, id).await {
                 Ok((0, out)) => Some(out),
                 _ => None,
             },

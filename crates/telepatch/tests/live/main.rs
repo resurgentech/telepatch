@@ -3,6 +3,7 @@
 
 mod container;
 mod pkg;
+mod ssh_exec;
 mod sshd;
 
 use std::path::Path;

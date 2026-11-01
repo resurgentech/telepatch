@@ -45,7 +45,7 @@ static CONTAINERS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsi
 
 /// `ssh_processes` sees every transport of this process, so the tests that
 /// start a container and count processes run one at a time.
-static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+pub(crate) static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 async fn serial() -> tokio::sync::MutexGuard<'static, ()> {
     SERIAL.lock().await
@@ -149,7 +149,7 @@ impl Drop for Sshd {
 }
 
 /// A transport that trusts the throwaway host key and uses `key` only.
-fn transport(key: &Path) -> SshTransport {
+pub(crate) fn transport(key: &Path) -> SshTransport {
     SshTransport::new()
         .identity(key)
         .option("StrictHostKeyChecking=no")
@@ -158,7 +158,7 @@ fn transport(key: &Path) -> SshTransport {
 }
 
 /// Processes whose command line names this process's control directories.
-fn ssh_processes() -> Vec<String> {
+pub(crate) fn ssh_processes() -> Vec<String> {
     let mark = format!("ControlPath=/tmp/tp-{}-", std::process::id());
     let mut out = vec![];
     for e in std::fs::read_dir("/proc").unwrap().flatten() {
