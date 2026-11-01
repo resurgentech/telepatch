@@ -3,6 +3,7 @@
 
 pub mod docker;
 pub mod local;
+pub mod ssh;
 
 use crate::pool::Shell;
 use crate::trace::Principal;

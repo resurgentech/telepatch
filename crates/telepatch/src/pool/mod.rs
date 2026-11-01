@@ -197,6 +197,22 @@ impl Shell {
         }
     }
 
+    /// Replace the shell process with `command` (written as `exec
+    /// <command>`, so it reads the rest of stdin) and redo the hello
+    /// handshake; on success the shell is `user`. Used to turn a login
+    /// shell into root with `sudo -n bash`. No op may be in flight. On
+    /// failure the shell is dead.
+    pub async fn exec(&mut self, command: &str, user: &str) -> Result<(), ShellError> {
+        let script = format!(
+            "exec {command}\nexec 2>&1\nprintf '\\n__tp_{} {HELLO} {{}}\\n'\n",
+            self.nonce
+        );
+        self.send(HELLO, &script).await?;
+        self.wait(HELLO).await?;
+        self.user = user.to_string();
+        Ok(())
+    }
+
     /// The nonce this shell's trailers carry.
     pub fn nonce(&self) -> &str {
         &self.nonce

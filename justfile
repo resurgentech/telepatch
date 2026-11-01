@@ -43,6 +43,12 @@ test-live-os:
 test-live-pkg:
     cargo test -p telepatch --test live -- --ignored --nocapture pkg_
 
+# Live: the SSH transport against an ubuntu:24.04 sshd container (root
+# shell via sudo, read_os, AuthFailed, ConnectRefused, SudoRefused). Needs
+# docker, ssh, ssh-keygen and the network for apt.
+test-live-ssh:
+    cargo test -p telepatch --test live -- --ignored --nocapture ssh_
+
 # Build examples/hello for musl and fail unless the binary is static; then
 # smoke-test it.
 musl-example:
