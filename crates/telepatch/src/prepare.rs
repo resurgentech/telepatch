@@ -5,7 +5,9 @@
 //! [`crate::transport::Limit::SudoRefused`], handled when the host opens).
 //! Per window this module checks that every user the window's ops address
 //! exists (`getent passwd`), and gathers package state: one query per
-//! manager over every name in the window's pkg ops.
+//! manager over every name in the window's pkg ops, and one probe per
+//! non-distro op (script: installed version, and latest when wanted), sent
+//! in that op's `RunAs`.
 //!
 //! Gathering versus asserting: package state is *gathered* and reported
 //! ("will install: ..."); it is never asserted. The pkg templates already
@@ -17,11 +19,12 @@
 use std::collections::BTreeSet;
 
 use crate::engine::Window;
-use crate::ops::pkg::{Manager, PkgMode, Source};
-use crate::pool::Shell;
-use crate::report::WillInstall;
+use crate::facts::os::Os;
+use crate::ops::pkg::{Manager, PkgMode, PkgSpec, Source};
+use crate::pool::{Shell, ShellError};
+use crate::report::{WillChange, WillInstall};
 use crate::sh::quote;
-use crate::trace::{OpSpec, Principal};
+use crate::trace::{OpNode, OpSpec, Principal};
 use crate::trailer::{OpKind, wrap};
 
 /// Non-root users the window's ops address (`as_user(u)`).
@@ -145,6 +148,49 @@ pub fn missing_names(names: &[String], output: &str) -> Vec<String> {
         .collect()
 }
 
+/// The probe script of a non-distro, non-pip pkg op, or `None` when its
+/// source has no such probe (distro and pip go through [`pkg_probe`];
+/// cargo and rustup are not built yet).
+pub fn source_probe(p: &PkgSpec) -> Option<String> {
+    match &p.source {
+        Source::Script(s) => Some(s.probe(&p.wanted)),
+        Source::Distro(_) | Source::Pip | Source::Cargo | Source::Rustup(_) => None,
+    }
+}
+
+/// Parse a [`source_probe`]'s output (`None` when the probe failed) into
+/// what will change. A failed probe means "unknown", never blocked.
+pub fn source_changes(window: usize, p: &PkgSpec, out: Option<&str>) -> Vec<WillChange> {
+    match &p.source {
+        Source::Script(_) => {
+            let (have, latest) = match out {
+                Some(o) => crate::ops::pkg::parse_probe(o),
+                None => (crate::ops::pkg::Probed::Unknown, None),
+            };
+            let name = p.names.first().cloned().unwrap_or_default();
+            crate::ops::pkg::will_change(&have, latest.as_deref(), &p.wanted)
+                .map(|(installed, wanted)| WillChange {
+                    window,
+                    source: manager_name(&p.source).to_string(),
+                    user: p.user.clone(),
+                    name,
+                    installed,
+                    wanted,
+                })
+                .into_iter()
+                .collect()
+        }
+        Source::Distro(_) | Source::Pip | Source::Cargo | Source::Rustup(_) => Vec::new(),
+    }
+}
+
+/// What prepare found a window will do.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Prepared {
+    pub will_install: Vec<WillInstall>,
+    pub will_change: Vec<WillChange>,
+}
+
 /// Run `script` in `shell` as a plain op with id `id`; its rc and output.
 pub async fn probe(shell: &mut Shell, id: usize, script: &str) -> Result<(i32, String), String> {
     let wrapped = wrap(
@@ -170,13 +216,14 @@ pub async fn collect(shell: &mut Shell, id: usize) -> Result<(i32, String), Stri
 
 /// Check `window` on the host. Users already verified are in `users_ok`.
 /// `Err` is the reason the host is blocked. On success, the packages the
-/// window's pkg ops will install. `seq` hands out probe ids.
+/// window's pkg ops will install or change. `seq` hands out probe ids.
 pub async fn prepare_window(
     shell: &mut Shell,
     window: &Window,
+    os: &Os,
     users_ok: &mut BTreeSet<String>,
     seq: &mut usize,
-) -> Result<Vec<WillInstall>, String> {
+) -> Result<Prepared, String> {
     let new_users: Vec<String> = users_in(window)
         .into_iter()
         .filter(|u| !users_ok.contains(u))
@@ -213,6 +260,32 @@ pub async fn prepare_window(
         shell.send(id, &w).await.map_err(|e| e.to_string())?;
         pkg_ids.push(id);
     }
+    // Non-distro probes, each in its op's RunAs (as `read_facts` does).
+    let mut src_ids: Vec<(&PkgSpec, Option<usize>)> = Vec::new();
+    for op in &window.ops {
+        let OpSpec::Pkg(p) = &op.node.spec else {
+            continue;
+        };
+        let Some(script) = source_probe(p) else {
+            continue;
+        };
+        let id = next();
+        let node = OpNode {
+            spec: OpSpec::Raw { script },
+            run_as: op.node.run_as.clone(),
+            reads: Default::default(),
+            writes: Default::default(),
+            guard: None,
+            post: Default::default(),
+            allow_fail: false,
+        };
+        match shell.send_op(&node, id, os).await {
+            Ok(()) => src_ids.push((p, Some(id))),
+            // Not renderable for this shell: unknown, not blocked.
+            Err(ShellError::Render(_)) => src_ids.push((p, None)),
+            Err(e) => return Err(e.to_string()),
+        }
+    }
 
     if let Some(id) = user_id {
         let (_, out) = collect(shell, id).await?;
@@ -226,7 +299,7 @@ pub async fn prepare_window(
         }
         users_ok.extend(new_users);
     }
-    let mut will = Vec::new();
+    let mut will = Prepared::default();
     for ((m, names), id) in groups.iter().zip(pkg_ids) {
         // Gather only: a failed probe means "unknown", not "blocked".
         let missing = match collect(shell, id).await {
@@ -234,12 +307,23 @@ pub async fn prepare_window(
             Err(_) => names.clone(),
         };
         if !missing.is_empty() {
-            will.push(WillInstall {
+            will.will_install.push(WillInstall {
                 window: window.number,
                 manager: manager_name(m).to_string(),
                 names: missing,
             });
         }
+    }
+    for (p, id) in src_ids {
+        let out = match id {
+            Some(id) => match collect(shell, id).await {
+                Ok((0, out)) => Some(out),
+                _ => None,
+            },
+            None => None,
+        };
+        will.will_change
+            .extend(source_changes(window.number, p, out.as_deref()));
     }
     Ok(will)
 }

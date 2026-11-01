@@ -4,6 +4,7 @@
 use std::rc::Rc;
 
 use telepatch::facts::os::Os;
+use telepatch::ops::pkg::{Latest, ScriptSpec};
 use telepatch::plan::render_host;
 use telepatch::trailer::render_op;
 use telepatch::{Host, Node, NodeId, sh};
@@ -131,6 +132,55 @@ fn plan_shows_pkg_and_file_effects() {
     h.pkg(["python3"]).build_dep();
     h.file("/etc/a").line("x");
     h.file("/etc/b").absent();
+    insta::assert_snapshot!(render_host("h", &h.os, &h.snapshot()));
+}
+
+fn uv_spec() -> ScriptSpec {
+    ScriptSpec::new()
+        .bin("/usr/local/bin/uv")
+        .version("uv self version --short")
+        .install(
+            "curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=/usr/local/bin sh",
+        )
+        .update("uv self update")
+}
+
+#[test]
+fn script_present() {
+    let h = host("debian12");
+    let id = h.script("uv", uv_spec()).id();
+    assert!(h.snapshot().errors.is_empty(), "{:?}", h.snapshot().errors);
+    insta::assert_snapshot!(wrapped(&h, id));
+}
+
+#[test]
+fn script_pinned() {
+    let h = host("debian12");
+    let p = h.script("uv", uv_spec());
+    p.pin("0.9.5");
+    assert!(h.snapshot().errors.is_empty(), "{:?}", h.snapshot().errors);
+    insta::assert_snapshot!(wrapped(&h, p.id()));
+}
+
+#[test]
+fn script_latest_github_release() {
+    let h = host("debian12");
+    let p = h.script(
+        "uv",
+        uv_spec().latest(Latest::github_release("astral-sh/uv")),
+    );
+    p.latest();
+    assert!(h.snapshot().errors.is_empty(), "{:?}", h.snapshot().errors);
+    insta::assert_snapshot!(wrapped(&h, p.id()));
+}
+
+#[test]
+fn plan_shows_script_effects() {
+    let h = host("debian12");
+    h.script("uv", uv_spec());
+    h.as_user("deploy")
+        .script("tool", uv_spec().bin("/home/deploy/.local/bin/tool"))
+        .writes([telepatch::Key::file("/home/deploy/.local/bin/tool")]);
     insta::assert_snapshot!(render_host("h", &h.os, &h.snapshot()));
 }
 

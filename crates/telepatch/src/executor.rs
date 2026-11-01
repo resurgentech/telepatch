@@ -167,6 +167,14 @@ fn describe(op: &OpNode) -> String {
     match &op.spec {
         OpSpec::Raw { script } => format!("sh {}", first_line(script)),
         OpSpec::Shell(s) => format!("sh {}", first_line(&s.cmd)),
+        OpSpec::Pkg(p) if matches!(p.source, crate::ops::pkg::Source::Script(_)) => {
+            let mode = match &p.wanted {
+                Wanted::Present => "install".to_string(),
+                Wanted::Pinned(v) => format!("pin {v}"),
+                Wanted::Latest => "latest".to_string(),
+            };
+            format!("{} {mode} {}", p.kind(), p.names.join(" "))
+        }
         OpSpec::Pkg(p) => {
             let mode = match (p.mode, &p.wanted) {
                 (PkgMode::BuildDep, _) => "build-dep",
@@ -520,12 +528,17 @@ impl Executor for HostExec {
                 }
             }
         }
-        let prepared =
-            prepare::prepare_window(&mut self.shell, window, &mut self.users_ok, &mut self.seq)
-                .await;
+        let prepared = prepare::prepare_window(
+            &mut self.shell,
+            window,
+            &host.os,
+            &mut self.users_ok,
+            &mut self.seq,
+        )
+        .await;
         match prepared {
             Ok(will) => {
-                for w in will {
+                for w in will.will_install {
                     self.sink.line(&format!(
                         "== {} [prepare] window {} will install ({}): {} ==",
                         self.name,
@@ -536,6 +549,14 @@ impl Executor for HostExec {
                     self.sink.event(json!({"ev":"will_install","host":self.name,
                         "window":w.window,"manager":w.manager,"names":w.names}));
                     self.report.will_install.push(w);
+                }
+                for w in will.will_change {
+                    self.sink
+                        .line(&format!("== {} [prepare] {} ==", self.name, w.line()));
+                    self.sink.event(json!({"ev":"will_change","host":self.name,
+                        "window":w.window,"source":w.source,"user":w.user,"name":w.name,
+                        "installed":w.installed,"wanted":w.wanted}));
+                    self.report.will_change.push(w);
                 }
             }
             Err(why) => {

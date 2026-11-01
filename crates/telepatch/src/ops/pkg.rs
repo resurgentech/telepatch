@@ -12,14 +12,17 @@
 //! installed something. The set is data ([`PkgSpec::names`]) so T8 can
 //! merge ops of the same host and manager into a union.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Deref;
 
 use crate::facts::os::Family;
 use crate::host::{Host, OpHandle, TraceError};
-use crate::key::Key;
+use crate::key::{Key, Value};
 use crate::sh::quote;
-use crate::trace::{Node, OpNode, OpSpec};
+use crate::trace::{Node, OpNode, OpSpec, Principal};
+
+mod script;
+pub use script::{Latest, Probed, ScriptSpec, VERSION_RE, parse_probe, version_token, will_change};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Manager {
@@ -33,10 +36,6 @@ pub enum Manager {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RustupSpec {}
 
-/// Placeholder; T32 fills in the script-installer spec.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct ScriptSpec {}
-
 /// Where a package comes from.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Source {
@@ -47,8 +46,9 @@ pub enum Source {
     Cargo,
     /// Not built yet (T34).
     Rustup(RustupSpec),
-    /// Not built yet (T32).
-    Script(ScriptSpec),
+    /// A vendor installer script ([`ScriptSpec`]; boxed to keep `OpNode`
+    /// small).
+    Script(Box<ScriptSpec>),
 }
 
 /// Which version of a package is wanted.
@@ -77,6 +77,10 @@ pub struct PkgSpec {
     /// Run `apt-get update` first (set by [`apply_apt_update`]). Ignored by
     /// other managers.
     pub update_cache: bool,
+    /// The op's principal (`root` for `h` and `as_user("root")`), set when
+    /// the op is pushed. Names the per-user sources' keys
+    /// (`pkg:script:<user>:<name>`); unused by distro and pip.
+    pub user: String,
 }
 
 impl PkgSpec {
@@ -96,19 +100,53 @@ impl PkgSpec {
             wanted: Wanted::Present,
             mode: PkgMode::Install,
             update_cache: false,
+            user: "root".to_string(),
         }
     }
 
     /// The effect key of one name. Non-distro names live in their own
     /// namespace (`pkg:pip:<name>`) so they never overlap or merge with
-    /// system names. Cargo, rustup and script keys are provisional (T32).
+    /// system names. Script keys name the principal
+    /// (`pkg:script:<user>:<name>`); cargo and rustup keys are provisional
+    /// (T33, T34).
     pub fn key_of(&self, name: &str) -> Key {
         match &self.source {
             Source::Distro(_) => Key::pkg(name),
             Source::Pip => Key::pkg(format!("pip:{name}")),
             Source::Cargo => Key::pkg(format!("cargo:{name}")),
             Source::Rustup(_) => Key::pkg(format!("rustup:{name}")),
-            Source::Script(_) => Key::pkg(format!("script:{name}")),
+            Source::Script(_) => Key::pkg(format!("script:{}:{name}", self.user)),
+        }
+    }
+
+    /// Default write set: the names' keys for distro and pip, `*` for
+    /// script (a vendor installer writes files nobody listed; A14).
+    pub fn default_writes(&self) -> BTreeSet<Key> {
+        match &self.source {
+            Source::Script(_) => BTreeSet::from([Key::Any]),
+            _ => self.keys(),
+        }
+    }
+
+    /// Default postconditions: every name `Installed`; a script op also
+    /// posts `file:<bin> = Exists(true)`.
+    pub fn default_post(&self) -> BTreeMap<Key, Value> {
+        let mut post: BTreeMap<Key, Value> = self
+            .names
+            .iter()
+            .map(|n| (self.key_of(n), Value::Installed))
+            .collect();
+        if let Source::Script(s) = &self.source {
+            post.insert(Key::file(&s.bin), Value::Exists(true));
+        }
+        post
+    }
+
+    /// The plan kind: `pkg` for distro and pip, `pkg[script]` for script.
+    pub fn kind(&self) -> &'static str {
+        match &self.source {
+            Source::Script(_) => "pkg[script]",
+            _ => "pkg",
         }
     }
 
@@ -136,6 +174,10 @@ impl PkgSpec {
     }
 
     pub fn render(&self) -> String {
+        if let Source::Script(s) = &self.source {
+            let name = self.names.first().map(String::as_str).unwrap_or("");
+            return s.render(name, &self.wanted);
+        }
         let names: Vec<String> = self
             .names
             .iter()
@@ -381,17 +423,25 @@ impl PkgHandle {
 
     fn want(&self, w: Wanted) -> &Self {
         let mut distro = false;
+        let mut script_err = None;
         self.spec(|s| {
             if matches!(s.source, Source::Distro(_)) {
                 distro = true;
-            } else {
-                s.wanted = w;
+                return;
             }
+            if let (Source::Script(sc), Wanted::Latest) = (&s.source, &w) {
+                let name = s.names.first().map(String::as_str).unwrap_or("");
+                script_err = sc.latest_problem(name);
+            }
+            s.wanted = w;
         });
         if distro {
             self.0.record_error(TraceError::new(
                 "pin or latest on distro packages is not supported",
             ));
+        }
+        if let Some(e) = script_err {
+            self.0.record_error(TraceError::new(e));
         }
         self
     }
@@ -427,16 +477,28 @@ impl<V> Host<V> {
 
     /// Push a pkg op for any source. Sources that are not built yet
     /// (T32-T34 remove them one by one) are a trace error.
-    pub(crate) fn pkg_spec_op(&self, spec: PkgSpec) -> PkgHandle {
+    pub(crate) fn pkg_spec_op(&self, mut spec: PkgSpec) -> PkgHandle {
         if let Err(e) = check_names(&spec.names) {
             self.record_error(e);
         }
-        if matches!(
-            spec.source,
-            Source::Cargo | Source::Rustup(_) | Source::Script(_)
-        ) {
+        if matches!(spec.source, Source::Cargo | Source::Rustup(_)) {
             self.record_error(TraceError::new("source not built yet"));
         }
+        if let Source::Script(s) = &spec.source {
+            let name = spec.names.first().map(String::as_str).unwrap_or("");
+            if spec.names.len() != 1 {
+                self.record_error(TraceError::new(format!(
+                    "script {name}: exactly one package name per script op"
+                )));
+            }
+            for e in s.problems(name, &spec.wanted) {
+                self.record_error(TraceError::new(e));
+            }
+        }
+        spec.user = match &self.run_as().principal {
+            Principal::Root => "root".to_string(),
+            Principal::User(u) => u.clone(),
+        };
         PkgHandle(self.op(OpSpec::Pkg(spec)))
     }
 
@@ -469,6 +531,18 @@ impl<V> Host<V> {
         S: AsRef<str>,
     {
         self.pkg_op(Manager::Yum, names(pkgs))
+    }
+
+    /// A package installed by a vendor script: `name` is the package name
+    /// (one per op), `spec` says how to probe, install and update it. Keys
+    /// `pkg:script:<user>:<name>`; writes `*` unless narrowed with
+    /// `.writes([..])`; posts `Installed` and `file:<bin> = Exists(true)`.
+    /// Missing required parts are trace errors.
+    pub fn script(&self, name: impl AsRef<str>, spec: ScriptSpec) -> PkgHandle {
+        self.pkg_spec_op(PkgSpec::from_source(
+            Source::Script(Box::new(spec)),
+            vec![name.as_ref().to_string()],
+        ))
     }
 
     /// Python packages via pip (`pkg:pip:<name>` keys).
@@ -546,7 +620,7 @@ mod tests {
 
     #[test]
     fn script_never_merges() {
-        let a = PkgSpec::from_source(Source::Script(ScriptSpec::default()), names(["x"]));
+        let a = PkgSpec::from_source(Source::Script(Box::default()), names(["x"]));
         assert!(!a.can_merge(&a.clone()));
         let p = PkgSpec::from_source(Source::Pip, names(["x"]));
         assert!(p.can_merge(&p.clone()));
@@ -557,14 +631,105 @@ mod tests {
 
     #[test]
     fn unbuilt_sources_are_a_trace_error() {
-        for src in [
-            Source::Cargo,
-            Source::Rustup(RustupSpec::default()),
-            Source::Script(ScriptSpec::default()),
-        ] {
+        for src in [Source::Cargo, Source::Rustup(RustupSpec::default())] {
             let h = host();
             h.pkg_spec_op(PkgSpec::from_source(src, names(["x"])));
             assert_eq!(errors(&h), ["source not built yet"]);
         }
+    }
+
+    fn uv() -> ScriptSpec {
+        ScriptSpec::new()
+            .bin("/usr/local/bin/uv")
+            .version("uv --version")
+            .install("sh install.sh")
+    }
+
+    #[test]
+    fn script_missing_parts_are_trace_errors() {
+        let h = host();
+        h.script("uv", ScriptSpec::new());
+        assert_eq!(
+            errors(&h),
+            [
+                "script uv: bin is required",
+                "script uv: version is required",
+                "script uv: install is required",
+            ]
+        );
+    }
+
+    #[test]
+    fn script_latest_needs_a_latest_source() {
+        let h = host();
+        h.script("uv", uv()).latest();
+        assert_eq!(errors(&h), ["script uv: latest is required for .latest()"]);
+        let h = host();
+        h.script("uv", uv().latest(Latest::command("echo 1")))
+            .latest();
+        h.script("uv", uv()).pin("1.0");
+        assert!(errors(&h).is_empty(), "{:?}", errors(&h));
+    }
+
+    #[test]
+    fn script_update_defaults_to_install() {
+        let h = host();
+        h.script("uv", uv());
+        let Source::Script(s) = spec_of(&h, 0).source else {
+            panic!()
+        };
+        assert_eq!(s.update_cmd(), "sh install.sh");
+        assert_eq!(s.clone().update("u").update_cmd(), "u");
+    }
+
+    #[test]
+    fn script_keys_name_the_principal() {
+        let h = host();
+        h.script("uv", uv());
+        h.as_user("deploy").script("uv", uv());
+        h.as_user("root").script("uv", uv());
+        let t = h.snapshot();
+        let keys: Vec<(String, String)> = t
+            .nodes
+            .iter()
+            .map(|n| match n {
+                Node::Op(o) => (
+                    o.writes
+                        .iter()
+                        .map(|k| k.to_string())
+                        .collect::<Vec<_>>()
+                        .join(","),
+                    o.post
+                        .iter()
+                        .map(|(k, v)| format!("{k}={v}"))
+                        .collect::<Vec<_>>()
+                        .join(","),
+                ),
+                _ => panic!(),
+            })
+            .collect();
+        let post =
+            |u: &str| format!("pkg:script:{u}:uv=Installed,file:/usr/local/bin/uv=Exists(true)");
+        assert_eq!(
+            keys,
+            [
+                ("*".to_string(), post("root")),
+                ("*".to_string(), post("deploy")),
+                ("*".to_string(), post("root")),
+            ]
+        );
+    }
+
+    #[test]
+    fn script_writes_narrowing_keeps_post() {
+        let h = host();
+        h.script("uv", uv())
+            .writes([Key::file("/usr/local/bin/uv")]);
+        let Node::Op(o) = &h.snapshot().nodes[0] else {
+            panic!()
+        };
+        assert_eq!(o.writes, BTreeSet::from([Key::file("/usr/local/bin/uv")]));
+        assert_eq!(o.post.len(), 2);
+        assert_eq!(o.spec.kind(), "pkg[script]");
     }
 }

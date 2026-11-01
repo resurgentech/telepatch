@@ -85,7 +85,7 @@ impl OpSpec {
     pub fn kind(&self) -> &'static str {
         match self {
             OpSpec::Raw { .. } | OpSpec::Shell(_) => "sh",
-            OpSpec::Pkg(_) => "pkg",
+            OpSpec::Pkg(p) => p.kind(),
             OpSpec::File(_) => "file",
         }
     }
@@ -114,7 +114,7 @@ impl OpSpec {
     pub fn default_writes(&self) -> BTreeSet<Key> {
         match self {
             OpSpec::Raw { .. } | OpSpec::Shell(_) => BTreeSet::from([Key::Any]),
-            OpSpec::Pkg(p) => p.keys(),
+            OpSpec::Pkg(p) => p.default_writes(),
             OpSpec::File(f) => BTreeSet::from([Key::file(&f.path)]),
         }
     }
@@ -124,11 +124,7 @@ impl OpSpec {
         use crate::ops::file::FileKind;
         match self {
             OpSpec::Raw { .. } | OpSpec::Shell(_) => BTreeMap::new(),
-            OpSpec::Pkg(p) => p
-                .names
-                .iter()
-                .map(|n| (p.key_of(n), Value::Installed))
-                .collect(),
+            OpSpec::Pkg(p) => p.default_post(),
             OpSpec::File(f) => BTreeMap::from([(
                 Key::file(&f.path),
                 Value::Exists(f.kind != FileKind::Absent),

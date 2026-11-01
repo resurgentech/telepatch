@@ -78,6 +78,39 @@ pub struct WillInstall {
     pub names: Vec<String>,
 }
 
+/// A non-distro package a window's op will change, from the prepare
+/// probe of its source. Only items that will change are listed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WillChange {
+    pub window: usize,
+    /// The source word: `script` (later `cargo`, `rustup`).
+    pub source: String,
+    /// The op's principal (`root` for `h`).
+    pub user: String,
+    pub name: String,
+    /// `None` when absent; `"unknown"` when the probe failed or found no
+    /// version.
+    pub installed: Option<String>,
+    /// `present`, the pinned version, or `<v> (latest)`
+    /// (`unknown (latest)` when the lookup failed).
+    pub wanted: String,
+}
+
+impl WillChange {
+    /// `window N pkg[script] root uv: 0.9.2 -> 0.9.5`.
+    pub fn line(&self) -> String {
+        format!(
+            "window {} pkg[{}] {} {}: {} -> {}",
+            self.window,
+            self.source,
+            self.user,
+            self.name,
+            self.installed.as_deref().unwrap_or("absent"),
+            self.wanted
+        )
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HostReport {
     pub name: String,
@@ -87,6 +120,7 @@ pub struct HostReport {
     /// order, excluding the failed role.
     pub skipped_roles: Vec<String>,
     pub will_install: Vec<WillInstall>,
+    pub will_change: Vec<WillChange>,
 }
 
 impl HostReport {
@@ -97,6 +131,7 @@ impl HostReport {
             ops: Vec::new(),
             skipped_roles: Vec::new(),
             will_install: Vec::new(),
+            will_change: Vec::new(),
         }
     }
 
@@ -176,6 +211,9 @@ impl Report {
                     w.manager,
                     w.names.join(", ")
                 );
+            }
+            for w in &h.will_change {
+                let _ = writeln!(out, "\n{}: {}", h.name, w.line());
             }
         }
         for h in &self.hosts {

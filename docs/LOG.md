@@ -173,3 +173,19 @@ are appended, never edited in; a hook refuses rewrites.
   per distro; 7/7 acceptance identical, second pass CHANGED 0;
   `conversion/rust.md` holds the trial-2 case.
 - Commits: 1cf4461, ffd6776, a9bd000, 03c0199
+
+## 2026-10-31 — T30 design note: the source axis on `pkg`
+
+- `docs/execution-model.html` pkg row: sources (Distro default, Pip,
+  Cargo, Rustup, Script), one method per source producing one `PkgSpec`,
+  `wanted` (Present, `.pin(v)`, `.latest()`), the five questions, latest
+  resolved on the host; Facts in bulk: non-distro probes join the batch.
+- Commits: 6d7092a
+
+## 2026-10-31 — T31 `Source` and `Wanted` on `PkgSpec`, no behaviour change
+
+- `PkgSpec { source, names, wanted, mode, update_cache }`; `Manager`
+  loses Pip, `PkgMode` loses Latest; one `PkgHandle` with `.pin`/`.latest`
+  (distro: trace error); Cargo/Rustup/Script "source not built yet";
+  merge key adds source and wanted, Script never merges. No snapshot moved.
+- Commits: 95c8ec5
