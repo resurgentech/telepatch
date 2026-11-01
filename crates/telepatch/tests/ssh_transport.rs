@@ -5,14 +5,20 @@
 //! The stub understands what the transport sends:
 //! - master: `-N` (with `-o ControlMaster=yes -o ControlPath=P`): records
 //!   its pid, creates `P`, and sleeps until `-O exit` kills it; with
-//!   `TP_STUB_MASTER_FAIL` set it prints that to stderr and exits 255.
+//!   `TP_STUB_MASTER_FAIL` set it prints that to stderr and exits 255; with
+//!   `TP_STUB_MAX_MASTERS=n` only the first `n` masters start, later ones
+//!   print "Connection refused" and exit 255.
 //! - `-O exit`: kills the master and every channel registered on `P`.
 //! - channel (no `-N`): fails unless `P` exists, registers its pid on `P`,
-//!   then `exec bash -c "exec <command>"`.
+//!   then `exec bash -c "exec <command>"`. With `TP_STUB_MAX_CHANS=n` a
+//!   connection takes `n` channels; the next prints the mux client's
+//!   "session request failed" and exits 255 (MaxSessions).
 //!
 //! Fake `id -u` prints `$TP_STUB_UID` (default 1000); fake `sudo -n CMD`
 //! logs its argv, refuses when `TP_STUB_SUDO_FAIL` is set, and otherwise
-//! runs CMD with `TP_STUB_UID=0`.
+//! runs CMD with `TP_STUB_UID=0`; `sudo -n -iu U CMD` runs CMD as the
+//! current user (the stub has no other users) unless `TP_STUB_NO_USER` is
+//! set, which refuses with "unknown user".
 
 use std::path::Path;
 
@@ -76,11 +82,24 @@ fi
 echo $$ >> "$d/pids"
 if [ -n "$master" ]; then
   if [ -n "$TP_STUB_MASTER_FAIL" ]; then printf '%b\n' "$TP_STUB_MASTER_FAIL" >&2; exit 255; fi
+  if [ -n "$TP_STUB_MAX_MASTERS" ]; then
+    n=0; [ -e "$d/masters" ] && n=$(wc -l < "$d/masters")
+    if [ "$n" -ge "$TP_STUB_MAX_MASTERS" ]; then echo "ssh: connect to host h port 22: Connection refused" >&2; exit 255; fi
+  fi
+  echo $$ >> "$d/masters"
   echo $$ > "$cp.pid"
   : > "$cp"
   exec sleep 100000
 fi
 [ -e "$cp" ] || { echo "stub ssh: no master at $cp" >&2; exit 255; }
+if [ -n "$TP_STUB_MAX_CHANS" ]; then
+  n=0; [ -e "$cp.chans" ] && n=$(wc -l < "$cp.chans")
+  if [ "$n" -ge "$TP_STUB_MAX_CHANS" ]; then
+    echo "mux_client_request_session: session request failed: Session open refused by peer" >&2
+    echo "ssh_mux_client: channel open failed" >&2
+    exit 255
+  fi
+fi
 echo $$ >> "$cp.chans"
 exec bash -c "exec $*"
 "#;
@@ -95,6 +114,12 @@ printf '%s\n' "$*" >> "$TP_STUB_DIR/sudo.log"
 [ "$1" = -n ] || exit 2
 shift
 if [ -n "$TP_STUB_SUDO_FAIL" ]; then echo "sudo: a password is required" >&2; exit 1; fi
+if [ "$1" = -iu ]; then
+  [ -z "$TP_STUB_NO_USER" ] || { echo "sudo: unknown user $2" >&2; exit 1; }
+  [ -z "$TP_STUB_NOLOGIN" ] || { echo "This account is currently not available."; exit 1; }
+  shift 2
+  exec "$@"
+fi
 TP_STUB_UID=0 exec "$@"
 "#;
 
@@ -396,17 +421,155 @@ async fn hello_and_read_os_through_the_stub() {
     t.close().await;
 }
 
+fn masters(stub: &Stub) -> usize {
+    stub.argvs()
+        .iter()
+        .filter(|a| a.contains(&"-N".to_string()))
+        .count()
+}
+
 #[tokio::test]
-async fn user_principal_is_not_supported_yet() {
+async fn user_shell_runs_sudo_iu_and_renders_as_user_ops() {
+    let stub = Stub::new();
+    let t = stub.transport().env("TP_STUB_UID", "0");
+    // The stub has no other users: use the current one so getent finds it.
+    let me = std::env::var("USER").unwrap_or_else(|_| "root".into());
+    let mut s = t.open("bot@h", &Principal::User(me.clone()), 1).await;
+    assert!(s.limit.is_none(), "{:?} {:?}", s.limit, t.message("bot@h"));
+    assert_eq!(s.got.len(), 1);
+    let mut sh = s.got.remove(0);
+    assert_eq!(sh.user(), me);
+    assert_eq!(stub.sudo_log(), format!("-n -iu {me} bash\n"));
+    let chan = &stub.argvs()[1];
+    assert_eq!(
+        &chan[chan.len() - 2..],
+        ["bot@h".to_string(), format!("sudo -n -iu '{me}' bash")],
+        "{chan:?}"
+    );
+    // An as_user op is accepted and wrapped in a fresh login shell.
+    let h = Host::new("t", os(), std::rc::Rc::new(()));
+    h.as_user(&me).raw("echo hi");
+    h.as_user("someone-else").raw("true");
+    let nodes = h.snapshot().nodes;
+    let Node::Op(op) = &nodes[0] else {
+        unreachable!()
+    };
+    sh.send_op(op, 0, &h.os).await.unwrap();
+    let r = sh.wait(0).await.unwrap();
+    assert_eq!(r.trailer.typed::<ShellResult>().unwrap().rc, 0);
+    assert_eq!(String::from_utf8(r.output).unwrap(), "hi\n");
+    // Another user's op is still refused by render_for.
+    let Node::Op(op2) = &nodes[1] else {
+        unreachable!()
+    };
+    assert!(sh.send_op(op2, 1, &h.os).await.is_err());
+    sh.close().await;
+    t.close().await;
+}
+
+#[tokio::test]
+async fn user_name_is_shell_quoted() {
     let stub = Stub::new();
     let t = stub.transport();
-    let s = t.open("bot@h", &Principal::User("alice".into()), 1).await;
+    let s = t.open("bot@h", &Principal::User("o'neil".into()), 1).await;
+    assert_eq!(s.got.len(), 1, "{:?} {:?}", s.limit, t.message("bot@h"));
+    // The stub's shell parsed the quoting back to the name.
+    assert_eq!(stub.sudo_log(), "-n -iu o'neil bash\n");
+    let chan = &stub.argvs()[1];
+    assert_eq!(chan.last().unwrap(), r"sudo -n -iu 'o'\''neil' bash");
+    t.close().await;
+}
+
+#[tokio::test]
+async fn user_shell_refusal_is_sudo_refused_with_its_message() {
+    for (env, text) in [
+        ("TP_STUB_SUDO_FAIL", "sudo: a password is required"),
+        ("TP_STUB_NO_USER", "sudo: unknown user nosuch"),
+    ] {
+        let stub = Stub::new();
+        let t = stub.transport().env(env, "1");
+        let s = t.open("bot@h", &Principal::User("nosuch".into()), 1).await;
+        assert!(s.got.is_empty(), "{env}");
+        assert_eq!(s.limit, Some(Limit::SudoRefused), "{env}");
+        let msg = t.message("bot@h").unwrap_or_default();
+        assert!(msg.contains(text), "{env}: {msg:?}");
+        t.close().await;
+        assert_eq!(survivors(&stub.pids()).await, Vec::<u32>::new());
+    }
+}
+
+#[tokio::test]
+async fn nologin_user_is_sudo_refused_with_a_hint() {
+    let stub = Stub::new();
+    let t = stub.transport().env("TP_STUB_NOLOGIN", "1");
+    let s = t.open("bot@h", &Principal::User("carol".into()), 1).await;
     assert!(s.got.is_empty());
-    assert!(
-        matches!(&s.limit, Some(Limit::Other(m)) if m.contains("not supported")),
-        "{:?}",
-        s.limit
-    );
+    assert_eq!(s.limit, Some(Limit::SudoRefused));
+    let msg = t.message("bot@h").unwrap_or_default();
+    assert!(msg.contains("nologin") && msg.contains("carol"), "{msg:?}");
+    t.close().await;
+}
+
+#[tokio::test]
+async fn max_sessions_opens_more_connections() {
+    let stub = Stub::new();
+    // Each connection takes one channel; the second is refused.
+    let t = stub.transport().env("TP_STUB_MAX_CHANS", "1");
+    let s = t.open("bot@h", &Principal::Root, 3).await;
+    assert_eq!(s.got.len(), 3, "{:?} {:?}", s.limit, t.message("bot@h"));
+    assert!(s.limit.is_none());
+    assert_eq!(t.message("bot@h"), None);
+    assert!(masters(&stub) >= 2, "{:#?}", stub.argvs());
+    // Every shell works, each on its own connection.
+    let mut shells = s.got;
+    for sh in shells.iter_mut() {
+        assert_eq!(run(sh, "echo ok").await, (0, "ok\n".to_string()));
+    }
+    // A later open reuses the newest connection (full: one more master).
+    let before = masters(&stub);
+    let more = t.open("bot@h", &Principal::Root, 1).await;
+    assert_eq!(more.got.len(), 1);
+    assert_eq!(masters(&stub), before + 1);
+    t.close().await;
+    drop(shells);
+}
+
+#[tokio::test]
+async fn max_sessions_when_new_connections_refuse_too() {
+    // The first connection takes one channel; a second master is refused.
+    let stub = Stub::new();
+    let t = stub
+        .transport()
+        .env("TP_STUB_MAX_CHANS", "1")
+        .env("TP_STUB_MAX_MASTERS", "1");
+    let s = t.open("bot@h", &Principal::Root, 3).await;
+    assert_eq!(s.got.len(), 1);
+    assert_eq!(s.limit, Some(Limit::MaxSessions));
+    assert!(t.message("bot@h").is_some());
+    t.close().await;
+
+    // A second master starts but refuses its first channel too.
+    let stub = Stub::new();
+    let t = stub.transport().env("TP_STUB_MAX_CHANS", "0");
+    let s = t.open("bot@h", &Principal::Root, 3).await;
+    assert!(s.got.is_empty());
+    assert_eq!(s.limit, Some(Limit::MaxSessions));
+    let msg = t.message("bot@h").unwrap_or_default();
+    assert!(msg.contains("session request failed"), "{msg:?}");
+    assert_eq!(masters(&stub), 2, "{:#?}", stub.argvs());
+    t.close().await;
+}
+
+#[tokio::test]
+async fn max_sessions_applies_to_user_shells_too() {
+    let stub = Stub::new();
+    let t = stub.transport().env("TP_STUB_MAX_CHANS", "1");
+    let a = t.open("bot@h", &Principal::User("u1".into()), 1).await;
+    let b = t.open("bot@h", &Principal::User("u2".into()), 1).await;
+    assert_eq!((a.got.len(), b.got.len()), (1, 1));
+    assert!(b.limit.is_none(), "{:?}", b.limit);
+    assert_eq!(masters(&stub), 2);
+    t.close().await;
 }
 
 #[tokio::test]

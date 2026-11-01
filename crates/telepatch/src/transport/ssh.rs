@@ -11,7 +11,8 @@
 //! Telepatch's own `-o` come first on every command line, and ssh takes the
 //! first value it sees for an option, so they beat both the user's extra
 //! options and `~/.ssh/config` for `BatchMode`, `ControlMaster`,
-//! `ControlPersist` and `ControlPath`. Everything else (keys, agents,
+//! `ControlPersist` and `ControlPath` (and, on channels, `ProxyCommand`:
+//! see `spawn_on`). Everything else (keys, agents,
 //! `ProxyJump`, ports, users) is the user's config (goal 3, question 3).
 //!
 //! `open(host, Root, n)`: each channel's hello proves the connection; then
@@ -19,6 +20,19 @@
 //! then `exec sudo -n bash` and a second hello. The ssh-side text behind
 //! the last [`Limit`] for a host is kept for the report:
 //! [`SshTransport::message`].
+//!
+//! `open(host, User(u), 1)`: a channel whose command is `sudo -n -iu <u>
+//! bash`; the shell's `user()` is `u`. No hello means sudo (or `u`'s login
+//! shell, as with `nologin`) refused: [`Limit::SudoRefused`] with what it
+//! printed.
+//!
+//! Several shells: `open` fills `want` channels on the host's newest
+//! connection. A channel the server refuses for `MaxSessions` (the mux
+//! client prints "session request failed" or "open failed:
+//! administratively prohibited") moves on to one more master connection,
+//! and so on; only when a new connection cannot take a channel either does
+//! `open` stop short with [`Limit::MaxSessions`]. Connections are kept per
+//! host and reused by later `open` calls.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -42,6 +56,8 @@ const READY_TIMEOUT: Duration = Duration::from_secs(120);
 /// How long `close` waits for `-O exit` and for the master to end before
 /// killing it.
 const EXIT_TIMEOUT: Duration = Duration::from_secs(5);
+
+const NO_HELLO: &str = "ssh channel closed before the hello";
 
 static DIRS: AtomicUsize = AtomicUsize::new(0);
 
@@ -79,6 +95,14 @@ fn meaningful_line(stderr: &str) -> Option<&str> {
     lines.find(|l| !l.starts_with("Warning:")).or(first)
 }
 
+/// Whether ssh's stderr says the server refused one more session on the
+/// connection (`MaxSessions`): what the mux client prints when the master
+/// cannot open the channel.
+fn is_max_sessions(stderr: &str) -> bool {
+    const REFUSED: [&str; 2] = ["session request failed", "administratively prohibited"];
+    REFUSED.iter().any(|p| stderr.contains(p))
+}
+
 /// Classify what a master (or a channel) printed before it exited.
 fn classify(stderr: &str, fallback: &str) -> Limit {
     const CONNECT: [&str; 4] = [
@@ -89,6 +113,8 @@ fn classify(stderr: &str, fallback: &str) -> Limit {
     ];
     if stderr.contains("Permission denied") {
         Limit::AuthFailed
+    } else if is_max_sessions(stderr) {
+        Limit::MaxSessions
     } else if CONNECT.iter().any(|p| stderr.contains(p)) {
         Limit::ConnectRefused
     } else {
@@ -219,14 +245,16 @@ impl SshTransport {
         ))
     }
 
-    /// The socket of a live master for `dest`, starting one if none.
-    async fn connection(&self, dest: &str) -> Result<PathBuf, Refusal> {
+    /// The socket of the newest live master for `dest`; starts one if there
+    /// is none, or always when `fresh`.
+    async fn connection(&self, dest: &str, fresh: bool) -> Result<PathBuf, Refusal> {
         {
             let mut conns = self.conns.borrow_mut();
             if let Some(list) = conns.get_mut(dest) {
-                // A master that has ended is of no use; forget it.
-                list.retain_mut(|c| matches!(c.master.try_wait(), Ok(None)));
-                if let Some(c) = list.last() {
+                // A master that has ended (or lost its socket) is of no use;
+                // forget it, so a channel never silently connects directly.
+                list.retain_mut(|c| matches!(c.master.try_wait(), Ok(None)) && c.socket.exists());
+                if let (Some(c), false) = (list.last(), fresh) {
                     return Ok(c.socket.clone());
                 }
             }
@@ -309,24 +337,55 @@ impl SshTransport {
         Ok(socket)
     }
 
-    /// One channel on `dest`'s connection, turned into a root shell.
-    async fn root_channel(&self, dest: &str) -> Result<Shell, Refusal> {
-        let socket = self.connection(dest).await?;
+    /// One channel on the connection at `socket` running `remote`; its
+    /// `user()` is `user`. A channel that never says hello is a refusal:
+    /// `refused` is the Limit unless ssh reports MaxSessions.
+    async fn spawn_on(
+        &self,
+        dest: &str,
+        socket: &Path,
+        remote: &str,
+        user: &str,
+        refused: Option<Limit>,
+    ) -> Result<Shell, Refusal> {
         let mut argv = vec![self.ssh.clone()];
-        argv.extend(self.args(&["-o", "ControlMaster=no"], &socket, dest));
-        argv.push("bash".into());
-        let mut sh = match Shell::spawn(&argv, &self.env, "root").await {
-            Ok(sh) => sh,
+        // `ProxyCommand=false` keeps a refused channel from falling back to
+        // a direct connection: when the mux request fails (MaxSessions) ssh
+        // goes on to connect on its own, which would hand back a shell on a
+        // connection telepatch does not track. The mux client never uses a
+        // proxy, so a working channel is unaffected; the user's own
+        // ProxyCommand/ProxyJump lose to this first value.
+        let role = ["-o", "ControlMaster=no", "-o", "ProxyCommand=false"];
+        argv.extend(self.args(&role, socket, dest));
+        argv.push(remote.into());
+        match Shell::spawn(&argv, &self.env, user).await {
+            Ok(sh) => Ok(sh),
             Err(SpawnError::NoHello { stderr }) => {
                 let text = stderr.replace("\r\n", "\n").trim().to_string();
-                let limit = classify(&text, "ssh channel closed before the hello");
-                return Err((limit, text));
+                let limit = if is_max_sessions(&text) {
+                    Limit::MaxSessions
+                } else if let Some(l) = refused {
+                    l
+                } else {
+                    classify(&text, NO_HELLO)
+                };
+                let text = if text.is_empty() {
+                    NO_HELLO.to_string()
+                } else {
+                    text
+                };
+                Err((limit, text))
             }
             Err(SpawnError::Spawn(e)) => {
                 let m = format!("spawning {}: {e}", self.ssh);
-                return Err((Limit::Other(m.clone()), m));
+                Err((Limit::Other(m.clone()), m))
             }
-        };
+        }
+    }
+
+    /// One channel on the connection at `socket`, turned into a root shell.
+    async fn root_channel(&self, dest: &str, socket: &Path) -> Result<Shell, Refusal> {
+        let mut sh = self.spawn_on(dest, socket, "bash", "root", None).await?;
         let other = |m: String| (Limit::Other(m.clone()), m);
         let (rc, out) = run_raw(&mut sh, "id -u").await.map_err(other)?;
         let uid: u32 = match (rc, out.trim().parse()) {
@@ -353,6 +412,33 @@ impl SshTransport {
             }
         }
         Ok(sh)
+    }
+
+    /// One channel on the connection at `socket` running `sudo -n -iu <u>
+    /// bash`.
+    async fn user_channel(&self, dest: &str, socket: &Path, u: &str) -> Result<Shell, Refusal> {
+        let remote = format!("sudo -n -iu {} bash", crate::sh::quote(u));
+        self.spawn_on(dest, socket, &remote, u, Some(Limit::SudoRefused))
+            .await
+            .map_err(|(l, m)| match l {
+                // A login shell like nologin says its piece on stdout, which
+                // the hello wait does not keep: name the likely causes.
+                Limit::SudoRefused if m == NO_HELLO => (
+                    l,
+                    format!(
+                        "sudo -n -iu {u} bash printed nothing on stderr and closed \
+                         (no sudo rights, or a login shell that refuses, such as nologin)"
+                    ),
+                ),
+                l => (l, m),
+            })
+    }
+
+    async fn channel(&self, dest: &str, socket: &Path, who: &Principal) -> Result<Shell, Refusal> {
+        match who {
+            Principal::Root => self.root_channel(dest, socket).await,
+            Principal::User(u) => self.user_channel(dest, socket, u).await,
+        }
     }
 
     /// End every channel and master (`ssh -O exit`, then wait, then kill),
@@ -390,29 +476,43 @@ impl SshTransport {
 
 impl Transport for SshTransport {
     async fn open(&self, host: &str, principal: &Principal, want: usize) -> Shells {
-        if let Principal::User(u) = principal {
-            let m = format!("principal user {u}: not supported by this transport yet");
-            self.messages.borrow_mut().insert(host.into(), m.clone());
-            return Shells {
-                got: vec![],
-                want,
-                limit: Some(Limit::Other(m)),
-            };
-        }
         let mut got = Vec::new();
         let mut limit = None;
+        let mut message = None;
         while got.len() < want {
-            match self.root_channel(host).await {
+            let step: Result<Shell, Refusal> = async {
+                let socket = self.connection(host, false).await?;
+                match self.channel(host, &socket, principal).await {
+                    Err((Limit::MaxSessions, _)) => {
+                        // The connection is full: one more master. If that
+                        // cannot be had or takes no channel either, the
+                        // host's limit is MaxSessions.
+                        let socket = self
+                            .connection(host, true)
+                            .await
+                            .map_err(|(_, m)| (Limit::MaxSessions, m))?;
+                        self.channel(host, &socket, principal).await
+                    }
+                    r => r,
+                }
+            }
+            .await;
+            match step {
                 Ok(sh) => got.push(sh),
                 Err((l, msg)) => {
-                    self.messages.borrow_mut().insert(host.into(), msg);
+                    message = Some(msg);
                     limit = Some(l);
                     break;
                 }
             }
         }
-        if limit.is_none() {
-            self.messages.borrow_mut().remove(host);
+        match message {
+            Some(m) => {
+                self.messages.borrow_mut().insert(host.into(), m);
+            }
+            None => {
+                self.messages.borrow_mut().remove(host);
+            }
         }
         Shells { got, want, limit }
     }
@@ -478,5 +578,11 @@ mod tests {
             Limit::Other("Warning: only".into())
         );
         assert_eq!(classify("", f), Limit::Other("fallback".into()));
+        for s in [
+            "mux_client_request_session: session request failed: Session open refused by peer",
+            "channel 2: open failed: administratively prohibited: open failed",
+        ] {
+            assert_eq!(classify(s, f), Limit::MaxSessions, "{s}");
+        }
     }
 }

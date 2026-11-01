@@ -24,9 +24,11 @@ for u in tp nosudo; do
   chown "$u:$u" "/home/$u/.ssh/authorized_keys"
   chmod 600 "/home/$u/.ssh/authorized_keys"
 done
+useradd -m -s /bin/bash alice
+useradd -m -s /usr/sbin/nologin carol
 echo 'tp ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/tp
 chmod 440 /etc/sudoers.d/tp
-exec /usr/sbin/sshd -D -e
+exec /usr/sbin/sshd -D -e $TP_SSHD_ARGS
 "#;
 
 fn keygen(path: &Path) {
@@ -37,6 +39,16 @@ fn keygen(path: &Path) {
         .status()
         .expect("running ssh-keygen");
     assert!(st.success(), "ssh-keygen failed");
+}
+
+static CONTAINERS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// `ssh_processes` sees every transport of this process, so the tests that
+/// start a container and count processes run one at a time.
+static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+async fn serial() -> tokio::sync::MutexGuard<'static, ()> {
+    SERIAL.lock().await
 }
 
 pub struct Sshd {
@@ -50,17 +62,28 @@ pub struct Sshd {
 impl Sshd {
     /// Start the container and wait until sshd listens. Panics on failure.
     pub fn start() -> Sshd {
+        Sshd::start_with("")
+    }
+
+    /// Like [`Sshd::start`], with extra sshd arguments (`-o MaxSessions=1`).
+    pub fn start_with(sshd_args: &str) -> Sshd {
         let keys = tempfile::tempdir().unwrap();
         let key = keys.path().join("id_tp");
         let wrong_key = keys.path().join("id_wrong");
         keygen(&key);
         keygen(&wrong_key);
         let pubkey = std::fs::read_to_string(key.with_extension("pub")).unwrap();
-        let name = format!("tp-test-sshd-{}", std::process::id());
+        let name = format!(
+            "tp-test-sshd-{}-{}",
+            std::process::id(),
+            CONTAINERS.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+        );
         let out = Command::new("docker")
             .args(["run", "-d", "--rm", "--name", &name, "-p", "127.0.0.1::22"])
             .arg("-e")
             .arg(format!("TP_PUBKEY={}", pubkey.trim()))
+            .arg("-e")
+            .arg(format!("TP_SSHD_ARGS={sshd_args}"))
             .args(["ubuntu:24.04", "bash", "-c", SETUP])
             .stdin(Stdio::null())
             .output()
@@ -150,6 +173,25 @@ fn ssh_processes() -> Vec<String> {
     out
 }
 
+/// Run `cmd` as a raw op on `sh`; return (rc, output).
+async fn run_raw_op(sh: &mut telepatch::pool::Shell, cmd: &str) -> (i32, String) {
+    let os = crate::fixture("ubuntu2404");
+    let h = telepatch::Host::new("t", os.clone(), std::rc::Rc::new(()));
+    h.raw(cmd);
+    let telepatch::Node::Op(op) = &h.snapshot().nodes[0] else {
+        unreachable!()
+    };
+    sh.send_op(op, 0, &os).await.unwrap();
+    let r = sh.wait(0).await.unwrap();
+    (
+        r.trailer
+            .typed::<telepatch::trailer::ShellResult>()
+            .unwrap()
+            .rc,
+        String::from_utf8(r.output).unwrap(),
+    )
+}
+
 async fn none_left() {
     for _ in 0..100 {
         if ssh_processes().is_empty() {
@@ -163,6 +205,7 @@ async fn none_left() {
 #[tokio::test]
 #[ignore = "needs docker and the network"]
 async fn ssh_root_shell_auth_and_sudo_against_sshd() {
+    let _serial = serial().await;
     let d = Sshd::start();
 
     // tp: root shell, `os` equals the ubuntu2404 fixture.
@@ -202,6 +245,65 @@ async fn ssh_root_shell_auth_and_sudo_against_sshd() {
 
     drop(t);
     drop(t2);
+    none_left().await;
+}
+
+#[tokio::test]
+#[ignore = "needs docker and the network"]
+async fn ssh_max_sessions_opens_masters_and_user_shells() {
+    let _serial = serial().await;
+    let d = Sshd::start_with("-o MaxSessions=1");
+    let t = transport(&d.key);
+    let dest = d.dest("tp");
+
+    // MaxSessions 1: three channels need three masters.
+    let mut s = t.open(&dest, &Principal::Root, 3).await;
+    assert_eq!(s.got.len(), 3, "{:?}: {:?}", s.limit, t.message(&dest));
+    assert!(s.limit.is_none());
+    let masters = || {
+        ssh_processes()
+            .iter()
+            .filter(|p| p.contains("ControlMaster=yes"))
+            .count()
+    };
+    assert_eq!(masters(), 3, "{:#?}", ssh_processes());
+    println!("MaxSessions 1: want 3, got 3, masters {}", masters());
+    for sh in s.got.iter_mut() {
+        assert_eq!(sh.user(), "root");
+        let (rc, out) = run_raw_op(sh, "id -un").await;
+        assert_eq!((rc, out.as_str()), (0, "root\n"));
+    }
+
+    // alice: a User shell on a fourth connection (the three are full).
+    let mut u = t.open(&dest, &Principal::User("alice".into()), 1).await;
+    assert_eq!(u.got.len(), 1, "{:?}: {:?}", u.limit, t.message(&dest));
+    let mut sh = u.got.remove(0);
+    assert_eq!(sh.user(), "alice");
+    let (rc, out) = run_raw_op(&mut sh, "id -un").await;
+    assert_eq!((rc, out.as_str()), (0, "alice\n"));
+    let (rc, out) = run_raw_op(&mut sh, "printf '%s\\n' \"$HOME\"").await;
+    assert_eq!((rc, out.as_str()), (0, "/home/alice\n"));
+    println!(
+        "alice: id -un = alice, HOME = /home/alice, masters {}",
+        masters()
+    );
+
+    // Unknown user and a user whose login shell refuses: SudoRefused.
+    for who in ["nosuch", "carol"] {
+        let r = t.open(&dest, &Principal::User(who.into()), 1).await;
+        assert!(r.got.is_empty(), "{who}");
+        assert_eq!(
+            r.limit,
+            Some(Limit::SudoRefused),
+            "{who}: {:?}",
+            t.message(&dest)
+        );
+        println!("{who}: {:?}: {:?}", r.limit, t.message(&dest));
+    }
+
+    t.close().await;
+    drop(s);
+    drop(sh);
     none_left().await;
 }
 
