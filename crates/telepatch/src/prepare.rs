@@ -17,7 +17,7 @@
 use std::collections::BTreeSet;
 
 use crate::engine::Window;
-use crate::ops::pkg::{Manager, PkgMode};
+use crate::ops::pkg::{Manager, PkgMode, Source};
 use crate::pool::Shell;
 use crate::report::WillInstall;
 use crate::sh::quote;
@@ -60,8 +60,8 @@ pub fn missing_users(output: &str) -> Vec<String> {
 /// Package names per manager that the window asks to install, in
 /// first-seen order. `build-dep` ops are skipped: what they would install
 /// is not known up front. `@group` names are skipped too.
-pub fn pkg_names(window: &Window) -> Vec<(Manager, Vec<String>)> {
-    let mut out: Vec<(Manager, Vec<String>)> = Vec::new();
+pub fn pkg_names(window: &Window) -> Vec<(Source, Vec<String>)> {
+    let mut out: Vec<(Source, Vec<String>)> = Vec::new();
     for op in &window.ops {
         let OpSpec::Pkg(p) = &op.node.spec else {
             continue;
@@ -69,10 +69,14 @@ pub fn pkg_names(window: &Window) -> Vec<(Manager, Vec<String>)> {
         if p.mode == PkgMode::BuildDep {
             continue;
         }
-        let i = match out.iter().position(|(m, _)| *m == p.manager) {
+        // Only distro and pip names are probed; T32 adds the other sources.
+        if !matches!(p.source, Source::Distro(_) | Source::Pip) {
+            continue;
+        }
+        let i = match out.iter().position(|(s, _)| *s == p.source) {
             Some(i) => i,
             None => {
-                out.push((p.manager, Vec::new()));
+                out.push((p.source.clone(), Vec::new()));
                 out.len() - 1
             }
         };
@@ -87,37 +91,44 @@ pub fn pkg_names(window: &Window) -> Vec<(Manager, Vec<String>)> {
 }
 
 /// A script printing `present <name>` for every name already installed.
-pub fn pkg_probe(manager: Manager, names: &[String]) -> String {
+pub fn pkg_probe(source: &Source, names: &[String]) -> String {
     let mut s = String::new();
-    if manager == Manager::Pip {
+    if *source == Source::Pip {
         s.push_str(
             "tp_l=$( (python3 -m pip list --format=freeze 2>/dev/null || pip3 list --format=freeze 2>/dev/null) | cut -d= -f1 | tr 'A-Z_' 'a-z-')\n",
         );
     }
     for n in names {
         let q = quote(n);
-        let test = match manager {
-            Manager::Apt => format!(
+        let test = match source {
+            Source::Distro(Manager::Apt) => format!(
                 "[ \"$(dpkg-query -W -f='${{db:Status-Status}}' {q} 2>/dev/null)\" = installed ]"
             ),
-            Manager::Dnf | Manager::Yum => format!("rpm -q --whatprovides {q} >/dev/null 2>&1"),
-            Manager::Pacman => format!("[ -z \"$(pacman -T {q} 2>/dev/null)\" ]"),
-            Manager::Pip => format!(
+            Source::Distro(Manager::Dnf | Manager::Yum) => {
+                format!("rpm -q --whatprovides {q} >/dev/null 2>&1")
+            }
+            Source::Distro(Manager::Pacman) => format!("[ -z \"$(pacman -T {q} 2>/dev/null)\" ]"),
+            Source::Pip => format!(
                 "printf '%s\\n' \"$tp_l\" | grep -qx -- \"$(printf %s {q} | tr 'A-Z_' 'a-z-')\""
             ),
+            // Not probed (see `pkg_names`): report nothing as present.
+            Source::Cargo | Source::Rustup(_) | Source::Script(_) => "false".to_string(),
         };
         s.push_str(&format!("if {test}; then echo \"present \"{q}; fi\n"));
     }
     s
 }
 
-pub fn manager_name(m: Manager) -> &'static str {
-    match m {
-        Manager::Apt => "apt",
-        Manager::Dnf => "dnf",
-        Manager::Yum => "yum",
-        Manager::Pacman => "pacman",
-        Manager::Pip => "pip",
+pub fn manager_name(s: &Source) -> &'static str {
+    match s {
+        Source::Distro(Manager::Apt) => "apt",
+        Source::Distro(Manager::Dnf) => "dnf",
+        Source::Distro(Manager::Yum) => "yum",
+        Source::Distro(Manager::Pacman) => "pacman",
+        Source::Pip => "pip",
+        Source::Cargo => "cargo",
+        Source::Rustup(_) => "rustup",
+        Source::Script(_) => "script",
     }
 }
 
@@ -195,7 +206,7 @@ pub async fn prepare_window(
         let id = next();
         let w = wrap(
             OpKind::Sh,
-            &crate::ops::shell::raw_body(&pkg_probe(*m, names)),
+            &crate::ops::shell::raw_body(&pkg_probe(m, names)),
             id,
             shell.nonce(),
         );
@@ -225,7 +236,7 @@ pub async fn prepare_window(
         if !missing.is_empty() {
             will.push(WillInstall {
                 window: window.number,
-                manager: manager_name(*m).to_string(),
+                manager: manager_name(m).to_string(),
                 names: missing,
             });
         }
@@ -246,7 +257,7 @@ mod tests {
 
     #[test]
     fn probes_quote_names() {
-        let s = pkg_probe(Manager::Apt, &["it's".to_string()]);
+        let s = pkg_probe(&Source::Distro(Manager::Apt), &["it's".to_string()]);
         assert!(s.contains(r"'it'\''s'"), "{s}");
     }
 }

@@ -41,7 +41,7 @@ use crate::engine::{Engine, EngineError, Executor, HostInfo, Window, WindowKind,
 use crate::facts::query::FactQuery;
 use crate::host::Host;
 use crate::key::Value;
-use crate::ops::pkg::PkgMode;
+use crate::ops::pkg::{PkgMode, Wanted};
 use crate::pool::{Event, Shell};
 use crate::prepare;
 use crate::report::{HostReport, HostStatus, OpRecord, Outcome, Report};
@@ -168,14 +168,15 @@ fn describe(op: &OpNode) -> String {
         OpSpec::Raw { script } => format!("sh {}", first_line(script)),
         OpSpec::Shell(s) => format!("sh {}", first_line(&s.cmd)),
         OpSpec::Pkg(p) => {
-            let mode = match p.mode {
-                PkgMode::Install => "install",
-                PkgMode::BuildDep => "build-dep",
-                PkgMode::Latest => "latest",
+            let mode = match (p.mode, &p.wanted) {
+                (PkgMode::BuildDep, _) => "build-dep",
+                (_, Wanted::Latest) => "latest",
+                (_, Wanted::Pinned(_)) => "pinned",
+                (PkgMode::Install, Wanted::Present) => "install",
             };
             format!(
                 "pkg {} {mode} {}",
-                prepare::manager_name(p.manager),
+                prepare::manager_name(&p.source),
                 p.names.join(" ")
             )
         }

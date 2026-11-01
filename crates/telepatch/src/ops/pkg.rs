@@ -27,7 +27,37 @@ pub enum Manager {
     Dnf,
     Yum,
     Pacman,
+}
+
+/// Placeholder; T34 fills in the rustup toolchain spec.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RustupSpec {}
+
+/// Placeholder; T32 fills in the script-installer spec.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ScriptSpec {}
+
+/// Where a package comes from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Source {
+    /// The host's system manager.
+    Distro(Manager),
     Pip,
+    /// Not built yet (T33).
+    Cargo,
+    /// Not built yet (T34).
+    Rustup(RustupSpec),
+    /// Not built yet (T32).
+    Script(ScriptSpec),
+}
+
+/// Which version of a package is wanted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Wanted {
+    /// Any installed version.
+    Present,
+    Pinned(String),
+    Latest,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -36,14 +66,13 @@ pub enum PkgMode {
     Install,
     /// `apt-get build-dep` (apt only).
     BuildDep,
-    /// pip `install -U` (pip only).
-    Latest,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PkgSpec {
-    pub manager: Manager,
+    pub source: Source,
     pub names: Vec<String>,
+    pub wanted: Wanted,
     pub mode: PkgMode,
     /// Run `apt-get update` first (set by [`apply_apt_update`]). Ignored by
     /// other managers.
@@ -52,25 +81,34 @@ pub struct PkgSpec {
 
 impl PkgSpec {
     pub fn new(manager: Manager, names: Vec<String>) -> PkgSpec {
+        PkgSpec::from_source(Source::Distro(manager), names)
+    }
+
+    pub fn from_source(source: Source, names: Vec<String>) -> PkgSpec {
         let mut seen = BTreeSet::new();
         let names = names
             .into_iter()
             .filter(|n| seen.insert(n.clone()))
             .collect();
         PkgSpec {
-            manager,
+            source,
             names,
+            wanted: Wanted::Present,
             mode: PkgMode::Install,
             update_cache: false,
         }
     }
 
-    /// The effect key of one name. pip names live in their own namespace
-    /// (`pkg:pip:<name>`) so they never overlap or merge with system names.
+    /// The effect key of one name. Non-distro names live in their own
+    /// namespace (`pkg:pip:<name>`) so they never overlap or merge with
+    /// system names. Cargo, rustup and script keys are provisional (T32).
     pub fn key_of(&self, name: &str) -> Key {
-        match self.manager {
-            Manager::Pip => Key::pkg(format!("pip:{name}")),
-            _ => Key::pkg(name),
+        match &self.source {
+            Source::Distro(_) => Key::pkg(name),
+            Source::Pip => Key::pkg(format!("pip:{name}")),
+            Source::Cargo => Key::pkg(format!("cargo:{name}")),
+            Source::Rustup(_) => Key::pkg(format!("rustup:{name}")),
+            Source::Script(_) => Key::pkg(format!("script:{name}")),
         }
     }
 
@@ -78,9 +116,13 @@ impl PkgSpec {
         self.names.iter().map(|n| self.key_of(n)).collect()
     }
 
-    /// Can `other` be folded into this op (same manager and mode)?
+    /// Can `other` be folded into this op (same source, wanted and mode)?
+    /// `Script` ops never merge.
     pub fn can_merge(&self, other: &PkgSpec) -> bool {
-        self.manager == other.manager && self.mode == other.mode
+        !matches!(self.source, Source::Script(_))
+            && self.source == other.source
+            && self.wanted == other.wanted
+            && self.mode == other.mode
     }
 
     /// Union of names, keeping first-seen order. `update_cache` is or-ed.
@@ -94,19 +136,34 @@ impl PkgSpec {
     }
 
     pub fn render(&self) -> String {
-        let names: Vec<String> = self.names.iter().map(|n| quote(n)).collect();
+        let names: Vec<String> = self
+            .names
+            .iter()
+            .map(|n| match &self.wanted {
+                Wanted::Pinned(v) if self.source == Source::Pip => quote(&format!("{n}=={v}")),
+                _ => quote(n),
+            })
+            .collect();
         let mut o = format!(
             "rc=0; changed=0; installed=()\ntp_want=({})\ntp_missing=()\n",
             names.join(" ")
         );
-        match (self.manager, self.mode) {
-            (Manager::Apt, PkgMode::BuildDep) => self.apt_build_dep(&mut o),
-            (Manager::Apt, _) => self.apt(&mut o),
-            (Manager::Dnf, _) => rpm_like(&mut o, "dnf", "dnf group list --installed"),
-            (Manager::Yum, _) => rpm_like(&mut o, "yum", "yum grouplist installed"),
-            (Manager::Pacman, _) => pacman(&mut o),
-            (Manager::Pip, PkgMode::Latest) => pip_latest(&mut o),
-            (Manager::Pip, _) => pip(&mut o),
+        match (&self.source, self.mode) {
+            (Source::Distro(Manager::Apt), PkgMode::BuildDep) => self.apt_build_dep(&mut o),
+            (Source::Distro(Manager::Apt), _) => self.apt(&mut o),
+            (Source::Distro(Manager::Dnf), _) => {
+                rpm_like(&mut o, "dnf", "dnf group list --installed")
+            }
+            (Source::Distro(Manager::Yum), _) => rpm_like(&mut o, "yum", "yum grouplist installed"),
+            (Source::Distro(Manager::Pacman), _) => pacman(&mut o),
+            (Source::Pip, _) => match &self.wanted {
+                Wanted::Latest => pip_latest(&mut o),
+                Wanted::Pinned(_) => pip_pinned(&mut o),
+                Wanted::Present => pip(&mut o),
+            },
+            (Source::Cargo | Source::Rustup(_) | Source::Script(_), _) => {
+                o.push_str("echo 'telepatch: source not built yet' >&2\nrc=1\n")
+            }
         }
         o
     }
@@ -176,6 +233,16 @@ fn pip(o: &mut String) {
     );
 }
 
+/// Pinned: `tp_want` holds `name==version`; a name is missing when its
+/// installed version is not the pinned one, and `install name==version`
+/// then moves it (up or down).
+fn pip_pinned(o: &mut String) {
+    o.push_str(PIP_PICK);
+    o.push_str(
+        "if [ \"$rc\" -eq 0 ]; then\n  for tp_n in \"${tp_want[@]}\"; do\n    [ \"$(\"${tp_pip[@]}\" show \"${tp_n%%==*}\" 2>/dev/null | sed -n 's/^Version: //p')\" = \"${tp_n#*==}\" ] || tp_missing+=(\"$tp_n\")\n  done\n  if [ \"${#tp_missing[@]}\" -gt 0 ]; then\n    \"${tp_pip[@]}\" install \"${tp_missing[@]}\"\n    rc=$?\n    if [ \"$rc\" -eq 0 ]; then changed=1; installed=(\"${tp_missing[@]}\"); fi\n  fi\nfi\n",
+    );
+}
+
 /// `install -U` always runs; a name counts as installed when its version
 /// differs before and after.
 fn pip_latest(o: &mut String) {
@@ -203,7 +270,9 @@ pub fn apt_update_flags(mut stale: bool, ops: &[OpNode]) -> (Vec<bool>, bool) {
     let flags = ops
         .iter()
         .map(|op| match &op.spec {
-            OpSpec::Pkg(p) if p.manager == Manager::Apt => std::mem::take(&mut stale),
+            OpSpec::Pkg(p) if p.source == Source::Distro(Manager::Apt) => {
+                std::mem::take(&mut stale)
+            }
             _ => {
                 stale |= op.writes.iter().any(writes_apt_sources);
                 false
@@ -272,7 +341,7 @@ impl PkgHandle {
     pub fn build_dep(&self) -> &Self {
         let mut apt = true;
         self.spec(|s| {
-            if s.manager == Manager::Apt {
+            if s.source == Source::Distro(Manager::Apt) {
                 s.mode = PkgMode::BuildDep;
             } else {
                 apt = false;
@@ -297,25 +366,39 @@ impl PkgHandle {
         self.spec(|s| s.update_cache = on);
         self
     }
-}
 
-/// A `pkg::pip` handle: `.latest()` upgrades to the newest release.
-#[derive(Clone)]
-pub struct PipHandle(PkgHandle);
-
-impl Deref for PipHandle {
-    type Target = OpHandle;
-    fn deref(&self) -> &OpHandle {
-        &self.0.0
-    }
-}
-
-impl PipHandle {
+    /// Want the newest release (pip: `install -U`). Not supported on
+    /// distro packages.
     pub fn latest(&self) -> &Self {
-        self.0.spec(|s| s.mode = PkgMode::Latest);
+        self.want(Wanted::Latest)
+    }
+
+    /// Want exactly version `v` (pip: `name==v`). Not supported on distro
+    /// packages.
+    pub fn pin(&self, v: impl Into<String>) -> &Self {
+        self.want(Wanted::Pinned(v.into()))
+    }
+
+    fn want(&self, w: Wanted) -> &Self {
+        let mut distro = false;
+        self.spec(|s| {
+            if matches!(s.source, Source::Distro(_)) {
+                distro = true;
+            } else {
+                s.wanted = w;
+            }
+        });
+        if distro {
+            self.0.record_error(TraceError::new(
+                "pin or latest on distro packages is not supported",
+            ));
+        }
         self
     }
 }
+
+/// Every source returns the same handle; kept as an alias for `h.pip`.
+pub type PipHandle = PkgHandle;
 
 fn names<I, S>(names: I) -> Vec<String>
 where
@@ -339,10 +422,22 @@ impl<V> Host<V> {
     /// Invalid input is recorded as a trace error; the node is still pushed
     /// (so the handle is valid) but the run fails before anything applies.
     fn pkg_op(&self, manager: Manager, v: Vec<String>) -> PkgHandle {
-        if let Err(e) = check_names(&v) {
+        self.pkg_spec_op(PkgSpec::new(manager, v))
+    }
+
+    /// Push a pkg op for any source. Sources that are not built yet
+    /// (T32-T34 remove them one by one) are a trace error.
+    pub(crate) fn pkg_spec_op(&self, spec: PkgSpec) -> PkgHandle {
+        if let Err(e) = check_names(&spec.names) {
             self.record_error(e);
         }
-        PkgHandle(self.op(OpSpec::Pkg(PkgSpec::new(manager, v))))
+        if matches!(
+            spec.source,
+            Source::Cargo | Source::Rustup(_) | Source::Script(_)
+        ) {
+            self.record_error(TraceError::new("source not built yet"));
+        }
+        PkgHandle(self.op(OpSpec::Pkg(spec)))
     }
 
     /// Ensure packages are installed with the host's manager: apt on
@@ -382,6 +477,94 @@ impl<V> Host<V> {
         I: IntoIterator<Item = S>,
         S: AsRef<str>,
     {
-        PipHandle(self.pkg_op(Manager::Pip, names(pkgs)))
+        self.pkg_spec_op(PkgSpec::from_source(Source::Pip, names(pkgs)))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::rc::Rc;
+
+    use super::*;
+    use crate::facts::os::Os;
+
+    fn host() -> Host<()> {
+        let os = Os::parse("ID=debian\nVERSION_ID=\"12\"\n").unwrap();
+        Host::new("h", os, Rc::new(()))
+    }
+
+    fn spec_of(h: &Host<()>, i: usize) -> PkgSpec {
+        match &h.snapshot().nodes[i] {
+            Node::Op(OpNode {
+                spec: OpSpec::Pkg(p),
+                ..
+            }) => p.clone(),
+            n => panic!("not a pkg op: {n:?}"),
+        }
+    }
+
+    fn errors(h: &Host<()>) -> Vec<String> {
+        h.snapshot().errors.iter().map(|e| e.0.clone()).collect()
+    }
+
+    #[test]
+    fn pip_pin_renders_name_eq_version() {
+        let h = host();
+        h.pip(["requests", "six"]).pin("2.31.0");
+        let s = spec_of(&h, 0);
+        assert_eq!(s.wanted, Wanted::Pinned("2.31.0".into()));
+        let r = s.render();
+        assert!(
+            r.contains("tp_want=('requests==2.31.0' 'six==2.31.0')"),
+            "{r}"
+        );
+        assert!(errors(&h).is_empty());
+    }
+
+    #[test]
+    fn pip_latest_renders_install_u() {
+        let h = host();
+        h.pip(["a"]).latest();
+        let s = spec_of(&h, 0);
+        assert_eq!(s.wanted, Wanted::Latest);
+        let mut want =
+            String::from("rc=0; changed=0; installed=()\ntp_want=('a')\ntp_missing=()\n");
+        pip_latest(&mut want);
+        assert_eq!(s.render(), want);
+        assert!(s.render().contains("install -U"));
+    }
+
+    #[test]
+    fn distro_pin_or_latest_is_a_trace_error() {
+        let h = host();
+        h.pkg(["git"]).pin("1");
+        h.pkg(["git"]).latest();
+        let msg = "pin or latest on distro packages is not supported";
+        assert_eq!(errors(&h), [msg, msg]);
+        assert_eq!(spec_of(&h, 0).wanted, Wanted::Present);
+    }
+
+    #[test]
+    fn script_never_merges() {
+        let a = PkgSpec::from_source(Source::Script(ScriptSpec::default()), names(["x"]));
+        assert!(!a.can_merge(&a.clone()));
+        let p = PkgSpec::from_source(Source::Pip, names(["x"]));
+        assert!(p.can_merge(&p.clone()));
+        let mut q = p.clone();
+        q.wanted = Wanted::Latest;
+        assert!(!p.can_merge(&q));
+    }
+
+    #[test]
+    fn unbuilt_sources_are_a_trace_error() {
+        for src in [
+            Source::Cargo,
+            Source::Rustup(RustupSpec::default()),
+            Source::Script(ScriptSpec::default()),
+        ] {
+            let h = host();
+            h.pkg_spec_op(PkgSpec::from_source(src, names(["x"])));
+            assert_eq!(errors(&h), ["source not built yet"]);
+        }
     }
 }

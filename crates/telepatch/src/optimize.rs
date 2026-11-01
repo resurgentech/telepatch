@@ -43,7 +43,8 @@ fn conflicts(a: &Item, b: &Item) -> bool {
 /// What must be equal for two pkg ops to be merge candidates.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct MergeKey {
-    manager: crate::ops::pkg::Manager,
+    source: crate::ops::pkg::Source,
+    wanted: crate::ops::pkg::Wanted,
     mode: crate::ops::pkg::PkgMode,
     run_as: RunAs,
     guard: Option<Guard>,
@@ -53,8 +54,11 @@ struct MergeKey {
 fn merge_key(item: &Item) -> Option<MergeKey> {
     let Item::Op(w) = item else { return None };
     match &w.node.spec {
+        // Script ops never merge: no key, so no two compare equal.
+        OpSpec::Pkg(p) if matches!(p.source, crate::ops::pkg::Source::Script(_)) => None,
         OpSpec::Pkg(p) => Some(MergeKey {
-            manager: p.manager,
+            source: p.source.clone(),
+            wanted: p.wanted.clone(),
             mode: p.mode,
             run_as: w.node.run_as.clone(),
             guard: w.node.guard.clone(),
