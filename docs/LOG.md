@@ -222,3 +222,31 @@ are appended, never edited in; a hook refuses rewrites.
   source is `HACK(pkg: no <Source> source yet)`; PORT's built list and
   dev_common sketch use the sources.
 - Commits: dd977fc
+
+## 2026-11-01 — T28 `../tp_basic`: base-state capture and `just test-idempotent`
+
+- `test-container.sh` also writes `base.state` of the pinned base (all
+  7 acceptance cells have one). `just test-idempotent <distro>
+  <dev_base|rust>`: two runs in one container of the pinned base, pass on
+  `CHANGED 0`. ubuntu2404 dev_base passes; rust baseline: only
+  `rustup update` changes. Acceptance 7/7 identical.
+- Commits: tp_basic 2e734f2
+
+## 2026-11-01 — T35 `../tp_basic`: uv as `pkg` with a `Script` source
+
+- dev_common's uv is `h.script("uv", ScriptSpec…)`, wanted Present, the
+  YAML's install line; `HACK(tool)` gone. 54 plan snapshots, only the uv
+  op block. Acceptance 7/7 identical; dev_base second run `CHANGED 0`,
+  first run reports `pkg[script] root uv: absent -> present`.
+- Commits: tp_basic e2cd213
+
+## 2026-11-01 — T36 `../tp_basic`: `rust_build` on the Rustup and Cargo sources
+
+- Per user: `s.rustup("stable").targets([musl]).set_default().latest()`,
+  `s.cargo(["cargo-deb", "cargo-generate-rpm"])`; repair branch and its
+  two fact reads dropped; no `sh!` in the block. `conversion/rust.md`
+  folded and removed with the mirrored originals (`conversion/` back to
+  its T21 state). 26 plan snapshots, `blocking reads` 2 -> 0.
+  Acceptance 7/7 identical; `test-idempotent ubuntu2404 rust` and
+  `dev_base` `CHANGED 0`. Goal 4 is done.
+- Commits: tp_basic 6929037, 0d0fbc2
