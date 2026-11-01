@@ -299,3 +299,45 @@ fn plan_shows_cargo_effects() {
         .writes([telepatch::Key::file("/home/deploy/.cargo/bin/rg")]);
     insta::assert_snapshot!(render_host("h", &h.os, &h.snapshot()));
 }
+
+#[test]
+fn rustup_present() {
+    let h = host("debian12");
+    let id = h.rustup("stable").id();
+    assert!(h.snapshot().errors.is_empty(), "{:?}", h.snapshot().errors);
+    insta::assert_snapshot!(wrapped(&h, id));
+}
+
+#[test]
+fn rustup_latest() {
+    let h = host("debian12");
+    let p = h.rustup("stable");
+    p.latest();
+    assert!(h.snapshot().errors.is_empty(), "{:?}", h.snapshot().errors);
+    insta::assert_snapshot!(wrapped(&h, p.id()));
+}
+
+/// The real consumer: per user, from a login scope.
+#[test]
+fn rustup_with_options_as_user() {
+    let h = host("debian12");
+    let p = h.as_user("deploy").rustup("1.94.0");
+    p.targets(["x86_64-unknown-linux-musl", "aarch64-unknown-linux-gnu"])
+        .components(["rust-src", "clippy"])
+        .profile("minimal")
+        .set_default()
+        .installer("sh ./rustup-init.sh -y");
+    assert!(h.snapshot().errors.is_empty(), "{:?}", h.snapshot().errors);
+    insta::assert_snapshot!(wrapped(&h, p.id()));
+}
+
+#[test]
+fn plan_shows_rustup_effects() {
+    let h = host("debian12");
+    h.rustup("stable").targets(["x86_64-unknown-linux-musl"]);
+    h.as_user("deploy")
+        .rustup("nightly-2026-10-01")
+        .components(["rust-src"])
+        .writes([telepatch::Key::file("/home/deploy/.cargo/bin/rustup")]);
+    insta::assert_snapshot!(render_host("h", &h.os, &h.snapshot()));
+}

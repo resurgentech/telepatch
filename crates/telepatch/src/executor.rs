@@ -170,7 +170,9 @@ fn describe(op: &OpNode) -> String {
         OpSpec::Pkg(p)
             if matches!(
                 p.source,
-                crate::ops::pkg::Source::Script(_) | crate::ops::pkg::Source::Cargo
+                crate::ops::pkg::Source::Script(_)
+                    | crate::ops::pkg::Source::Cargo
+                    | crate::ops::pkg::Source::Rustup(_)
             ) =>
         {
             let mode = match &p.wanted {

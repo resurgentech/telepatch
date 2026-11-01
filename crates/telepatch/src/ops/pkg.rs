@@ -22,10 +22,15 @@ use crate::sh::quote;
 use crate::trace::{Node, OpNode, OpSpec, Principal};
 
 mod cargo;
+mod rustup;
 mod script;
 pub use cargo::{
     CargoProbe, parse_probe as parse_cargo_probe, probe as cargo_probe,
     will_changes as cargo_will_changes,
+};
+pub use rustup::{
+    DEFAULT_INSTALLER, RustupProbe, RustupSpec, parse_probe as parse_rustup_probe,
+    probe as rustup_probe, will_change as rustup_will_change,
 };
 pub use script::{Latest, Probed, ScriptSpec, VERSION_RE, parse_probe, version_token, will_change};
 
@@ -37,10 +42,6 @@ pub enum Manager {
     Pacman,
 }
 
-/// Placeholder; T34 fills in the rustup toolchain spec.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct RustupSpec {}
-
 /// Where a package comes from.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Source {
@@ -49,8 +50,9 @@ pub enum Source {
     Pip,
     /// `cargo install`, per user ([`cargo`]).
     Cargo,
-    /// Not built yet (T34).
-    Rustup(RustupSpec),
+    /// A rust toolchain with targets and components, per user
+    /// ([`rustup`]; boxed to keep `OpNode` small).
+    Rustup(Box<RustupSpec>),
     /// A vendor installer script ([`ScriptSpec`]; boxed to keep `OpNode`
     /// small).
     Script(Box<ScriptSpec>),
@@ -84,8 +86,8 @@ pub struct PkgSpec {
     pub update_cache: bool,
     /// The op's principal (`root` for `h` and `as_user("root")`), set when
     /// the op is pushed. Names the per-user sources' keys
-    /// (`pkg:script:<user>:<name>`, `pkg:cargo:<user>:<name>`); unused by
-    /// distro and pip.
+    /// (`pkg:script:<user>:<name>`, `pkg:cargo:<user>:<name>`,
+    /// `pkg:rustup:<user>:<toolchain>`); unused by distro and pip.
     pub user: String,
 }
 
@@ -112,29 +114,31 @@ impl PkgSpec {
 
     /// The effect key of one name. Non-distro names live in their own
     /// namespace (`pkg:pip:<name>`) so they never overlap or merge with
-    /// system names. Script and cargo keys name the principal
-    /// (`pkg:script:<user>:<name>`); rustup keys are provisional (T34).
+    /// system names. Script, cargo and rustup keys name the
+    /// principal (`pkg:script:<user>:<name>`); a rustup toolchain's targets
+    /// and components are `<tc>/target/<t>` and `<tc>/component/<c>`.
     pub fn key_of(&self, name: &str) -> Key {
         match &self.source {
             Source::Distro(_) => Key::pkg(name),
             Source::Pip => Key::pkg(format!("pip:{name}")),
             Source::Cargo => Key::pkg(format!("cargo:{}:{name}", self.user)),
-            Source::Rustup(_) => Key::pkg(format!("rustup:{name}")),
+            Source::Rustup(_) => Key::pkg(format!("rustup:{}:{name}", self.user)),
             Source::Script(_) => Key::pkg(format!("script:{}:{name}", self.user)),
         }
     }
 
     /// Default write set: the names' keys for distro and pip, `*` for
-    /// script and cargo (they write files nobody listed; A14).
+    /// script, cargo and rustup (they write files nobody listed; A14).
     pub fn default_writes(&self) -> BTreeSet<Key> {
         match &self.source {
-            Source::Script(_) | Source::Cargo => BTreeSet::from([Key::Any]),
+            Source::Script(_) | Source::Cargo | Source::Rustup(_) => BTreeSet::from([Key::Any]),
             _ => self.keys(),
         }
     }
 
     /// Default postconditions: every name `Installed`; a script op also
-    /// posts `file:<bin> = Exists(true)`.
+    /// posts `file:<bin> = Exists(true)`, a rustup op each target and
+    /// component.
     pub fn default_post(&self) -> BTreeMap<Key, Value> {
         let mut post: BTreeMap<Key, Value> = self
             .names
@@ -144,15 +148,27 @@ impl PkgSpec {
         if let Source::Script(s) = &self.source {
             post.insert(Key::file(&s.bin), Value::Exists(true));
         }
+        if let (Source::Rustup(r), Some(tc)) = (&self.source, self.names.first()) {
+            for t in &r.targets {
+                post.insert(self.key_of(&format!("{tc}/target/{t}")), Value::Installed);
+            }
+            for c in &r.components {
+                post.insert(
+                    self.key_of(&format!("{tc}/component/{c}")),
+                    Value::Installed,
+                );
+            }
+        }
         post
     }
 
     /// The plan kind: `pkg` for distro and pip, `pkg[script]` for script,
-    /// `pkg[cargo]` for cargo.
+    /// `pkg[cargo]` for cargo, `pkg[rustup]` for rustup.
     pub fn kind(&self) -> &'static str {
         match &self.source {
             Source::Script(_) => "pkg[script]",
             Source::Cargo => "pkg[cargo]",
+            Source::Rustup(_) => "pkg[rustup]",
             _ => "pkg",
         }
     }
@@ -161,11 +177,12 @@ impl PkgSpec {
         self.names.iter().map(|n| self.key_of(n)).collect()
     }
 
-    /// May this op ever be folded into another? `Script` ops never merge; a
+    /// May this op ever be folded into another? `Script` and `Rustup` ops
+    /// never merge (one toolchain per op, with its own options); a
     /// pinned `Cargo` op has exactly one name (the pin is for that name).
     pub fn mergeable(&self) -> bool {
         match &self.source {
-            Source::Script(_) => false,
+            Source::Script(_) | Source::Rustup(_) => false,
             Source::Cargo => !matches!(self.wanted, Wanted::Pinned(_)),
             _ => true,
         }
@@ -198,6 +215,10 @@ impl PkgSpec {
         if self.source == Source::Cargo {
             return cargo::render(&self.names, &self.wanted);
         }
+        if let Source::Rustup(r) = &self.source {
+            let name = self.names.first().map(String::as_str).unwrap_or("");
+            return rustup::render(name, &self.wanted, r);
+        }
         let names: Vec<String> = self
             .names
             .iter()
@@ -223,9 +244,8 @@ impl PkgSpec {
                 Wanted::Pinned(_) => pip_pinned(&mut o),
                 Wanted::Present => pip(&mut o),
             },
-            (Source::Cargo | Source::Rustup(_) | Source::Script(_), _) => {
-                o.push_str("echo 'telepatch: source not built yet' >&2\nrc=1\n")
-            }
+            // Rendered above; every source is built.
+            (Source::Cargo | Source::Rustup(_) | Source::Script(_), _) => unreachable!(),
         }
         o
     }
@@ -441,10 +461,84 @@ impl PkgHandle {
         self.want(Wanted::Pinned(v.into()))
     }
 
+    /// Edit a rustup op's options, then add the postconditions of what was
+    /// added. On any other source: a trace error naming `method`.
+    fn rustup_opt(&self, method: &str, f: impl FnOnce(&mut RustupSpec)) -> &Self {
+        let mut rustup = true;
+        self.spec(|s| match &mut s.source {
+            Source::Rustup(r) => f(r),
+            _ => rustup = false,
+        });
+        if !rustup {
+            self.0.record_error(TraceError::new(format!(
+                "{method}() is only available on rustup ops"
+            )));
+            return self;
+        }
+        self.0.edit(|op| {
+            let OpSpec::Pkg(p) = &op.spec else { return };
+            for (k, v) in p.default_post() {
+                op.post.entry(k).or_insert(v);
+            }
+        });
+        self
+    }
+
+    /// Rustup: also have these targets installed (`rustup target add`).
+    pub fn targets<I, S>(&self, targets: I) -> &Self
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let v = names(targets);
+        if let Err(e) = check_names(&v) {
+            self.0.record_error(e);
+        }
+        self.rustup_opt("targets", |r| RustupSpec::add(&mut r.targets, v))
+    }
+
+    /// Rustup: also have these components installed (`rustup component
+    /// add`).
+    pub fn components<I, S>(&self, components: I) -> &Self
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let v = names(components);
+        if let Err(e) = check_names(&v) {
+            self.0.record_error(e);
+        }
+        self.rustup_opt("components", |r| RustupSpec::add(&mut r.components, v))
+    }
+
+    /// Rustup: the install profile (default `default`).
+    pub fn profile(&self, profile: impl Into<String>) -> &Self {
+        let p = profile.into();
+        if let Err(e) = check_names(std::slice::from_ref(&p)) {
+            self.0.record_error(e);
+        }
+        self.rustup_opt("profile", |r| r.profile = Some(p))
+    }
+
+    /// Rustup: make this toolchain the default (`rustup default`), when it
+    /// is not already.
+    pub fn set_default(&self) -> &Self {
+        self.rustup_opt("set_default", |r| r.set_default = true)
+    }
+
+    /// Rustup: the shell command that installs rustup when it is absent;
+    /// `--default-toolchain <tc> --profile <p>` is appended. Default:
+    /// [`DEFAULT_INSTALLER`].
+    pub fn installer(&self, cmd: impl Into<String>) -> &Self {
+        let c = cmd.into();
+        self.rustup_opt("installer", |r| r.installer = Some(c))
+    }
+
     fn want(&self, w: Wanted) -> &Self {
         let mut distro = false;
         let mut script_err = None;
         let mut cargo_pin_many = false;
+        let mut rustup_pin = false;
         self.spec(|s| {
             if matches!(s.source, Source::Distro(_)) {
                 distro = true;
@@ -454,10 +548,19 @@ impl PkgHandle {
                 let name = s.names.first().map(String::as_str).unwrap_or("");
                 script_err = sc.latest_problem(name);
             }
+            if matches!(s.source, Source::Rustup(_)) && matches!(w, Wanted::Pinned(_)) {
+                rustup_pin = true;
+                return;
+            }
             cargo_pin_many =
                 s.source == Source::Cargo && matches!(w, Wanted::Pinned(_)) && s.names.len() != 1;
             s.wanted = w;
         });
+        if rustup_pin {
+            self.0.record_error(TraceError::new(
+                "rustup: Pinned is not supported; name a version toolchain instead (e.g. \"1.94.0\")",
+            ));
+        }
         if cargo_pin_many {
             self.0.record_error(TraceError::new(
                 "cargo: a pinned op takes exactly one package name",
@@ -503,14 +606,15 @@ impl<V> Host<V> {
         self.pkg_spec_op(PkgSpec::new(manager, v))
     }
 
-    /// Push a pkg op for any source. Sources that are not built yet
-    /// (T32-T34 remove them one by one) are a trace error.
+    /// Push a pkg op for any source.
     pub(crate) fn pkg_spec_op(&self, mut spec: PkgSpec) -> PkgHandle {
         if let Err(e) = check_names(&spec.names) {
             self.record_error(e);
         }
-        if matches!(spec.source, Source::Rustup(_)) {
-            self.record_error(TraceError::new("source not built yet"));
+        if matches!(spec.source, Source::Rustup(_)) && spec.names.len() != 1 {
+            self.record_error(TraceError::new(
+                "rustup: exactly one toolchain name per rustup op",
+            ));
         }
         if let Source::Script(s) = &spec.source {
             let name = spec.names.first().map(String::as_str).unwrap_or("");
@@ -583,6 +687,20 @@ impl<V> Host<V> {
         S: AsRef<str>,
     {
         self.pkg_spec_op(PkgSpec::from_source(Source::Cargo, names(crates)))
+    }
+
+    /// A rust toolchain (`stable`, `1.94.0`, `nightly-2026-10-01`) for the
+    /// op's principal, with options on the handle (`.targets`,
+    /// `.components`, `.profile`, `.set_default`, `.installer`). Keys
+    /// `pkg:rustup:<user>:<tc>` plus `...:<tc>/target/<t>` and
+    /// `...:<tc>/component/<c>`; writes `*` unless narrowed. `.latest()`
+    /// asks `rustup check`; `.pin(..)` is a trace error (name a version
+    /// toolchain instead).
+    pub fn rustup(&self, toolchain: impl AsRef<str>) -> PkgHandle {
+        self.pkg_spec_op(PkgSpec::from_source(
+            Source::Rustup(Box::default()),
+            vec![toolchain.as_ref().to_string()],
+        ))
     }
 
     /// Python packages via pip (`pkg:pip:<name>` keys).
@@ -670,13 +788,104 @@ mod tests {
     }
 
     #[test]
-    fn rustup_is_not_built_yet() {
+    fn rustup_keys_writes_kind_and_post() {
+        let h = host();
+        h.rustup("stable")
+            .targets(["x86_64-unknown-linux-musl", "x86_64-unknown-linux-musl"])
+            .components(["rust-src"]);
+        h.as_user("deploy").rustup("1.94.0");
+        h.as_user("root")
+            .rustup("nightly")
+            .writes([Key::file("/root/.cargo/bin/rustc")]);
+        let t = h.snapshot();
+        assert!(t.errors.is_empty(), "{:?}", t.errors);
+        let ops: Vec<&OpNode> = t
+            .nodes
+            .iter()
+            .map(|n| match n {
+                Node::Op(o) => o,
+                _ => panic!(),
+            })
+            .collect();
+        let post = |o: &OpNode| {
+            o.post
+                .iter()
+                .map(|(k, v)| format!("{k}={v}"))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(ops[0].writes, BTreeSet::from([Key::Any]));
+        assert_eq!(
+            post(ops[0]),
+            [
+                "pkg:rustup:root:stable=Installed",
+                "pkg:rustup:root:stable/component/rust-src=Installed",
+                "pkg:rustup:root:stable/target/x86_64-unknown-linux-musl=Installed",
+            ]
+        );
+        assert_eq!(post(ops[1]), ["pkg:rustup:deploy:1.94.0=Installed"]);
+        assert_eq!(post(ops[2]), ["pkg:rustup:root:nightly=Installed"]);
+        assert_eq!(
+            ops[2].writes,
+            BTreeSet::from([Key::file("/root/.cargo/bin/rustc")])
+        );
+        assert_eq!(ops[0].spec.kind(), "pkg[rustup]");
+        let Source::Rustup(r) = spec_of(&h, 0).source else {
+            panic!()
+        };
+        assert_eq!(r.targets, ["x86_64-unknown-linux-musl"]);
+        assert_eq!(r.profile(), "default");
+        assert_eq!(r.installer(), DEFAULT_INSTALLER);
+    }
+
+    #[test]
+    fn rustup_pinned_is_a_trace_error_and_never_merges() {
+        let h = host();
+        h.rustup("stable").pin("1.94.0");
+        assert_eq!(errors(&h).len(), 1);
+        assert!(
+            errors(&h)[0].contains("name a version toolchain instead"),
+            "{:?}",
+            errors(&h)
+        );
+        assert_eq!(spec_of(&h, 0).wanted, Wanted::Present);
+        h.rustup("stable").latest();
+        assert_eq!(errors(&h).len(), 1);
+        let a = PkgSpec::from_source(Source::Rustup(Box::default()), names(["stable"]));
+        assert!(!a.mergeable());
+        assert!(!a.can_merge(&a.clone()));
+    }
+
+    #[test]
+    fn rustup_takes_exactly_one_name() {
         let h = host();
         h.pkg_spec_op(PkgSpec::from_source(
-            Source::Rustup(RustupSpec::default()),
-            names(["x"]),
+            Source::Rustup(Box::default()),
+            names(["stable", "beta"]),
         ));
-        assert_eq!(errors(&h), ["source not built yet"]);
+        assert_eq!(
+            errors(&h),
+            ["rustup: exactly one toolchain name per rustup op"]
+        );
+    }
+
+    #[test]
+    fn rustup_builders_on_other_sources_are_trace_errors() {
+        let h = host();
+        h.cargo(["x"]).targets(["t"]);
+        h.pkg(["git"]).components(["c"]);
+        h.pip(["x"]).profile("minimal");
+        h.cargo(["x"]).set_default();
+        h.pkg(["git"]).installer("true");
+        assert_eq!(
+            errors(&h),
+            [
+                "targets() is only available on rustup ops",
+                "components() is only available on rustup ops",
+                "profile() is only available on rustup ops",
+                "set_default() is only available on rustup ops",
+                "installer() is only available on rustup ops",
+            ]
+        );
     }
 
     fn uv() -> ScriptSpec {

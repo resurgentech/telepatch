@@ -83,7 +83,7 @@ pub struct WillInstall {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WillChange {
     pub window: usize,
-    /// The source word: `script`, `cargo` (later `rustup`).
+    /// The source word: `script`, `cargo`, `rustup`.
     pub source: String,
     /// The op's principal (`root` for `h`).
     pub user: String,

@@ -986,3 +986,499 @@ fn pinned_cargo_ops_never_merge() {
         "install a --version 1.0.0\ninstall b --version 1.0.0\n"
     );
 }
+
+// ---- pkg[rustup] (T34): a stub `rustup` keeping its state in temp files,
+// and a stub installer that drops the stub into `$HOME/.cargo/bin` ----
+
+/// State lives in `$d`: `toolchains` (`<tc> <version>`), `default` (a
+/// toolchain name), `targets` and `components` (`<tc> <name>`), `latest`
+/// (`<tc> <version>` an install or update lands on), `check` and `checkrc`
+/// (what `rustup check` prints and exits with). `log` has every call.
+const STUB_RUSTUP: &str = r##"#!/bin/sh
+d='@D@'
+echo "$*" >> "$d/log"
+dflt() { cat "$d/default" 2>/dev/null; }
+lat() { v=$(awk -v t="$1" '$1==t {print $2}' "$d/latest"); echo "${v:-1.0.0}"; }
+setver() {
+  grep -v "^$1 " "$d/toolchains" > "$d/t.new"
+  echo "$1 $2" >> "$d/t.new"
+  mv "$d/t.new" "$d/toolchains"
+}
+case "$1" in
+run) v=$(awk -v t="$2" '$1==t {print $2}' "$d/toolchains"); [ -n "$v" ] || exit 1
+  echo "rustc $v (abc 2026-01-01)" ;;
+toolchain)
+  case "$2" in
+  list)
+    if [ -s "$d/toolchains" ]; then
+      dd=$(dflt)
+      awk -v dd="$dd" '{print $1 "-x86_64-unknown-linux-gnu" ($1==dd ? " (default)" : "")}' "$d/toolchains"
+    else echo "no installed toolchains"; fi ;;
+  install) setver "$3" "$(lat "$3")" ;;
+  esac ;;
+default)
+  if [ $# -eq 1 ]; then
+    dd=$(dflt)
+    if [ -n "$dd" ]; then echo "$dd-x86_64-unknown-linux-gnu (default)"
+    else echo "no default toolchain configured" >&2; exit 1; fi
+  else echo "$2" > "$d/default"; fi ;;
+target)
+  case "$2" in
+  list) awk -v t="$5" '$1==t {print $2}' "$d/targets" ;;
+  add) tc=$4; shift 4; for t in "$@"; do echo "$tc $t" >> "$d/targets"; done ;;
+  esac ;;
+component)
+  case "$2" in
+  list) awk -v t="$5" '$1==t {print $2}' "$d/components" ;;
+  add) tc=$4; shift 4
+    for c in "$@"; do
+      case "$c" in rust-src) n=$c;; *) n=$c-x86_64-unknown-linux-gnu;; esac
+      echo "$tc $n" >> "$d/components"
+    done ;;
+  esac ;;
+check) cat "$d/check"; rc=$(cat "$d/checkrc" 2>/dev/null); exit "${rc:-0}" ;;
+update) v=$(lat "$2"); setver "$2" "$v"
+  echo "$2-x86_64-unknown-linux-gnu - Up to date : $v (abc 2026-01-01)" > "$d/check"
+  echo "$2 updated" ;;
+esac
+"##;
+
+/// Called as `installer.sh --default-toolchain <tc> --profile <p>`.
+const STUB_INSTALLER: &str = r##"d='@D@'
+echo "installer $*" >> "$d/inst.log"
+tc=$2
+v=$(awk -v t="$tc" '$1==t {print $2}' "$d/latest")
+echo "$tc ${v:-1.0.0}" >> "$d/toolchains"
+echo "$tc" > "$d/default"
+ch=${CARGO_HOME:-$HOME/.cargo}
+mkdir -p "$ch/bin"
+cp "$d/bin/rustup" "$ch/bin/rustup"
+"##;
+
+#[derive(Default)]
+struct RustupState<'a> {
+    toolchains: &'a str,
+    default: &'a str,
+    targets: &'a str,
+    components: &'a str,
+    latest: &'a str,
+    check: &'a str,
+    checkrc: &'a str,
+}
+
+fn rustup_stub(d: &std::path::Path, st: RustupState) {
+    std::fs::create_dir_all(d.join("bin")).unwrap();
+    std::fs::create_dir_all(d.join("home")).unwrap();
+    for (f, v) in [
+        ("toolchains", st.toolchains),
+        ("targets", st.targets),
+        ("components", st.components),
+        ("latest", st.latest),
+        ("check", st.check),
+        ("checkrc", st.checkrc),
+        ("default", st.default),
+    ] {
+        std::fs::write(d.join(f), v).unwrap();
+    }
+    let dir = d.to_str().unwrap();
+    write_exe(&d.join("bin/rustup"), &STUB_RUSTUP.replace("@D@", dir));
+    std::fs::write(d.join("installer.sh"), STUB_INSTALLER.replace("@D@", dir)).unwrap();
+}
+
+/// What the stub saw, minus the read-only queries.
+fn rustup_mutations(d: &std::path::Path) -> String {
+    std::fs::read_to_string(d.join("log"))
+        .unwrap_or_default()
+        .lines()
+        .filter(|l| {
+            !(l.starts_with("run ")
+                || l.starts_with("toolchain list")
+                || *l == "default"
+                || l.starts_with("target list")
+                || l.starts_with("component list")
+                || *l == "check")
+        })
+        .map(|l| format!("{l}\n"))
+        .collect()
+}
+
+fn rustup_calls(d: &std::path::Path, prefix: &str) -> usize {
+    std::fs::read_to_string(d.join("log"))
+        .unwrap_or_default()
+        .lines()
+        .filter(|l| l.starts_with(prefix))
+        .count()
+}
+
+fn inst_log(d: &std::path::Path) -> String {
+    std::fs::read_to_string(d.join("inst.log")).unwrap_or_default()
+}
+
+/// A host whose HOME is `<d>/home` (so the installer's `~/.cargo/bin` is
+/// private to the test) and whose CARGO_HOME is unset (empty).
+fn rustup_host(name: &str, dir: &std::path::Path, path: &str) -> HostSpec<PathBuf> {
+    rustup_host_with(name, dir, path, "")
+}
+
+fn rustup_host_with(
+    name: &str,
+    dir: &std::path::Path,
+    path: &str,
+    cargo_home: &str,
+) -> HostSpec<PathBuf> {
+    HostSpec {
+        name: name.into(),
+        target: Target::Local(
+            LocalTransport::new()
+                .uid(0)
+                .env("PATH", path)
+                .env("HOME", dir.join("home").to_str().unwrap())
+                .env("CARGO_HOME", cargo_home),
+        ),
+        vars: dir.to_path_buf(),
+    }
+}
+
+/// The shell's tools only: no `rustup` (the machine may have a real one).
+fn tools_path(d: &std::path::Path) -> String {
+    let bin = d.join("tools");
+    std::fs::create_dir_all(&bin).unwrap();
+    let real = std::env::var("PATH").unwrap_or_default();
+    for t in [
+        "bash", "sh", "cat", "sed", "awk", "grep", "mv", "rm", "dirname", "head", "env", "id",
+        "mktemp", "date", "sleep", "tr", "cut", "stty", "mkdir", "cp", "chmod", "tee", "sort",
+    ] {
+        if let Some(p) = std::env::split_paths(&real)
+            .map(|dir| dir.join(t))
+            .find(|p| p.exists())
+        {
+            std::os::unix::fs::symlink(p, bin.join(t)).unwrap();
+        }
+    }
+    bin.to_str().unwrap().to_string()
+}
+
+const CHECK_UPDATE: &str = "stable-x86_64-unknown-linux-gnu - update available: 1.99.1 (abc 2026-01-01) -> 1.100.0 (def 2026-02-01)\nrustup - Up to date : 1.28.0\n";
+const CHECK_UPTODATE: &str = "stable-x86_64-unknown-linux-gnu - Up to date : 1.99.1 (abc 2026-01-01)\nrustup - Up to date : 1.28.0\n";
+
+#[test]
+fn rustup_fresh_install_with_target_then_changed_0() {
+    fn run_(h: Host<PathBuf>) -> PlaybookFuture {
+        Box::pin(async move {
+            h.rustup("stable")
+                .targets(["x86_64-unknown-linux-musl"])
+                .installer(format!("sh {}", p(&h, "installer.sh")));
+            Ok(())
+        })
+    }
+    let d = tempfile::tempdir().unwrap();
+    rustup_stub(
+        d.path(),
+        RustupState {
+            latest: "stable 1.99.1\n",
+            ..Default::default()
+        },
+    );
+    let path = tools_path(d.path());
+    let pb = Playbook {
+        name: "rustup",
+        run: run_,
+    };
+    let (r1, out1) = go(&pb, vec![rustup_host("h1", d.path(), &path)]);
+    assert_eq!(
+        r1.hosts[0].status,
+        HostStatus::Changed,
+        "{}\n{out1}",
+        r1.render()
+    );
+    assert_eq!(
+        inst_log(d.path()),
+        "installer --default-toolchain stable --profile default\n"
+    );
+    // The installer's rustup is only in $HOME/.cargo/bin: the op found it.
+    assert_eq!(
+        rustup_mutations(d.path()),
+        "target add --toolchain stable x86_64-unknown-linux-musl\n"
+    );
+    let line =
+        "window 1 pkg[rustup] root stable: absent -> present (+target x86_64-unknown-linux-musl)";
+    assert!(
+        r1.render().contains(&format!("h1: {line}")),
+        "{}",
+        r1.render()
+    );
+    assert!(out1.contains("pkg[rustup] install stable"), "{out1}");
+    assert_eq!(r1.hosts[0].will_change.len(), 1);
+    assert_eq!(r1.hosts[0].will_change[0].source, "rustup");
+
+    let (r2, out2) = go(&pb, vec![rustup_host("h1", d.path(), &path)]);
+    assert_eq!(
+        r2.hosts[0].status,
+        HostStatus::Ok,
+        "{}\n{out2}",
+        r2.render()
+    );
+    assert!(r2.hosts[0].ops.iter().all(|o| !o.changed));
+    assert!(r2.hosts[0].will_change.is_empty());
+    assert_eq!(inst_log(d.path()).lines().count(), 1, "no second install");
+    assert_eq!(rustup_calls(d.path(), "target add"), 1);
+}
+
+#[test]
+fn rustup_toolchain_missing_with_rustup_present_installs_it() {
+    fn run_(h: Host<PathBuf>) -> PlaybookFuture {
+        Box::pin(async move {
+            h.rustup("stable")
+                .profile("minimal")
+                .components(["rust-src", "rustfmt"])
+                .installer("exit 99");
+            Ok(())
+        })
+    }
+    let d = tempfile::tempdir().unwrap();
+    // The YAML's repair state: the proxy exists, no toolchain behind it.
+    rustup_stub(
+        d.path(),
+        RustupState {
+            latest: "stable 1.99.1\n",
+            ..Default::default()
+        },
+    );
+    let path = stub_path(d.path());
+    let pb = Playbook {
+        name: "rustup",
+        run: run_,
+    };
+    let (r1, out1) = go(&pb, vec![rustup_host("h1", d.path(), &path)]);
+    assert_eq!(
+        r1.hosts[0].status,
+        HostStatus::Changed,
+        "{}\n{out1}",
+        r1.render()
+    );
+    assert_eq!(
+        rustup_mutations(d.path()),
+        "toolchain install stable --profile minimal\ncomponent add --toolchain stable rust-src rustfmt\n"
+    );
+    assert!(
+        r1.render().contains(
+            "h1: window 1 pkg[rustup] root stable: absent -> present (+component rust-src, rustfmt)"
+        ),
+        "{}",
+        r1.render()
+    );
+    assert_eq!(inst_log(d.path()), "", "the installer never ran");
+    let (r2, _) = go(&pb, vec![rustup_host("h1", d.path(), &path)]);
+    assert_eq!(r2.hosts[0].status, HostStatus::Ok, "{}", r2.render());
+    assert_eq!(rustup_calls(d.path(), "toolchain install"), 1);
+    assert_eq!(rustup_calls(d.path(), "component add"), 1);
+}
+
+#[test]
+fn rustup_latest_updates_when_check_says_so() {
+    fn run_(h: Host<PathBuf>) -> PlaybookFuture {
+        Box::pin(async move {
+            h.rustup("stable").latest();
+            Ok(())
+        })
+    }
+    let d = tempfile::tempdir().unwrap();
+    rustup_stub(
+        d.path(),
+        RustupState {
+            toolchains: "stable 1.99.1\n",
+            default: "stable\n",
+            latest: "stable 1.100.0\n",
+            check: CHECK_UPDATE,
+            // rustup check exits 100 when an update is available.
+            checkrc: "100",
+            ..Default::default()
+        },
+    );
+    let path = stub_path(d.path());
+    let pb = Playbook {
+        name: "rustup",
+        run: run_,
+    };
+    let (r1, out1) = go(&pb, vec![rustup_host("h1", d.path(), &path)]);
+    assert_eq!(
+        r1.hosts[0].status,
+        HostStatus::Changed,
+        "{}\n{out1}",
+        r1.render()
+    );
+    assert_eq!(rustup_mutations(d.path()), "update stable\n");
+    assert!(
+        r1.render()
+            .contains("h1: window 1 pkg[rustup] root stable: 1.99.1 -> 1.100.0 (latest)"),
+        "{}",
+        r1.render()
+    );
+    assert!(out1.contains("pkg[rustup] latest stable"), "{out1}");
+    let (r2, _) = go(&pb, vec![rustup_host("h1", d.path(), &path)]);
+    assert_eq!(r2.hosts[0].status, HostStatus::Ok, "{}", r2.render());
+    assert!(r2.hosts[0].will_change.is_empty());
+    assert_eq!(rustup_calls(d.path(), "update"), 1);
+}
+
+#[test]
+fn rustup_latest_without_an_update_changes_nothing() {
+    fn run_(h: Host<PathBuf>) -> PlaybookFuture {
+        Box::pin(async move {
+            h.rustup("stable").latest();
+            Ok(())
+        })
+    }
+    let d = tempfile::tempdir().unwrap();
+    rustup_stub(
+        d.path(),
+        RustupState {
+            toolchains: "stable 1.99.1\n",
+            default: "stable\n",
+            check: CHECK_UPTODATE,
+            ..Default::default()
+        },
+    );
+    let pb = Playbook {
+        name: "rustup",
+        run: run_,
+    };
+    let (r, out) = go(&pb, vec![rustup_host("h1", d.path(), &stub_path(d.path()))]);
+    assert_eq!(r.hosts[0].status, HostStatus::Ok, "{}\n{out}", r.render());
+    assert!(r.hosts[0].will_change.is_empty());
+    assert_eq!(rustup_mutations(d.path()), "");
+    assert_eq!(rustup_calls(d.path(), "check"), 2, "prepare and the op");
+}
+
+#[test]
+fn rustup_check_failure_fails_the_op() {
+    fn run_(h: Host<PathBuf>) -> PlaybookFuture {
+        Box::pin(async move {
+            h.rustup("stable").latest();
+            Ok(())
+        })
+    }
+    let d = tempfile::tempdir().unwrap();
+    rustup_stub(
+        d.path(),
+        RustupState {
+            toolchains: "stable 1.99.1\n",
+            default: "stable\n",
+            checkrc: "1",
+            ..Default::default()
+        },
+    );
+    let pb = Playbook {
+        name: "rustup",
+        run: run_,
+    };
+    let (r, _) = go(&pb, vec![rustup_host("h1", d.path(), &stub_path(d.path()))]);
+    let HostStatus::Failed { tail, .. } = &r.hosts[0].status else {
+        panic!("{:?}\n{}", r.hosts[0].status, r.render())
+    };
+    assert!(tail.contains("rustup check failed"), "{tail}");
+    assert!(
+        r.render()
+            .contains("window 1 pkg[rustup] root stable: 1.99.1 -> unknown (latest)"),
+        "{}",
+        r.render()
+    );
+    assert_eq!(rustup_mutations(d.path()), "");
+}
+
+#[test]
+fn rustup_default_is_set_only_when_needed() {
+    fn run_(h: Host<PathBuf>) -> PlaybookFuture {
+        Box::pin(async move {
+            h.rustup("stable").set_default();
+            Ok(())
+        })
+    }
+    let d = tempfile::tempdir().unwrap();
+    // Installed, but another toolchain is the default.
+    rustup_stub(
+        d.path(),
+        RustupState {
+            toolchains: "stable 1.99.1\nnightly 1.101.0\n",
+            default: "nightly\n",
+            ..Default::default()
+        },
+    );
+    let path = stub_path(d.path());
+    let pb = Playbook {
+        name: "rustup",
+        run: run_,
+    };
+    let (r1, out1) = go(&pb, vec![rustup_host("h1", d.path(), &path)]);
+    assert_eq!(
+        r1.hosts[0].status,
+        HostStatus::Changed,
+        "{}\n{out1}",
+        r1.render()
+    );
+    assert_eq!(rustup_mutations(d.path()), "default stable\n");
+    assert!(
+        r1.render()
+            .contains("h1: window 1 pkg[rustup] root stable: 1.99.1 -> present (+default)"),
+        "{}",
+        r1.render()
+    );
+    let (r2, _) = go(&pb, vec![rustup_host("h1", d.path(), &path)]);
+    assert_eq!(r2.hosts[0].status, HostStatus::Ok, "{}", r2.render());
+    assert_eq!(rustup_calls(d.path(), "default stable"), 1);
+
+    // The default is unset (rustup default fails): set it too.
+    let d2 = tempfile::tempdir().unwrap();
+    rustup_stub(
+        d2.path(),
+        RustupState {
+            toolchains: "stable 1.99.1\n",
+            ..Default::default()
+        },
+    );
+    let (r3, _) = go(
+        &pb,
+        vec![rustup_host("h1", d2.path(), &stub_path(d2.path()))],
+    );
+    assert_eq!(r3.hosts[0].status, HostStatus::Changed, "{}", r3.render());
+    assert_eq!(rustup_mutations(d2.path()), "default stable\n");
+}
+
+/// The installer honours CARGO_HOME, and so does the op's PATH fix.
+#[test]
+fn rustup_finds_the_installer_s_rustup_under_cargo_home() {
+    fn run_(h: Host<PathBuf>) -> PlaybookFuture {
+        Box::pin(async move {
+            h.rustup("stable")
+                .installer(format!("sh {}", p(&h, "installer.sh")));
+            Ok(())
+        })
+    }
+    let d = tempfile::tempdir().unwrap();
+    rustup_stub(
+        d.path(),
+        RustupState {
+            latest: "stable 1.99.1\n",
+            ..Default::default()
+        },
+    );
+    let path = tools_path(d.path());
+    let ch = d.path().join("elsewhere");
+    let pb = Playbook {
+        name: "rustup",
+        run: run_,
+    };
+    let host = || rustup_host_with("h1", d.path(), &path, ch.to_str().unwrap());
+    let (r1, out1) = go(&pb, vec![host()]);
+    assert_eq!(
+        r1.hosts[0].status,
+        HostStatus::Changed,
+        "{}\n{out1}",
+        r1.render()
+    );
+    assert!(ch.join("bin/rustup").exists());
+    assert!(!d.path().join("home/.cargo").exists());
+    let (r2, _) = go(&pb, vec![host()]);
+    assert_eq!(r2.hosts[0].status, HostStatus::Ok, "{}", r2.render());
+    assert_eq!(inst_log(d.path()).lines().count(), 1);
+}

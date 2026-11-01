@@ -150,13 +150,16 @@ pub fn missing_names(names: &[String], output: &str) -> Vec<String> {
 }
 
 /// The probe script of a non-distro, non-pip pkg op, or `None` when its
-/// source has no such probe (distro and pip go through [`pkg_probe`];
-/// rustup is not built yet).
+/// source has no such probe (distro and pip go through [`pkg_probe`]).
 pub fn source_probe(p: &PkgSpec) -> Option<String> {
     match &p.source {
         Source::Script(s) => Some(s.probe(&p.wanted)),
         Source::Cargo => Some(crate::ops::pkg::cargo_probe(&p.names, &p.wanted)),
-        Source::Distro(_) | Source::Pip | Source::Rustup(_) => None,
+        Source::Rustup(r) => {
+            let tc = p.names.first().map(String::as_str).unwrap_or("");
+            Some(crate::ops::pkg::rustup_probe(tc, &p.wanted, r))
+        }
+        Source::Distro(_) | Source::Pip => None,
     }
 }
 
@@ -198,7 +201,26 @@ pub fn source_changes(window: usize, p: &PkgSpec, out: Option<&str>) -> Vec<Will
                 })
                 .collect()
         }
-        Source::Distro(_) | Source::Pip | Source::Rustup(_) => Vec::new(),
+        Source::Rustup(r) => {
+            // An empty output is a failed probe (a working one prints
+            // "rustup ok" or "rustup absent" at least).
+            let probed = out
+                .map(crate::ops::pkg::parse_rustup_probe)
+                .unwrap_or_default();
+            let name = p.names.first().cloned().unwrap_or_default();
+            crate::ops::pkg::rustup_will_change(r, &probed, &p.wanted)
+                .map(|(installed, wanted)| WillChange {
+                    window,
+                    source: manager_name(&p.source).to_string(),
+                    user: p.user.clone(),
+                    name,
+                    installed,
+                    wanted,
+                })
+                .into_iter()
+                .collect()
+        }
+        Source::Distro(_) | Source::Pip => Vec::new(),
     }
 }
 
