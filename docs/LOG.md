@@ -189,3 +189,36 @@ are appended, never edited in; a hook refuses rewrites.
   (distro: trace error); Cargo/Rustup/Script "source not built yet";
   merge key adds source and wanted, Script never merges. No snapshot moved.
 - Commits: 95c8ec5
+
+## 2026-10-31 — T32 `Script` source; non-distro probes in prepare and the report
+
+- `h.script(name, ScriptSpec{bin, version, latest, install, update})`:
+  probe `[ -x bin ]` + version token, install/update with `TP_WANT`,
+  re-probe and fail on unmet; `Latest::{Command, GithubRelease}` on the
+  host. Writes `*`, post `pkg:script:<user>:<name>` and `file:<bin>`,
+  kind `pkg[script]`. Prepare probes in the op's principal, same batch;
+  `WillChange` lines and the `will_change` event.
+- Commits: 8d61630
+
+## 2026-10-31 — T33 `Cargo` source (per user)
+
+- `h.cargo`/`s.cargo`: `cargo install --list` probe, one install for the
+  missing, `.pin` one name (`--version`), `.latest` via `cargo search` on
+  the host; keys `pkg:cargo:<user>:<name>`; adjacent ops merge, pinned
+  never; report lines join names with equal installed/wanted.
+- Commits: eae9f1a
+
+## 2026-10-31 — T34 `Rustup` source
+
+- `h.rustup(tc)` with `.targets/.components/.profile/.set_default/.installer`:
+  installer, toolchain install, default, `rustup check`/`update` for
+  Latest, then targets and components; keys `pkg:rustup:<user>:<tc>…`.
+  "update available" matched in either case (rustup 1.29 lower-cases it).
+- Commits: a0e24e5
+
+## 2026-10-31 — T37 skill and `tp classify`: installers are `pkg` sources
+
+- `tool` retired from the skill and the classifier; marker for a missing
+  source is `HACK(pkg: no <Source> source yet)`; PORT's built list and
+  dev_common sketch use the sources.
+- Commits: dd977fc
