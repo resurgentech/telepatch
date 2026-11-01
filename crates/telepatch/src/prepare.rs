@@ -6,7 +6,7 @@
 //! Per window this module checks that every user the window's ops address
 //! exists (`getent passwd`), and gathers package state: one query per
 //! manager over every name in the window's pkg ops, and one probe per
-//! non-distro op (script: installed version, and latest when wanted), sent
+//! non-distro op (script, cargo: installed version, and latest when wanted), sent
 //! in that op's `RunAs`.
 //!
 //! Gathering versus asserting: package state is *gathered* and reported
@@ -72,7 +72,8 @@ pub fn pkg_names(window: &Window) -> Vec<(Source, Vec<String>)> {
         if p.mode == PkgMode::BuildDep {
             continue;
         }
-        // Only distro and pip names are probed; T32 adds the other sources.
+        // Only distro and pip names go through `pkg_probe`; the other
+        // sources have their own probe ([`source_probe`]).
         if !matches!(p.source, Source::Distro(_) | Source::Pip) {
             continue;
         }
@@ -114,7 +115,7 @@ pub fn pkg_probe(source: &Source, names: &[String]) -> String {
             Source::Pip => format!(
                 "printf '%s\\n' \"$tp_l\" | grep -qx -- \"$(printf %s {q} | tr 'A-Z_' 'a-z-')\""
             ),
-            // Not probed (see `pkg_names`): report nothing as present.
+            // Not probed here (see `pkg_names`): report nothing as present.
             Source::Cargo | Source::Rustup(_) | Source::Script(_) => "false".to_string(),
         };
         s.push_str(&format!("if {test}; then echo \"present \"{q}; fi\n"));
@@ -150,11 +151,12 @@ pub fn missing_names(names: &[String], output: &str) -> Vec<String> {
 
 /// The probe script of a non-distro, non-pip pkg op, or `None` when its
 /// source has no such probe (distro and pip go through [`pkg_probe`];
-/// cargo and rustup are not built yet).
+/// rustup is not built yet).
 pub fn source_probe(p: &PkgSpec) -> Option<String> {
     match &p.source {
         Source::Script(s) => Some(s.probe(&p.wanted)),
-        Source::Distro(_) | Source::Pip | Source::Cargo | Source::Rustup(_) => None,
+        Source::Cargo => Some(crate::ops::pkg::cargo_probe(&p.names, &p.wanted)),
+        Source::Distro(_) | Source::Pip | Source::Rustup(_) => None,
     }
 }
 
@@ -180,7 +182,23 @@ pub fn source_changes(window: usize, p: &PkgSpec, out: Option<&str>) -> Vec<Will
                 .into_iter()
                 .collect()
         }
-        Source::Distro(_) | Source::Pip | Source::Cargo | Source::Rustup(_) => Vec::new(),
+        Source::Cargo => {
+            let probed = out
+                .map(crate::ops::pkg::parse_cargo_probe)
+                .unwrap_or_default();
+            crate::ops::pkg::cargo_will_changes(&p.names, &probed, &p.wanted)
+                .into_iter()
+                .map(|(name, installed, wanted)| WillChange {
+                    window,
+                    source: manager_name(&p.source).to_string(),
+                    user: p.user.clone(),
+                    name,
+                    installed,
+                    wanted,
+                })
+                .collect()
+        }
+        Source::Distro(_) | Source::Pip | Source::Rustup(_) => Vec::new(),
     }
 }
 

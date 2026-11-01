@@ -83,7 +83,7 @@ pub struct WillInstall {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WillChange {
     pub window: usize,
-    /// The source word: `script` (later `cargo`, `rustup`).
+    /// The source word: `script`, `cargo` (later `rustup`).
     pub source: String,
     /// The op's principal (`root` for `h`).
     pub user: String,
@@ -99,15 +99,42 @@ pub struct WillChange {
 impl WillChange {
     /// `window N pkg[script] root uv: 0.9.2 -> 0.9.5`.
     pub fn line(&self) -> String {
+        Self::joined_line(std::slice::from_ref(self))
+    }
+
+    /// One line for items that agree on window, source, user, installed
+    /// and wanted (names joined with `, `); the first item's fields speak.
+    fn joined_line(group: &[WillChange]) -> String {
+        let w = &group[0];
+        let names: Vec<&str> = group.iter().map(|g| g.name.as_str()).collect();
         format!(
             "window {} pkg[{}] {} {}: {} -> {}",
-            self.window,
-            self.source,
-            self.user,
-            self.name,
-            self.installed.as_deref().unwrap_or("absent"),
-            self.wanted
+            w.window,
+            w.source,
+            w.user,
+            names.join(", "),
+            w.installed.as_deref().unwrap_or("absent"),
+            w.wanted
         )
+    }
+
+    /// The printed lines of `items`: each run of consecutive items that
+    /// agree on window, source, user, installed and wanted becomes one line
+    /// with the names joined by `, ` (the JSON event stays one per name).
+    pub fn lines(items: &[WillChange]) -> Vec<String> {
+        let same = |a: &WillChange, b: &WillChange| {
+            (a.window, &a.source, &a.user, &a.installed, &a.wanted)
+                == (b.window, &b.source, &b.user, &b.installed, &b.wanted)
+        };
+        let mut out = Vec::new();
+        let mut start = 0;
+        for i in 1..=items.len() {
+            if i == items.len() || !same(&items[start], &items[i]) {
+                out.push(Self::joined_line(&items[start..i]));
+                start = i;
+            }
+        }
+        out
     }
 }
 
@@ -212,8 +239,8 @@ impl Report {
                     w.names.join(", ")
                 );
             }
-            for w in &h.will_change {
-                let _ = writeln!(out, "\n{}: {}", h.name, w.line());
+            for l in WillChange::lines(&h.will_change) {
+                let _ = writeln!(out, "\n{}: {l}", h.name);
             }
         }
         for h in &self.hosts {
@@ -247,5 +274,43 @@ impl Report {
             }
         }
         out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn wc(window: usize, name: &str, installed: Option<&str>, wanted: &str) -> WillChange {
+        WillChange {
+            window,
+            source: "cargo".into(),
+            user: "root".into(),
+            name: name.into(),
+            installed: installed.map(str::to_string),
+            wanted: wanted.into(),
+        }
+    }
+
+    #[test]
+    fn consecutive_equal_items_join_into_one_line() {
+        let items = [
+            wc(1, "cargo-deb", None, "present"),
+            wc(1, "cargo-generate-rpm", None, "present"),
+            wc(1, "other", Some("1.0.0"), "present"),
+            wc(1, "again", None, "present"),
+            wc(2, "late", None, "present"),
+        ];
+        assert_eq!(
+            WillChange::lines(&items),
+            [
+                "window 1 pkg[cargo] root cargo-deb, cargo-generate-rpm: absent -> present",
+                "window 1 pkg[cargo] root other: 1.0.0 -> present",
+                "window 1 pkg[cargo] root again: absent -> present",
+                "window 2 pkg[cargo] root late: absent -> present",
+            ]
+        );
+        assert!(WillChange::lines(&[]).is_empty());
+        assert_eq!(items[0].line(), WillChange::lines(&items[..1])[0]);
     }
 }

@@ -167,7 +167,12 @@ fn describe(op: &OpNode) -> String {
     match &op.spec {
         OpSpec::Raw { script } => format!("sh {}", first_line(script)),
         OpSpec::Shell(s) => format!("sh {}", first_line(&s.cmd)),
-        OpSpec::Pkg(p) if matches!(p.source, crate::ops::pkg::Source::Script(_)) => {
+        OpSpec::Pkg(p)
+            if matches!(
+                p.source,
+                crate::ops::pkg::Source::Script(_) | crate::ops::pkg::Source::Cargo
+            ) =>
+        {
             let mode = match &p.wanted {
                 Wanted::Present => "install".to_string(),
                 Wanted::Pinned(v) => format!("pin {v}"),
@@ -550,9 +555,11 @@ impl Executor for HostExec {
                         "window":w.window,"manager":w.manager,"names":w.names}));
                     self.report.will_install.push(w);
                 }
-                for w in will.will_change {
+                for l in crate::report::WillChange::lines(&will.will_change) {
                     self.sink
-                        .line(&format!("== {} [prepare] {} ==", self.name, w.line()));
+                        .line(&format!("== {} [prepare] {l} ==", self.name));
+                }
+                for w in will.will_change {
                     self.sink.event(json!({"ev":"will_change","host":self.name,
                         "window":w.window,"source":w.source,"user":w.user,"name":w.name,
                         "installed":w.installed,"wanted":w.wanted}));

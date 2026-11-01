@@ -253,3 +253,49 @@ fn write_exe(p: &std::path::Path, text: &str) {
     c.stdin.take().unwrap().write_all(text.as_bytes()).unwrap();
     assert!(c.wait().unwrap().success());
 }
+
+#[test]
+fn cargo_present() {
+    let h = host("debian12");
+    let id = h.cargo(["cargo-deb", "cargo-generate-rpm"]).id();
+    assert!(h.snapshot().errors.is_empty(), "{:?}", h.snapshot().errors);
+    insta::assert_snapshot!(wrapped(&h, id));
+}
+
+#[test]
+fn cargo_pinned() {
+    let h = host("debian12");
+    let p = h.cargo(["cargo-deb"]);
+    p.pin("2.1.0");
+    assert!(h.snapshot().errors.is_empty(), "{:?}", h.snapshot().errors);
+    insta::assert_snapshot!(wrapped(&h, p.id()));
+}
+
+#[test]
+fn cargo_latest() {
+    let h = host("debian12");
+    let p = h.cargo(["cargo-deb", "cargo-generate-rpm"]);
+    p.latest();
+    assert!(h.snapshot().errors.is_empty(), "{:?}", h.snapshot().errors);
+    insta::assert_snapshot!(wrapped(&h, p.id()));
+}
+
+/// `as_user("root")` renders as a login shell for root (the login PATH
+/// finds `~/.cargo/bin`); the op body is the same as for `h`.
+#[test]
+fn cargo_as_user_root() {
+    let h = host("debian12");
+    let id = h.as_user("root").cargo(["cargo-deb"]).id();
+    assert!(h.snapshot().errors.is_empty(), "{:?}", h.snapshot().errors);
+    insta::assert_snapshot!(wrapped(&h, id));
+}
+
+#[test]
+fn plan_shows_cargo_effects() {
+    let h = host("debian12");
+    h.cargo(["cargo-deb", "cargo-generate-rpm"]);
+    h.as_user("deploy")
+        .cargo(["ripgrep"])
+        .writes([telepatch::Key::file("/home/deploy/.cargo/bin/rg")]);
+    insta::assert_snapshot!(render_host("h", &h.os, &h.snapshot()));
+}

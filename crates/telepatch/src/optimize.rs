@@ -54,8 +54,9 @@ struct MergeKey {
 fn merge_key(item: &Item) -> Option<MergeKey> {
     let Item::Op(w) = item else { return None };
     match &w.node.spec {
-        // Script ops never merge: no key, so no two compare equal.
-        OpSpec::Pkg(p) if matches!(p.source, crate::ops::pkg::Source::Script(_)) => None,
+        // Script ops and pinned Cargo ops never merge: no key, so no two
+        // compare equal.
+        OpSpec::Pkg(p) if !p.mergeable() => None,
         OpSpec::Pkg(p) => Some(MergeKey {
             source: p.source.clone(),
             wanted: p.wanted.clone(),

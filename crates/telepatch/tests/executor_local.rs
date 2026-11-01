@@ -568,3 +568,421 @@ fn script_unresolvable_latest_fails_the_op() {
     );
     assert!(!d.path().join("tool").exists());
 }
+
+// ---- pkg[cargo] (T33): a stub `cargo` first on PATH, keeping its install
+// list in a temp file ----
+
+/// `name version` per line: what the stub's `cargo install --list` shows.
+const STUB_CARGO: &str = r##"#!/bin/sh
+d='@D@'
+case "$1" in
+install)
+  if [ "$2" = "--list" ]; then
+    awk '{print $1 " v" $2 ":"; print "    " $1}' "$d/state"; exit 0
+  fi
+  shift
+  echo "install $*" >> "$d/log"
+  [ -e "$d/refuse" ] && exit 0
+  names=; ver=
+  while [ $# -gt 0 ]; do
+    case "$1" in --version) ver=$2; shift 2;; *) names="$names $1"; shift;; esac
+  done
+  for n in $names; do
+    v=$ver
+    [ -n "$v" ] || v=$(awk -v n="$n" '$1==n {print $2}' "$d/latest")
+    [ -n "$v" ] || v=0.1.0
+    grep -v "^$n " "$d/state" > "$d/state.new"
+    echo "$n $v" >> "$d/state.new"
+    mv "$d/state.new" "$d/state"
+  done ;;
+search)
+  echo "$2-extra = \"9.9.9\"    # a decoy"
+  awk -v n="$2" '$1==n {print n " = \"" $2 "\"    # a crate"}' "$d/latest" ;;
+esac
+"##;
+
+/// A fresh stub in `<dir>/bin`, with the installed list and the search
+/// table (`name version` lines).
+fn cargo_stub(d: &std::path::Path, installed: &str, latest: &str) {
+    std::fs::create_dir_all(d.join("bin")).unwrap();
+    std::fs::write(d.join("state"), installed).unwrap();
+    std::fs::write(d.join("latest"), latest).unwrap();
+    write_exe(
+        &d.join("bin/cargo"),
+        &STUB_CARGO.replace("@D@", d.to_str().unwrap()),
+    );
+}
+
+fn cargo_log(d: &std::path::Path) -> String {
+    std::fs::read_to_string(d.join("log")).unwrap_or_default()
+}
+
+fn cargo_host(name: &str, dir: &std::path::Path, path: &str) -> HostSpec<PathBuf> {
+    HostSpec {
+        name: name.into(),
+        target: Target::Local(LocalTransport::new().uid(0).env("PATH", path)),
+        vars: dir.to_path_buf(),
+    }
+}
+
+/// The stub's `bin` first, then the real PATH.
+fn stub_path(d: &std::path::Path) -> String {
+    format!(
+        "{}/bin:{}",
+        d.display(),
+        std::env::var("PATH").unwrap_or_default()
+    )
+}
+
+#[test]
+fn cargo_present_installs_missing_in_one_command_then_changed_0() {
+    fn run_(h: Host<PathBuf>) -> PlaybookFuture {
+        Box::pin(async move {
+            h.cargo(["cargo-deb", "cargo-generate-rpm", "have"]);
+            Ok(())
+        })
+    }
+    let d = tempfile::tempdir().unwrap();
+    cargo_stub(d.path(), "have 1.0.0\n", "");
+    let path = stub_path(d.path());
+    let pb = Playbook {
+        name: "cargo",
+        run: run_,
+    };
+    let (r1, out1) = go(&pb, vec![cargo_host("h1", d.path(), &path)]);
+    assert_eq!(
+        r1.hosts[0].status,
+        HostStatus::Changed,
+        "{}\n{out1}",
+        r1.render()
+    );
+    assert_eq!(
+        cargo_log(d.path()),
+        "install cargo-deb cargo-generate-rpm\n"
+    );
+    let line = "window 1 pkg[cargo] root cargo-deb, cargo-generate-rpm: absent -> present";
+    assert!(
+        r1.render().contains(&format!("h1: {line}")),
+        "{}",
+        r1.render()
+    );
+    assert!(
+        out1.contains(&format!("== h1 [prepare] {line} ==")),
+        "{out1}"
+    );
+    assert!(
+        out1.contains("pkg[cargo] install cargo-deb cargo-generate-rpm have"),
+        "{out1}"
+    );
+    // The report keeps one item per name.
+    assert_eq!(r1.hosts[0].will_change.len(), 2);
+    assert_eq!(r1.hosts[0].will_change[0].source, "cargo");
+
+    let (r2, out2) = go(&pb, vec![cargo_host("h1", d.path(), &path)]);
+    assert_eq!(r2.hosts[0].status, HostStatus::Ok, "{}", r2.render());
+    assert!(r2.hosts[0].ops.iter().all(|o| !o.changed));
+    assert!(r2.hosts[0].will_change.is_empty());
+    assert!(!out2.contains("[prepare]"), "{out2}");
+    assert_eq!(cargo_log(d.path()).lines().count(), 1, "no second install");
+}
+
+#[test]
+fn cargo_will_change_json_event_is_one_per_name() {
+    fn run_(h: Host<PathBuf>) -> PlaybookFuture {
+        Box::pin(async move {
+            h.cargo(["a", "b"]);
+            Ok(())
+        })
+    }
+    let d = tempfile::tempdir().unwrap();
+    cargo_stub(d.path(), "", "");
+    let log = d.path().join("run.jsonl");
+    let pb = Playbook {
+        name: "cargo",
+        run: run_,
+    };
+    let r = run(
+        &pb,
+        vec![cargo_host("h1", d.path(), &stub_path(d.path()))],
+        RunOpts {
+            log: Some(log.clone()),
+            stdout: Stdout::Quiet,
+        },
+    );
+    assert_eq!(r.exit_code(), 0, "{}", r.render());
+    let text = std::fs::read_to_string(&log).unwrap();
+    let evs: Vec<serde_json::Value> = text
+        .lines()
+        .map(|l| serde_json::from_str::<serde_json::Value>(l).unwrap())
+        .filter(|e| e["ev"] == "will_change")
+        .collect();
+    let names: Vec<&str> = evs.iter().map(|e| e["name"].as_str().unwrap()).collect();
+    assert_eq!(names, ["a", "b"]);
+    assert_eq!(evs[0]["source"], "cargo");
+    assert_eq!(evs[0]["installed"], serde_json::Value::Null);
+    assert_eq!(evs[0]["wanted"], "present");
+}
+
+#[test]
+fn cargo_pinned_installs_with_version_when_different() {
+    fn run_(h: Host<PathBuf>) -> PlaybookFuture {
+        Box::pin(async move {
+            h.cargo(["cargo-deb"]).pin("0.2.0");
+            Ok(())
+        })
+    }
+    let d = tempfile::tempdir().unwrap();
+    cargo_stub(d.path(), "cargo-deb 0.1.0\n", "");
+    let path = stub_path(d.path());
+    let pb = Playbook {
+        name: "cargo",
+        run: run_,
+    };
+    let (r1, out1) = go(&pb, vec![cargo_host("h1", d.path(), &path)]);
+    assert_eq!(
+        r1.hosts[0].status,
+        HostStatus::Changed,
+        "{}\n{out1}",
+        r1.render()
+    );
+    assert_eq!(cargo_log(d.path()), "install cargo-deb --version 0.2.0\n");
+    assert!(
+        r1.render()
+            .contains("h1: window 1 pkg[cargo] root cargo-deb: 0.1.0 -> 0.2.0"),
+        "{}",
+        r1.render()
+    );
+    assert!(out1.contains("pkg[cargo] pin 0.2.0 cargo-deb"), "{out1}");
+    let (r2, _) = go(&pb, vec![cargo_host("h1", d.path(), &path)]);
+    assert_eq!(r2.hosts[0].status, HostStatus::Ok, "{}", r2.render());
+    assert!(r2.hosts[0].will_change.is_empty());
+    assert_eq!(cargo_log(d.path()).lines().count(), 1);
+}
+
+#[test]
+fn cargo_latest_asks_cargo_search_on_the_host() {
+    fn run_(h: Host<PathBuf>) -> PlaybookFuture {
+        Box::pin(async move {
+            h.cargo(["cargo-deb", "cargo-generate-rpm"]).latest();
+            Ok(())
+        })
+    }
+    let d = tempfile::tempdir().unwrap();
+    cargo_stub(
+        d.path(),
+        "cargo-deb 0.1.0\ncargo-generate-rpm 0.5.0\n",
+        "cargo-deb 0.3.0\ncargo-generate-rpm 0.5.0\n",
+    );
+    let path = stub_path(d.path());
+    let pb = Playbook {
+        name: "cargo",
+        run: run_,
+    };
+    let (r1, out1) = go(&pb, vec![cargo_host("h1", d.path(), &path)]);
+    assert_eq!(
+        r1.hosts[0].status,
+        HostStatus::Changed,
+        "{}\n{out1}",
+        r1.render()
+    );
+    // Only the outdated name is installed.
+    assert_eq!(cargo_log(d.path()), "install cargo-deb\n");
+    assert!(
+        r1.render()
+            .contains("h1: window 1 pkg[cargo] root cargo-deb: 0.1.0 -> 0.3.0 (latest)"),
+        "{}",
+        r1.render()
+    );
+    assert!(!r1.render().contains("generate-rpm"), "{}", r1.render());
+    let (r2, _) = go(&pb, vec![cargo_host("h1", d.path(), &path)]);
+    assert_eq!(r2.hosts[0].status, HostStatus::Ok, "{}", r2.render());
+    assert_eq!(cargo_log(d.path()).lines().count(), 1);
+}
+
+#[test]
+fn cargo_latest_lookup_failure_fails_the_op() {
+    fn run_(h: Host<PathBuf>) -> PlaybookFuture {
+        Box::pin(async move {
+            h.cargo(["nowhere"]).latest();
+            Ok(())
+        })
+    }
+    let d = tempfile::tempdir().unwrap();
+    cargo_stub(d.path(), "", "");
+    let pb = Playbook {
+        name: "cargo",
+        run: run_,
+    };
+    let (r, out) = go(&pb, vec![cargo_host("h1", d.path(), &stub_path(d.path()))]);
+    assert!(
+        matches!(r.hosts[0].status, HostStatus::Failed { .. }),
+        "{}",
+        r.render()
+    );
+    assert!(
+        r.render()
+            .contains("cargo nowhere: could not resolve the latest version"),
+        "{}\n{out}",
+        r.render()
+    );
+    assert!(r.render().contains("unknown (latest)"), "{}", r.render());
+    assert_eq!(cargo_log(d.path()), "", "nothing installed");
+}
+
+#[test]
+fn cargo_install_that_installs_nothing_fails() {
+    fn run_(h: Host<PathBuf>) -> PlaybookFuture {
+        Box::pin(async move {
+            h.cargo(["a"]);
+            Ok(())
+        })
+    }
+    let d = tempfile::tempdir().unwrap();
+    cargo_stub(d.path(), "", "");
+    std::fs::write(d.path().join("refuse"), "").unwrap();
+    let pb = Playbook {
+        name: "cargo",
+        run: run_,
+    };
+    let (r, _) = go(&pb, vec![cargo_host("h1", d.path(), &stub_path(d.path()))]);
+    assert!(
+        matches!(r.hosts[0].status, HostStatus::Failed { .. }),
+        "{}",
+        r.render()
+    );
+    assert!(
+        r.render()
+            .contains("cargo a: installed absent, wanted present"),
+        "{}",
+        r.render()
+    );
+}
+
+#[test]
+fn cargo_missing_fails_and_prepare_says_unknown() {
+    fn run_(h: Host<PathBuf>) -> PlaybookFuture {
+        Box::pin(async move {
+            h.cargo(["a"]);
+            Ok(())
+        })
+    }
+    let d = tempfile::tempdir().unwrap();
+    // A PATH with the shell's tools but no cargo.
+    let bin = d.path().join("nocargo");
+    std::fs::create_dir_all(&bin).unwrap();
+    let real = std::env::var("PATH").unwrap_or_default();
+    for t in [
+        "bash", "sh", "cat", "sed", "awk", "grep", "mv", "rm", "dirname", "head", "env", "id",
+        "mktemp", "date", "sleep", "tr", "cut", "stty",
+    ] {
+        if let Some(p) = std::env::split_paths(&real)
+            .map(|dir| dir.join(t))
+            .find(|p| p.exists())
+        {
+            std::os::unix::fs::symlink(p, bin.join(t)).unwrap();
+        }
+    }
+    let pb = Playbook {
+        name: "cargo",
+        run: run_,
+    };
+    let (r, out) = go(&pb, vec![cargo_host("h1", d.path(), bin.to_str().unwrap())]);
+    assert!(
+        matches!(r.hosts[0].status, HostStatus::Failed { .. }),
+        "{}\n{out}",
+        r.render()
+    );
+    assert!(r.render().contains("cargo not found"), "{}", r.render());
+    assert!(
+        r.render()
+            .contains("window 1 pkg[cargo] root a: unknown -> present"),
+        "{}",
+        r.render()
+    );
+}
+
+#[test]
+fn cargo_adjacent_ops_merge_into_one_install() {
+    fn run_(h: Host<PathBuf>) -> PlaybookFuture {
+        Box::pin(async move {
+            h.cargo(["a"]);
+            h.cargo(["b"]);
+            Ok(())
+        })
+    }
+    let d = tempfile::tempdir().unwrap();
+    cargo_stub(d.path(), "", "");
+    let pb = Playbook {
+        name: "cargo",
+        run: run_,
+    };
+    let (r, out) = go(&pb, vec![cargo_host("h1", d.path(), &stub_path(d.path()))]);
+    assert_eq!(
+        r.hosts[0].status,
+        HostStatus::Changed,
+        "{}\n{out}",
+        r.render()
+    );
+    assert_eq!(cargo_log(d.path()), "install a b\n");
+    assert_eq!(r.hosts[0].ops.len(), 1, "{:?}", r.hosts[0].ops);
+    assert!(
+        r.render()
+            .contains("pkg[cargo] root a, b: absent -> present"),
+        "{}",
+        r.render()
+    );
+}
+
+#[test]
+fn cargo_ops_do_not_merge_across_a_star_writer() {
+    fn run_(h: Host<PathBuf>) -> PlaybookFuture {
+        Box::pin(async move {
+            h.cargo(["a"]);
+            sh!(h, "true");
+            h.cargo(["b"]);
+            Ok(())
+        })
+    }
+    let d = tempfile::tempdir().unwrap();
+    cargo_stub(d.path(), "", "");
+    let pb = Playbook {
+        name: "cargo",
+        run: run_,
+    };
+    let (r, out) = go(&pb, vec![cargo_host("h1", d.path(), &stub_path(d.path()))]);
+    assert_eq!(
+        r.hosts[0].status,
+        HostStatus::Changed,
+        "{}\n{out}",
+        r.render()
+    );
+    assert_eq!(cargo_log(d.path()), "install a\ninstall b\n");
+}
+
+#[test]
+fn pinned_cargo_ops_never_merge() {
+    fn run_(h: Host<PathBuf>) -> PlaybookFuture {
+        Box::pin(async move {
+            h.cargo(["a"]).pin("1.0.0");
+            h.cargo(["b"]).pin("1.0.0");
+            Ok(())
+        })
+    }
+    let d = tempfile::tempdir().unwrap();
+    cargo_stub(d.path(), "", "");
+    let pb = Playbook {
+        name: "cargo",
+        run: run_,
+    };
+    let (r, out) = go(&pb, vec![cargo_host("h1", d.path(), &stub_path(d.path()))]);
+    assert_eq!(
+        r.hosts[0].status,
+        HostStatus::Changed,
+        "{}\n{out}",
+        r.render()
+    );
+    assert_eq!(
+        cargo_log(d.path()),
+        "install a --version 1.0.0\ninstall b --version 1.0.0\n"
+    );
+}

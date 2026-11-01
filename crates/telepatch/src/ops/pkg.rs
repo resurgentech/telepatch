@@ -21,7 +21,12 @@ use crate::key::{Key, Value};
 use crate::sh::quote;
 use crate::trace::{Node, OpNode, OpSpec, Principal};
 
+mod cargo;
 mod script;
+pub use cargo::{
+    CargoProbe, parse_probe as parse_cargo_probe, probe as cargo_probe,
+    will_changes as cargo_will_changes,
+};
 pub use script::{Latest, Probed, ScriptSpec, VERSION_RE, parse_probe, version_token, will_change};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -42,7 +47,7 @@ pub enum Source {
     /// The host's system manager.
     Distro(Manager),
     Pip,
-    /// Not built yet (T33).
+    /// `cargo install`, per user ([`cargo`]).
     Cargo,
     /// Not built yet (T34).
     Rustup(RustupSpec),
@@ -79,7 +84,8 @@ pub struct PkgSpec {
     pub update_cache: bool,
     /// The op's principal (`root` for `h` and `as_user("root")`), set when
     /// the op is pushed. Names the per-user sources' keys
-    /// (`pkg:script:<user>:<name>`); unused by distro and pip.
+    /// (`pkg:script:<user>:<name>`, `pkg:cargo:<user>:<name>`); unused by
+    /// distro and pip.
     pub user: String,
 }
 
@@ -106,24 +112,23 @@ impl PkgSpec {
 
     /// The effect key of one name. Non-distro names live in their own
     /// namespace (`pkg:pip:<name>`) so they never overlap or merge with
-    /// system names. Script keys name the principal
-    /// (`pkg:script:<user>:<name>`); cargo and rustup keys are provisional
-    /// (T33, T34).
+    /// system names. Script and cargo keys name the principal
+    /// (`pkg:script:<user>:<name>`); rustup keys are provisional (T34).
     pub fn key_of(&self, name: &str) -> Key {
         match &self.source {
             Source::Distro(_) => Key::pkg(name),
             Source::Pip => Key::pkg(format!("pip:{name}")),
-            Source::Cargo => Key::pkg(format!("cargo:{name}")),
+            Source::Cargo => Key::pkg(format!("cargo:{}:{name}", self.user)),
             Source::Rustup(_) => Key::pkg(format!("rustup:{name}")),
             Source::Script(_) => Key::pkg(format!("script:{}:{name}", self.user)),
         }
     }
 
     /// Default write set: the names' keys for distro and pip, `*` for
-    /// script (a vendor installer writes files nobody listed; A14).
+    /// script and cargo (they write files nobody listed; A14).
     pub fn default_writes(&self) -> BTreeSet<Key> {
         match &self.source {
-            Source::Script(_) => BTreeSet::from([Key::Any]),
+            Source::Script(_) | Source::Cargo => BTreeSet::from([Key::Any]),
             _ => self.keys(),
         }
     }
@@ -142,10 +147,12 @@ impl PkgSpec {
         post
     }
 
-    /// The plan kind: `pkg` for distro and pip, `pkg[script]` for script.
+    /// The plan kind: `pkg` for distro and pip, `pkg[script]` for script,
+    /// `pkg[cargo]` for cargo.
     pub fn kind(&self) -> &'static str {
         match &self.source {
             Source::Script(_) => "pkg[script]",
+            Source::Cargo => "pkg[cargo]",
             _ => "pkg",
         }
     }
@@ -154,10 +161,20 @@ impl PkgSpec {
         self.names.iter().map(|n| self.key_of(n)).collect()
     }
 
+    /// May this op ever be folded into another? `Script` ops never merge; a
+    /// pinned `Cargo` op has exactly one name (the pin is for that name).
+    pub fn mergeable(&self) -> bool {
+        match &self.source {
+            Source::Script(_) => false,
+            Source::Cargo => !matches!(self.wanted, Wanted::Pinned(_)),
+            _ => true,
+        }
+    }
+
     /// Can `other` be folded into this op (same source, wanted and mode)?
-    /// `Script` ops never merge.
     pub fn can_merge(&self, other: &PkgSpec) -> bool {
-        !matches!(self.source, Source::Script(_))
+        self.mergeable()
+            && other.mergeable()
             && self.source == other.source
             && self.wanted == other.wanted
             && self.mode == other.mode
@@ -177,6 +194,9 @@ impl PkgSpec {
         if let Source::Script(s) = &self.source {
             let name = self.names.first().map(String::as_str).unwrap_or("");
             return s.render(name, &self.wanted);
+        }
+        if self.source == Source::Cargo {
+            return cargo::render(&self.names, &self.wanted);
         }
         let names: Vec<String> = self
             .names
@@ -424,6 +444,7 @@ impl PkgHandle {
     fn want(&self, w: Wanted) -> &Self {
         let mut distro = false;
         let mut script_err = None;
+        let mut cargo_pin_many = false;
         self.spec(|s| {
             if matches!(s.source, Source::Distro(_)) {
                 distro = true;
@@ -433,8 +454,15 @@ impl PkgHandle {
                 let name = s.names.first().map(String::as_str).unwrap_or("");
                 script_err = sc.latest_problem(name);
             }
+            cargo_pin_many =
+                s.source == Source::Cargo && matches!(w, Wanted::Pinned(_)) && s.names.len() != 1;
             s.wanted = w;
         });
+        if cargo_pin_many {
+            self.0.record_error(TraceError::new(
+                "cargo: a pinned op takes exactly one package name",
+            ));
+        }
         if distro {
             self.0.record_error(TraceError::new(
                 "pin or latest on distro packages is not supported",
@@ -481,7 +509,7 @@ impl<V> Host<V> {
         if let Err(e) = check_names(&spec.names) {
             self.record_error(e);
         }
-        if matches!(spec.source, Source::Cargo | Source::Rustup(_)) {
+        if matches!(spec.source, Source::Rustup(_)) {
             self.record_error(TraceError::new("source not built yet"));
         }
         if let Source::Script(s) = &spec.source {
@@ -543,6 +571,18 @@ impl<V> Host<V> {
             Source::Script(Box::new(spec)),
             vec![name.as_ref().to_string()],
         ))
+    }
+
+    /// Crates installed with `cargo install`, for the op's principal
+    /// (`pkg:cargo:<user>:<name>` keys); writes `*` unless narrowed with
+    /// `.writes([..])`; posts `Installed` per name. `.pin(v)` takes one
+    /// name; `.latest()` asks `cargo search` on the host.
+    pub fn cargo<I, S>(&self, crates: I) -> PkgHandle
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        self.pkg_spec_op(PkgSpec::from_source(Source::Cargo, names(crates)))
     }
 
     /// Python packages via pip (`pkg:pip:<name>` keys).
@@ -630,12 +670,13 @@ mod tests {
     }
 
     #[test]
-    fn unbuilt_sources_are_a_trace_error() {
-        for src in [Source::Cargo, Source::Rustup(RustupSpec::default())] {
-            let h = host();
-            h.pkg_spec_op(PkgSpec::from_source(src, names(["x"])));
-            assert_eq!(errors(&h), ["source not built yet"]);
-        }
+    fn rustup_is_not_built_yet() {
+        let h = host();
+        h.pkg_spec_op(PkgSpec::from_source(
+            Source::Rustup(RustupSpec::default()),
+            names(["x"]),
+        ));
+        assert_eq!(errors(&h), ["source not built yet"]);
     }
 
     fn uv() -> ScriptSpec {
@@ -731,5 +772,65 @@ mod tests {
         assert_eq!(o.writes, BTreeSet::from([Key::file("/usr/local/bin/uv")]));
         assert_eq!(o.post.len(), 2);
         assert_eq!(o.spec.kind(), "pkg[script]");
+    }
+
+    #[test]
+    fn cargo_keys_writes_kind_and_post() {
+        let h = host();
+        h.cargo(["cargo-deb", "cargo-generate-rpm"]);
+        h.as_user("deploy").cargo(["cargo-deb"]);
+        h.as_user("root")
+            .cargo(["x"])
+            .writes([Key::file("/root/.cargo/bin/x")]);
+        let t = h.snapshot();
+        assert!(t.errors.is_empty(), "{:?}", t.errors);
+        let ops: Vec<&OpNode> = t
+            .nodes
+            .iter()
+            .map(|n| match n {
+                Node::Op(o) => o,
+                _ => panic!(),
+            })
+            .collect();
+        let post = |o: &OpNode| {
+            o.post
+                .iter()
+                .map(|(k, v)| format!("{k}={v}"))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(ops[0].writes, BTreeSet::from([Key::Any]));
+        assert_eq!(
+            post(ops[0]),
+            [
+                "pkg:cargo:root:cargo-deb=Installed",
+                "pkg:cargo:root:cargo-generate-rpm=Installed"
+            ]
+        );
+        assert_eq!(post(ops[1]), ["pkg:cargo:deploy:cargo-deb=Installed"]);
+        assert_eq!(post(ops[2]), ["pkg:cargo:root:x=Installed"]);
+        assert_eq!(
+            ops[2].writes,
+            BTreeSet::from([Key::file("/root/.cargo/bin/x")])
+        );
+        assert_eq!(ops[0].spec.kind(), "pkg[cargo]");
+    }
+
+    #[test]
+    fn cargo_pin_takes_one_name_and_never_merges() {
+        let h = host();
+        h.cargo(["a"]).pin("1.0.0");
+        assert!(errors(&h).is_empty());
+        h.cargo(["a", "b"]).pin("1.0.0");
+        assert_eq!(
+            errors(&h),
+            ["cargo: a pinned op takes exactly one package name"]
+        );
+        let mut a = PkgSpec::from_source(Source::Cargo, names(["a"]));
+        let mut b = PkgSpec::from_source(Source::Cargo, names(["b"]));
+        assert!(a.can_merge(&b));
+        a.wanted = Wanted::Pinned("1.0.0".into());
+        b.wanted = Wanted::Pinned("1.0.0".into());
+        assert!(!a.can_merge(&b));
+        assert!(!a.mergeable());
     }
 }
