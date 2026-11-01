@@ -250,3 +250,40 @@ are appended, never edited in; a hook refuses rewrites.
   Acceptance 7/7 identical; `test-idempotent ubuntu2404 rust` and
   `dev_base` `CHANGED 0`. Goal 4 is done.
 - Commits: tp_basic 6929037, 0d0fbc2
+
+## 2026-11-01 — T24 SSH transport: the root shell over one connection
+
+- `SshTransport` (`transport/ssh.rs`): the user's `ssh`, one ControlMaster
+  per host kept as a child (private `/tmp/tp-<pid>-<n>` socket dir,
+  `ControlPersist=no`), channels on it; `-T -o BatchMode=yes` always; key via
+  `-i … -o IdentitiesOnly=yes`, extra `-o`s; root via `id -u`, `sudo -n true`,
+  `exec sudo -n bash` (`Shell::exec`); Limits from the master's stderr, the
+  ssh text via `message(host)`; `-O exit` and kill on close or drop. Stub
+  gate tests; `just test-live-ssh` against an sshd container.
+- Commits: b557db0
+
+## 2026-11-01 — T25 SSH transport: several shells, MaxSessions, User shells
+
+- A channel refused for MaxSessions opens one more master; `User(u)` is a
+  channel running `sudo -n -iu <u> bash` (`SudoRefused` with sudo's text).
+  Channels pass `ProxyCommand=false` so a refused mux session cannot fall
+  back to an untracked direct connection (seen live). Live: `MaxSessions 1`
+  want 3 got 3 over 3 masters.
+- Commits: 85c6032
+
+## 2026-11-01 — T26 Executor: SSH target and per-principal shells
+
+- `Target::Ssh`; root shell plus one shell per user, opened in prepare after
+  `getent` and before any op of the window; ops, source probes and fact
+  reads go to their principal's shell; a change of principal waits for the
+  previous run; a failure stops sends on every shell; user shells, root
+  shell, then connections close at host end. Local/docker block a user
+  window with the transport's limit. Root-only windows unchanged.
+- Commits: ec7775f
+
+## 2026-11-01 — T27 CLI: `run --host` over SSH
+
+- `run <name> (--local | --host <dest>...) [--ssh-key p] [--ssh-option K=V]...`;
+  hosts in parallel, dest verbatim as the report name; `run_with_args` takes
+  an ssh transport factory for tests.
+- Commits: 3f31576
