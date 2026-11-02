@@ -287,3 +287,22 @@ are appended, never edited in; a hook refuses rewrites.
   hosts in parallel, dest verbatim as the report name; `run_with_args` takes
   an ssh transport factory for tests.
 - Commits: 3f31576
+
+## 2026-11-02 — T29 `../tp_basic`: `just test-vm`, dev_base on a VM over SSH, transport proof
+
+- Gates on run 1 exit 0, run 2 `STATUS ok`/`CHANGED 0`, and the VM gone from
+  `vmtool list` after the trap's delete. The oracle comparison is a
+  non-gating report (containers and VMs differ in structure); no oracle
+  record skips it with a note. Live green; the report shows the known
+  `- packages|binfmt-support amd64`.
+- Commits: tp_basic 23bc8f3
+
+## 2026-11-02 — T38 `../tp_basic`: `just test-vm-oracle`, Ansible versus telepatch on a VM
+
+- Two fresh VMs, one at a time: the ported Ansible commit (git archive,
+  ansible-playbook as bot with become) and `tp-basic run --host`; states
+  diffed with test-container.sh's `compare_captures` (byte-identical copy),
+  pre-states compared non-gating. VM lifecycle moved to `scripts/lib/vm.sh`,
+  sourced by test-vm.sh. On demand. Live: state, versions and pre-states
+  identical; `just test-vm` still green after the move.
+- Commits: tp_basic 7082914
