@@ -4,14 +4,16 @@
   <img src="docs/hero.svg" alt="A man with two fingers to his temple sends green waves to a retro computer whose screen reads telepatch" width="100%">
 </p>
 
-Configuration management in Rust, for people who are tired of waiting for
-Ansible.
+Configuration management that knows what it is going to do before it does
+it.
 
-A role is an `async fn`. Running a playbook traces it into a per-host graph,
-merges what can be merged, checks everything that can fail before touching a
-host, and streams the result into a persistent shell over SSH. Nothing is
-installed on the target: no Python, no agent, no module copies. The playbook
-is one static binary.
+A playbook is traced into a graph per host before anything runs. The engine
+sees every op at once, so it can merge the five package installs that five
+roles asked for into one call, order the rest by what they actually read and
+write, and check every precondition up front. Then it streams the plan into
+one persistent shell per host over a single SSH connection, every host at
+once, the way an operator would type it. Nothing goes over the wire but
+shell. Nothing is installed on the target.
 
 **Status: 0.1, experimental, and already doing real work.** The engine, the
 local, `docker exec` and SSH transports, the package, file and shell
@@ -19,42 +21,53 @@ primitives and the Ansible conversion tooling are built and tested. The
 first production playbooks live in
 [`tp_basic`](https://github.com/resurgentech/tp_basic), where every ported
 role is proven equivalent to its Ansible original by building the same
-image both ways and diffing the result. See
+machine both ways and diffing the result. See
 [What exists today](#what-exists-today) for the edges.
 
 ## Why
 
-Ansible pays a full connect, copy module, run, collect, disconnect cycle per
-task per host, buffers output until a task finishes, and cannot see that five
-roles each want to `apt install` something and do it once. For a forty-task
-playbook on a hundred hosts that is thousands of round trips, and you cannot
-tell whether a slow task is working or hung.
+The tools we have run a playbook the way they read it: one task at a time,
+top to bottom, each task a fresh connection, a module shipped over the wire,
+a Python interpreter started on the far end, a result shipped back. The tool
+learns what task twelve needs when it gets to task twelve. If task twelve
+cannot work on this host, you find out with eleven tasks already applied,
+and the host is now in a state no playbook describes. Five roles that each
+install a package each pay the package manager's full price. A slow task and
+a hung task look the same until one of them ends.
 
-telepatch keeps the vocabulary (roles, playbooks, vars, hosts) and changes the
-execution model:
+telepatch keeps the vocabulary (roles, playbooks, vars, hosts) and changes
+the execution model:
 
-- **Code, not YAML.** Distro dispatch is a `match`, per-user work is a `for`,
-  a condition is an `if`. The compiler checks it, and your editor can
-  navigate it.
-- **Trace, then plan.** Ops record themselves instead of running, so the
-  engine sees the whole playbook before anything executes. Package installs
-  across roles collapse into one package manager call per host. `plan` shows
-  you exactly what a host would get, for any supported distro, with no host.
-- **Persistent shells.** One root shell per host, plus a login shell per
-  user the playbook touches, opened once and multiplexed over a single SSH
-  connection. Ops are pipelined into them the way an operator would type
-  them, and each reports a typed result.
-- **Fail before you change anything.** Facts, package state and permissions
-  are gathered up front. A host that cannot complete the plan is not started,
-  and the report says why.
-- **Converged means idle.** A second run reads the facts once and sends
-  nothing. No task replay, no "changed" from a shell task that could not
-  tell.
+- **Know before you run.** The whole playbook is traced into a graph before
+  a single op executes. `plan` prints what every host would get, for any
+  supported distro, with no host at all. The run you see is the run you
+  planned.
+- **Fail early, or not at all.** Facts, package state, sudo rights and what
+  each source would install are gathered per host in a prepare phase. A host
+  that cannot complete the plan is never started, and the report says which
+  op would have failed and why. No half-applied hosts.
+- **Merge, reorder, run hosts together.** Same-kind ops across roles
+  collapse into one call per host. Ops are ordered by effect, what they read
+  and what they write, not by the line they were written on, so dependent
+  work waits only on what it depends on. Every host runs at once.
+- **No round trips.** One multiplexed SSH connection per host, one root
+  shell plus one login shell per user the playbook touches, opened once. Ops
+  are pipelined into them and each reports a typed result in a nonce-tagged
+  trailer. No module copies, no Python on the target, no connect and
+  disconnect per task.
+- **Converged means idle.** A second run probes once and sends nothing. No
+  task replay, no "changed" from a shell task that could not tell.
 - **Live output.** Every op streams as it runs, prefixed by host, and the run
-  is logged as JSONL for replay.
-- **One binary.** Playbooks compile to a static musl executable. Copy it to a
-  build container, a laptop or a jump host and run it there, or point it at
-  hosts over SSH.
+  is logged as JSONL for replay. A slow op and a hung op look different.
+- **One binary, anywhere.** A playbook compiles to a static executable with
+  no runtime. Copy it into a build container, onto a laptop or a jump host,
+  or point it at hosts over SSH from wherever it is.
+
+Roles are written in Rust, as ordinary async functions. That is how the
+trace works and how the plan gets type-checked before it is rendered, but it
+is a means, not the point. Distro dispatch is a `match`, per-user work is a
+`for`, a condition is an `if`, and the same engine could sit under another
+language that can record what a function asked for.
 
 ### Measured
 
