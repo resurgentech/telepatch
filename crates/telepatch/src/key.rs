@@ -9,6 +9,7 @@ pub enum Key {
     Pkg(String),
     File(String),
     User(String),
+    Group(String),
     Svc(String),
     Repo(String),
     /// A command on `PATH`; see [`Key::overlaps`].
@@ -26,6 +27,9 @@ impl Key {
     }
     pub fn user(n: impl Into<String>) -> Key {
         Key::User(n.into())
+    }
+    pub fn group(n: impl Into<String>) -> Key {
+        Key::Group(n.into())
     }
     pub fn svc(n: impl Into<String>) -> Key {
         Key::Svc(n.into())
@@ -59,6 +63,7 @@ impl fmt::Display for Key {
             Key::Pkg(n) => write!(f, "pkg:{n}"),
             Key::File(n) => write!(f, "file:{n}"),
             Key::User(n) => write!(f, "user:{n}"),
+            Key::Group(n) => write!(f, "group:{n}"),
             Key::Svc(n) => write!(f, "svc:{n}"),
             Key::Repo(n) => write!(f, "repo:{n}"),
             Key::Bin(n) => write!(f, "bin:{n}"),
@@ -98,6 +103,7 @@ mod tests {
             (Key::pkg("nginx"), "pkg:nginx"),
             (Key::file("/etc/x"), "file:/etc/x"),
             (Key::user("deploy"), "user:deploy"),
+            (Key::group("docker"), "group:docker"),
             (Key::svc("nginx"), "svc:nginx"),
             (Key::repo("hashicorp"), "repo:hashicorp"),
             (Key::bin("cargo"), "bin:cargo"),
@@ -116,6 +122,10 @@ mod tests {
         assert!(Key::pkg("a").overlaps(&Key::pkg("a")));
         assert!(!Key::pkg("a").overlaps(&Key::pkg("b")));
         assert!(!Key::pkg("a").overlaps(&Key::svc("a")));
+        assert!(Key::group("a").overlaps(&Key::group("a")));
+        assert!(!Key::group("a").overlaps(&Key::group("b")));
+        assert!(!Key::group("a").overlaps(&Key::user("a")));
+        assert!(Key::group("a").overlaps(&Key::Any));
         assert!(!Key::file("/etc").overlaps(&Key::file("/etc/x")));
         assert!(Key::bin("a").overlaps(&Key::pkg("zzz")));
         assert!(Key::file("/x").overlaps(&Key::bin("a")));

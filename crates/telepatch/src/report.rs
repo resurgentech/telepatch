@@ -138,6 +138,23 @@ impl WillChange {
     }
 }
 
+/// Something a window's op will create, from the prepare probe of its
+/// kind (`group`). Only items that do not exist yet are listed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WillCreate {
+    pub window: usize,
+    /// The primitive: `group`.
+    pub kind: String,
+    pub name: String,
+}
+
+impl WillCreate {
+    /// `group docker: will create`.
+    pub fn line(&self) -> String {
+        format!("{} {}: will create", self.kind, self.name)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HostReport {
     pub name: String,
@@ -148,6 +165,7 @@ pub struct HostReport {
     pub skipped_roles: Vec<String>,
     pub will_install: Vec<WillInstall>,
     pub will_change: Vec<WillChange>,
+    pub will_create: Vec<WillCreate>,
 }
 
 impl HostReport {
@@ -159,6 +177,7 @@ impl HostReport {
             skipped_roles: Vec::new(),
             will_install: Vec::new(),
             will_change: Vec::new(),
+            will_create: Vec::new(),
         }
     }
 
@@ -241,6 +260,9 @@ impl Report {
             }
             for l in WillChange::lines(&h.will_change) {
                 let _ = writeln!(out, "\n{}: {l}", h.name);
+            }
+            for c in &h.will_create {
+                let _ = writeln!(out, "\n{}: {}", h.name, c.line());
             }
         }
         for h in &self.hosts {

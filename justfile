@@ -56,6 +56,12 @@ test-live-mise:
 test-live-ssh:
     cargo test -p telepatch --test live -- --ignored --nocapture ssh_
 
+# Live: the group primitive (and, from T47, the user primitive) on
+# ubuntu:24.04 and rockylinux/rockylinux:10 via docker exec; second run
+# must change nothing. Needs docker.
+test-live-user:
+    cargo test -p telepatch --test live -- --ignored --nocapture group:: user::
+
 # Build examples/hello for musl and fail unless the binary is static; then
 # smoke-test it.
 musl-example:

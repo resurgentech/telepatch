@@ -1,0 +1,32 @@
+---
+source: crates/telepatch/tests/group.rs
+expression: "render_host(\"h\", &h.os, &h.snapshot())"
+---
+host h (os: Debian/Debian 12)
+blocking reads: 0
+
+role (none)
+  #0 group as shell:root reads [] writes [group:docker] post [group:docker=Exists(true)]
+      | created=0
+      | tp_g='docker'
+      | if ! getent group "$tp_g" >/dev/null 2>&1; then
+      |   groupadd -- "$tp_g"
+      |   rc=$?
+      |   if [ "$rc" -eq 0 ]; then changed=1; created=1; fi
+      | fi
+  #1 group as shell:root reads [] writes [group:kvm] post [group:kvm=Exists(true)]
+      | created=0
+      | tp_g='kvm'
+      | if ! getent group "$tp_g" >/dev/null 2>&1; then
+      |   groupadd -r -- "$tp_g"
+      |   rc=$?
+      |   if [ "$rc" -eq 0 ]; then changed=1; created=1; fi
+      | fi
+  #2 group as login:root reads [] writes [group:login-root] post [group:login-root=Exists(true)]
+      | created=0
+      | tp_g='login-root'
+      | if ! getent group "$tp_g" >/dev/null 2>&1; then
+      |   groupadd -- "$tp_g"
+      |   rc=$?
+      |   if [ "$rc" -eq 0 ]; then changed=1; created=1; fi
+      | fi

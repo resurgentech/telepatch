@@ -44,6 +44,7 @@ use crate::trace::OpNode;
 pub enum OpKind {
     Pkg,
     File,
+    Group,
     Sh,
 }
 
@@ -68,6 +69,14 @@ pub struct FileResult {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct GroupResult {
+    pub rc: i32,
+    pub changed: bool,
+    /// The group did not exist and this op made it.
+    pub created: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct ShellResult {
     pub rc: i32,
     pub changed: bool,
@@ -79,6 +88,9 @@ impl OpResult for PkgResult {
 }
 impl OpResult for FileResult {
     const KIND: OpKind = OpKind::File;
+}
+impl OpResult for GroupResult {
+    const KIND: OpKind = OpKind::Group;
 }
 impl OpResult for ShellResult {
     const KIND: OpKind = OpKind::Sh;
@@ -161,15 +173,21 @@ pub fn wrap(kind: OpKind, body: &str, id: usize, nonce: &str) -> String {
     let json = match kind {
         OpKind::Pkg => r#"{"rc":%s,"changed":%s,"installed":[%s]}"#,
         OpKind::File => r#"{"rc":%s,"changed":%s}"#,
+        OpKind::Group => r#"{"rc":%s,"changed":%s,"created":%s}"#,
         OpKind::Sh => r#"{"rc":%s,"changed":%s,"skipped":%s}"#,
     };
     let args = match kind {
         OpKind::Pkg => r#""$rc" "$__tp_c" "$__tp_i""#,
         OpKind::File => r#""$rc" "$__tp_c""#,
+        OpKind::Group => r#""$rc" "$__tp_c" "$__tp_k""#,
         OpKind::Sh => r#""$rc" "$__tp_c" "$__tp_s""#,
     };
     let mut o = String::from("(\n");
     o.push_str(PRELUDE);
+    if kind == OpKind::Group {
+        // Only a group op sets `created`; other kinds keep their bytes.
+        o.push_str("  case \"$created\" in 1) __tp_k=true;; *) __tp_k=false;; esac\n");
+    }
     let _ = writeln!(o, "  printf '\\n__tp_{nonce} {id} {}\\n' {args}", json);
     o.push_str("}\ntrap '__tp_emit $?' EXIT\nrc=0; changed=0; skipped=0; installed=()\n");
     o.push_str(body);

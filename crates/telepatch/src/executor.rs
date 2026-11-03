@@ -312,6 +312,7 @@ fn describe(op: &OpNode) -> String {
                 p.names.join(" ")
             )
         }
+        OpSpec::Group(g) => format!("group {}", g.name),
         OpSpec::File(f) => {
             use crate::ops::file::FileKind;
             let what = match f.kind {
@@ -342,10 +343,11 @@ fn roles_of(w: &WindowOp) -> Vec<String> {
 }
 
 fn parse_result(kind: OpKind, t: &Trailer) -> Result<(i32, bool, bool), String> {
-    use crate::trailer::{FileResult, PkgResult, ShellResult};
+    use crate::trailer::{FileResult, GroupResult, PkgResult, ShellResult};
     let r = match kind {
         OpKind::Pkg => t.typed::<PkgResult>().map(|r| (r.rc, r.changed, false)),
         OpKind::File => t.typed::<FileResult>().map(|r| (r.rc, r.changed, false)),
+        OpKind::Group => t.typed::<GroupResult>().map(|r| (r.rc, r.changed, false)),
         OpKind::Sh => t
             .typed::<ShellResult>()
             .map(|r| (r.rc, r.changed, r.skipped)),
@@ -685,6 +687,15 @@ impl Executor for HostExec {
                 for l in crate::report::WillChange::lines(&will.will_change) {
                     self.sink
                         .line(&format!("== {} [prepare] {l} ==", self.name));
+                }
+                for c in &will.will_create {
+                    self.sink
+                        .line(&format!("== {} [prepare] {} ==", self.name, c.line()));
+                }
+                for c in will.will_create {
+                    self.sink.event(json!({"ev":"will_create","host":self.name,
+                        "window":c.window,"kind":c.kind,"name":c.name}));
+                    self.report.will_create.push(c);
                 }
                 for w in will.will_change {
                     self.sink.event(json!({"ev":"will_change","host":self.name,

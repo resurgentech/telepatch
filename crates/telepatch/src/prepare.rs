@@ -23,7 +23,7 @@ use crate::engine::Window;
 use crate::facts::os::Os;
 use crate::ops::pkg::{Manager, PkgMode, PkgSpec, Source};
 use crate::pool::{Shell, ShellError};
-use crate::report::{WillChange, WillInstall};
+use crate::report::{WillChange, WillCreate, WillInstall};
 use crate::sh::quote;
 use crate::trace::{OpNode, OpSpec, Principal};
 use crate::trailer::{OpKind, wrap};
@@ -250,6 +250,21 @@ pub fn source_changes(window: usize, p: &PkgSpec, out: Option<&str>) -> Vec<Will
 pub struct Prepared {
     pub will_install: Vec<WillInstall>,
     pub will_change: Vec<WillChange>,
+    pub will_create: Vec<WillCreate>,
+}
+
+/// Names of the groups the window's `group` ops ensure, first-seen order,
+/// without duplicates.
+pub fn group_names(window: &Window) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for op in &window.ops {
+        if let OpSpec::Group(g) = &op.node.spec
+            && !out.contains(&g.name)
+        {
+            out.push(g.name.clone());
+        }
+    }
+    out
 }
 
 /// Run `script` in `shell` as a plain op with id `id`; its rc and output.
@@ -354,6 +369,22 @@ pub async fn prepare_window<S: ShellSet>(
         root.send(id, &w).await.map_err(|e| e.to_string())?;
         pkg_ids.push(id);
     }
+    // Group existence, one probe for the window, on the root shell (a
+    // group op is root only).
+    let group_list = group_names(window);
+    let mut group_id = None;
+    if !group_list.is_empty() {
+        let id = next();
+        let root = shell_of(shells, &Principal::Root)?;
+        let w = wrap(
+            OpKind::Sh,
+            &crate::ops::shell::raw_body(&crate::ops::group::probe(&group_list)),
+            id,
+            root.nonce(),
+        );
+        root.send(id, &w).await.map_err(|e| e.to_string())?;
+        group_id = Some(id);
+    }
     // Non-distro probes, each in its op's RunAs and principal's shell (as
     // `read_facts` does).
     let mut src_ids: Vec<(&PkgSpec, &Principal, Option<usize>)> = Vec::new();
@@ -410,6 +441,19 @@ pub async fn prepare_window<S: ShellSet>(
         };
         will.will_change
             .extend(source_changes(window.number, p, out.as_deref()));
+    }
+    if let Some(id) = group_id {
+        // Gather only: a failed probe reports nothing.
+        let root = shell_of(shells, &Principal::Root)?;
+        if let Ok((_, out)) = collect(root, id).await {
+            for name in crate::ops::group::missing(&out) {
+                will.will_create.push(WillCreate {
+                    window: window.number,
+                    kind: "group".to_string(),
+                    name,
+                });
+            }
+        }
     }
     Ok(will)
 }

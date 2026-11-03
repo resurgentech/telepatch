@@ -78,6 +78,8 @@ pub enum OpSpec {
     Pkg(crate::ops::pkg::PkgSpec),
     /// File, directory, line edits (`h.file`).
     File(crate::ops::file::FileSpec),
+    /// Group exists (`h.group`).
+    Group(crate::ops::group::GroupSpec),
 }
 
 impl OpSpec {
@@ -87,6 +89,7 @@ impl OpSpec {
             OpSpec::Raw { .. } | OpSpec::Shell(_) => "sh",
             OpSpec::Pkg(p) => p.kind(),
             OpSpec::File(_) => "file",
+            OpSpec::Group(_) => "group",
         }
     }
 
@@ -97,6 +100,7 @@ impl OpSpec {
             OpSpec::Raw { .. } | OpSpec::Shell(_) => OpKind::Sh,
             OpSpec::Pkg(_) => OpKind::Pkg,
             OpSpec::File(_) => OpKind::File,
+            OpSpec::Group(_) => OpKind::Group,
         }
     }
 
@@ -107,6 +111,7 @@ impl OpSpec {
             OpSpec::Shell(s) => crate::ops::shell::body(s),
             OpSpec::Pkg(p) => p.render(),
             OpSpec::File(f) => f.render(),
+            OpSpec::Group(g) => g.render(),
         }
     }
 
@@ -116,6 +121,7 @@ impl OpSpec {
             OpSpec::Raw { .. } | OpSpec::Shell(_) => BTreeSet::from([Key::Any]),
             OpSpec::Pkg(p) => p.default_writes(),
             OpSpec::File(f) => BTreeSet::from([Key::file(&f.path)]),
+            OpSpec::Group(g) => BTreeSet::from([Key::group(&g.name)]),
         }
     }
 
@@ -129,6 +135,7 @@ impl OpSpec {
                 Key::file(&f.path),
                 Value::Exists(f.kind != FileKind::Absent),
             )]),
+            OpSpec::Group(g) => BTreeMap::from([(Key::group(&g.name), Value::Exists(true))]),
         }
     }
 }
