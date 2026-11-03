@@ -5,6 +5,7 @@ pub struct Os {
     pub family: Family,
     pub distro: Distro,
     pub version: Version,
+    codename: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -103,6 +104,7 @@ impl Os {
     /// Parse the text of an os-release file. `ID` is required.
     pub fn parse(text: &str) -> Result<Os, OsParseError> {
         let (mut id, mut id_like, mut version_id) = (None, String::new(), String::new());
+        let (mut ubuntu_codename, mut version_codename) = (String::new(), String::new());
         for line in text.lines() {
             let line = line.trim();
             if line.starts_with('#') {
@@ -116,6 +118,8 @@ impl Os {
                 "ID" => id = Some(v),
                 "ID_LIKE" => id_like = v,
                 "VERSION_ID" => version_id = v,
+                "UBUNTU_CODENAME" => ubuntu_codename = v,
+                "VERSION_CODENAME" => version_codename = v,
                 _ => {}
             }
         }
@@ -142,7 +146,16 @@ impl Os {
                 raw: version_id,
                 major,
             },
+            codename: [ubuntu_codename, version_codename]
+                .into_iter()
+                .find(|c| !c.is_empty()),
         })
+    }
+
+    /// The release codename (`noble`, `bookworm`): `UBUNTU_CODENAME` if set,
+    /// else `VERSION_CODENAME`, else `None` (Rocky, Fedora, Arch).
+    pub fn codename(&self) -> Option<&str> {
+        self.codename.as_deref()
     }
 }
 
@@ -261,6 +274,32 @@ mod tests {
             assert_eq!(os.version.as_str(), version, "{name} version");
             assert_eq!(os.version.major(), major, "{name} major");
         }
+    }
+
+    #[test]
+    fn os_release_fixture_codenames() {
+        #[rustfmt::skip]
+        let table: [(&str, Option<&str>); 15] = [
+            ("debian12", Some("bookworm")), ("debian13", Some("trixie")),
+            ("ubuntu2404", Some("noble")), ("ubuntu2604", Some("resolute")),
+            ("pop-os", Some("noble")),
+            ("fedora43", None), ("fedora44", None),
+            ("rockylinux9", None), ("rockylinux10", None),
+            ("almalinux9", None), ("almalinux10", None),
+            ("amazonlinux2023", None),
+            ("arch", None), ("omarchy", None), ("omarchy-host", None),
+        ];
+        for (name, want) in table {
+            assert_eq!(fixture(name).codename(), want, "{name} codename");
+        }
+    }
+
+    #[test]
+    fn ubuntu_codename_wins_over_version_codename() {
+        let os = Os::parse("ID=pop\nVERSION_CODENAME=jammy\nUBUNTU_CODENAME=noble\n").unwrap();
+        assert_eq!(os.codename(), Some("noble"));
+        let os = Os::parse("ID=debian\nVERSION_CODENAME=bookworm\nUBUNTU_CODENAME=\n").unwrap();
+        assert_eq!(os.codename(), Some("bookworm"));
     }
 
     #[test]
