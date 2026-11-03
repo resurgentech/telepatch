@@ -110,6 +110,31 @@ fn file_lines() {
 }
 
 #[test]
+fn file_validate_content() {
+    let h = host("debian12");
+    let id = h
+        .file("/etc/sudoers.d/ops")
+        .content("%ops ALL=(ALL) NOPASSWD: ALL\n")
+        .mode(0o440)
+        .owner("root:root")
+        .validate("visudo -cf %s")
+        .id();
+    insta::assert_snapshot!(wrapped(&h, id));
+}
+
+#[test]
+fn file_validate_lines() {
+    let h = host("debian12");
+    let id = h
+        .file("/etc/ssh/sshd_config")
+        .line_re("^PermitRootLogin", "PermitRootLogin no")
+        .line("UseDNS no")
+        .validate("sshd -t -f %s")
+        .id();
+    insta::assert_snapshot!(wrapped(&h, id));
+}
+
+#[test]
 fn file_dir_and_absent() {
     let h = host("debian12");
     let d = h.file("/opt/x").dir().mode(0o755).id();

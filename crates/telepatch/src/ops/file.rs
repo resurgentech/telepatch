@@ -10,7 +10,7 @@ use std::ops::Deref;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 
-use crate::host::{Host, OpHandle};
+use crate::host::{Host, OpHandle, TraceError};
 use crate::sh::quote;
 use crate::trace::OpSpec;
 
@@ -38,6 +38,9 @@ pub struct FileSpec {
     pub mode: Option<u32>,
     /// `user`, `user:group` or `:group`.
     pub owner: Option<String>,
+    /// Check the candidate with this command (`%s` = its path) before it
+    /// replaces the target; content and line edits only.
+    pub validate: Option<String>,
 }
 
 impl FileSpec {
@@ -49,6 +52,7 @@ impl FileSpec {
             lines: Vec::new(),
             mode: None,
             owner: None,
+            validate: None,
         }
     }
 
@@ -86,7 +90,12 @@ impl FileSpec {
             FileKind::Dir => o.push_str(
                 "if [ -d \"$tp_p\" ]; then :\nelif [ -e \"$tp_p\" ] || [ -L \"$tp_p\" ]; then\n  echo \"telepatch: $tp_p exists and is not a directory\" >&2; rc=1\nelse\n  (umask 022; mkdir -p -- \"$tp_p\")\n  rc=$?\n  if [ \"$rc\" -eq 0 ]; then changed=1; fi\nfi\n",
             ),
-            FileKind::File => self.render_file(&mut o),
+            FileKind::File => match &self.validate {
+                Some(v) if self.content.is_some() || !self.lines.is_empty() => {
+                    self.render_validated(&mut o, v)
+                }
+                _ => self.render_file(&mut o),
+            },
         }
         if let Some(m) = self.mode {
             o.push_str(&format!(
@@ -117,6 +126,58 @@ impl FileSpec {
         o
     }
 
+    /// Content and line edits built in a temp file beside the target, given
+    /// the final mode and owner, checked, then moved over the target. The
+    /// target is never written at any other mode, and is untouched when the
+    /// check fails.
+    fn render_validated(&self, o: &mut String, validate: &str) {
+        o.push_str(
+            "if [ -d \"$tp_p\" ]; then echo \"telepatch: $tp_p is a directory\" >&2; rc=1; fi\n",
+        );
+        o.push_str(
+            "if [ \"$rc\" -eq 0 ]; then\n  tp_c=$(mktemp \"$tp_p.tpXXXXXX\") || rc=$?\nfi\nif [ \"$rc\" -eq 0 ]; then\n",
+        );
+        match &self.content {
+            Some(c) => o.push_str(&format!(
+                "  tp_b={}\n  printf %s \"$tp_b\" | base64 -d > \"$tp_c\" || rc=$?\n",
+                quote(&STANDARD.encode(c))
+            )),
+            None => {
+                o.push_str("  if [ -f \"$tp_p\" ]; then cat \"$tp_p\" > \"$tp_c\" || rc=$?; fi\n")
+            }
+        }
+        // The line edits are the plain ones, aimed at the candidate.
+        let mut edits = String::new();
+        self.render_lines(&mut edits);
+        o.push_str(&edits.replace("$tp_p", "$tp_c"));
+        o.push_str("  changed=0\n");
+        o.push_str(
+            "  if [ \"$rc\" -eq 0 ] && { [ ! -e \"$tp_p\" ] || ! cmp -s \"$tp_c\" \"$tp_p\"; }; then\n",
+        );
+        match self.mode {
+            Some(m) => o.push_str(&format!("    chmod {m:o} \"$tp_c\" || rc=$?\n")),
+            None => o.push_str(
+                "    if [ -e \"$tp_p\" ]; then chmod --reference=\"$tp_p\" \"$tp_c\" || rc=$?; else chmod 644 \"$tp_c\" || rc=$?; fi\n",
+            ),
+        }
+        match &self.owner {
+            Some(ow) => o.push_str(&format!(
+                "    if [ \"$rc\" -eq 0 ]; then chown {} \"$tp_c\" || rc=$?; fi\n",
+                quote(ow)
+            )),
+            None => o.push_str(
+                "    if [ \"$rc\" -eq 0 ] && [ -e \"$tp_p\" ]; then chown --reference=\"$tp_p\" \"$tp_c\" 2>/dev/null; fi\n",
+            ),
+        }
+        o.push_str(&format!(
+            "    if [ \"$rc\" -eq 0 ]; then\n      tp_vc={}\n      ( eval \"$tp_vc\" ) || rc=$?\n    fi\n",
+            quote(&validate.replace("%s", "\"$tp_c\""))
+        ));
+        o.push_str(
+            "    if [ \"$rc\" -eq 0 ]; then\n      mv -f \"$tp_c\" \"$tp_p\"; rc=$?\n      if [ \"$rc\" -eq 0 ]; then changed=1; fi\n    fi\n  fi\n  rm -f \"$tp_c\"\nfi\n",
+        );
+    }
+
     fn render_file(&self, o: &mut String) {
         o.push_str(
             "if [ -d \"$tp_p\" ]; then echo \"telepatch: $tp_p is a directory\" >&2; rc=1; fi\n",
@@ -132,6 +193,10 @@ impl FileSpec {
                 quote(&STANDARD.encode(c))
             ));
         }
+        self.render_lines(o);
+    }
+
+    fn render_lines(&self, o: &mut String) {
         if !self.lines.is_empty() {
             o.push_str(
                 "tp_append() {\n  if [ -s \"$1\" ] && [ -n \"$(tail -c1 \"$1\")\" ]; then printf '\\n' >> \"$1\"; fi\n  printf '%s\\n' \"$2\" >> \"$1\"\n}\n",
@@ -212,6 +277,21 @@ impl FileHandle {
         let b = bytes.as_ref().to_vec();
         self.spec(|s| s.content = Some(b))
     }
+    /// Check the candidate before it replaces the target. `cmd` is shell
+    /// with `%s` standing for the candidate's path (`visudo -cf %s`); it
+    /// applies to `.content(..)` and line edits. Without `%s` it is a trace
+    /// error. A non-zero exit fails the op with that rc and leaves the
+    /// target untouched.
+    pub fn validate(&self, cmd: &str) -> &Self {
+        if !cmd.contains("%s") {
+            self.0.record_error(TraceError::new(format!(
+                "file validate command has no %s: {cmd}"
+            )));
+            return self;
+        }
+        let c = cmd.to_string();
+        self.spec(|s| s.validate = Some(c))
+    }
     pub fn mode(&self, mode: u32) -> &Self {
         self.spec(|s| s.mode = Some(mode))
     }
@@ -226,5 +306,31 @@ impl<V> Host<V> {
     /// on the host, in the op's shell.
     pub fn file(&self, path: &str) -> FileHandle {
         FileHandle(self.op(OpSpec::File(FileSpec::new(path))))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::facts::os::Os;
+    use std::rc::Rc;
+
+    fn host() -> Host<()> {
+        Host::new(
+            "t",
+            Os::parse("ID=debian\nVERSION_ID=12\n").unwrap(),
+            Rc::new(()),
+        )
+    }
+
+    #[test]
+    fn validate_without_percent_s_is_a_trace_error() {
+        let h = host();
+        h.file("/etc/x").content("a").validate("visudo -c");
+        let errs: Vec<String> = h.snapshot().errors.iter().map(|e| e.0.clone()).collect();
+        assert_eq!(errs.len(), 1, "{errs:?}");
+        assert!(errs[0].contains("%s"), "{errs:?}");
+        h.file("/etc/y").content("a").validate("visudo -cf %s");
+        assert_eq!(h.snapshot().errors.len(), 1);
     }
 }

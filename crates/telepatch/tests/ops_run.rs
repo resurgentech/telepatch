@@ -94,6 +94,156 @@ fn file_line_and_line_re() {
     assert_eq!(std::fs::read_to_string(&q).unwrap(), "x\n");
 }
 
+fn mode_of(p: &std::path::Path) -> u32 {
+    std::os::unix::fs::PermissionsExt::mode(&std::fs::metadata(p).unwrap().permissions()) & 0o7777
+}
+
+fn leftovers(d: &std::path::Path) -> Vec<String> {
+    let mut v: Vec<String> = std::fs::read_dir(d)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().into_string().unwrap())
+        .collect();
+    v.sort();
+    v
+}
+
+#[test]
+fn file_validate_pass_writes_with_final_mode_checked_on_the_candidate() {
+    let d = tempfile::tempdir().unwrap();
+    let p = d.path().join("ops");
+    let seen = d.path().join("seen");
+    std::fs::write(&p, "old\n").unwrap();
+    std::fs::set_permissions(&p, std::os::unix::fs::PermissionsExt::from_mode(0o644)).unwrap();
+    let h = host();
+    // the validator records the candidate's mode and name, and its content
+    let cmd = format!(
+        "stat -c %a %s > {s}; cat %s >> {s}; grep -q good %s",
+        s = seen.display()
+    );
+    let id = h
+        .file(p.to_str().unwrap())
+        .content("good\n")
+        .mode(0o440)
+        .validate(&cmd)
+        .id();
+    let r = file_run(&h, id, d.path());
+    assert_eq!((r.rc, r.changed), (0, true));
+    assert_eq!(std::fs::read_to_string(&p).unwrap(), "good\n");
+    assert_eq!(mode_of(&p), 0o440);
+    assert_eq!(std::fs::read_to_string(&seen).unwrap(), "440\ngood\n");
+    assert_eq!(leftovers(d.path()), ["ops", "seen"]);
+    // idempotent: nothing to write, validator not needed
+    let r = file_run(&h, id, d.path());
+    assert_eq!((r.rc, r.changed), (0, false));
+    assert_eq!(leftovers(d.path()), ["ops", "seen"]);
+}
+
+#[test]
+fn file_validate_creates_new_file_at_mode_with_no_transient_mode() {
+    let d = tempfile::tempdir().unwrap();
+    let p = d.path().join("new");
+    let h = host();
+    let id = h
+        .file(p.to_str().unwrap())
+        .content("good\n")
+        .mode(0o440)
+        .validate("grep -q good %s")
+        .id();
+    let r = file_run(&h, id, d.path());
+    assert_eq!((r.rc, r.changed), (0, true));
+    assert_eq!(mode_of(&p), 0o440);
+}
+
+#[test]
+fn file_validate_fail_leaves_original_bytes_and_mtime_and_removes_temp() {
+    let d = tempfile::tempdir().unwrap();
+    let p = d.path().join("ops");
+    std::fs::write(&p, "old\n").unwrap();
+    let t = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000_000);
+    std::fs::File::options()
+        .write(true)
+        .open(&p)
+        .unwrap()
+        .set_modified(t)
+        .unwrap();
+    let before = std::fs::metadata(&p).unwrap().modified().unwrap();
+    let h = host();
+    let id = h
+        .file(p.to_str().unwrap())
+        .content("bad\n")
+        .validate("grep -q good %s || exit 7")
+        .id();
+    let r = file_run(&h, id, d.path());
+    assert_eq!((r.rc, r.changed), (7, false));
+    assert_eq!(std::fs::read_to_string(&p).unwrap(), "old\n");
+    assert_eq!(std::fs::metadata(&p).unwrap().modified().unwrap(), before);
+    assert_eq!(leftovers(d.path()), ["ops"]);
+    // a failing validator on a file that does not exist creates nothing
+    let q = d.path().join("nope");
+    let id = h
+        .file(q.to_str().unwrap())
+        .content("bad\n")
+        .validate("false %s")
+        .id();
+    let r = file_run(&h, id, d.path());
+    assert_eq!((r.rc, r.changed), (1, false));
+    assert_eq!(leftovers(d.path()), ["ops"]);
+}
+
+#[test]
+fn file_validate_line_re_on_existing_file() {
+    let d = tempfile::tempdir().unwrap();
+    let p = d.path().join("sshd_config");
+    std::fs::write(&p, "A yes\nPermitRootLogin yes\nB no\n").unwrap();
+    std::fs::set_permissions(&p, std::os::unix::fs::PermissionsExt::from_mode(0o600)).unwrap();
+    let h = host();
+    let s = p.to_str().unwrap();
+    let ok = h
+        .file(s)
+        .line_re("^PermitRootLogin", "PermitRootLogin no")
+        .line("UseDNS no")
+        .validate("! grep -q 'yes' %s || grep -q 'PermitRootLogin no' %s")
+        .id();
+    // candidate still has "A yes", so `! grep yes` is false and the second
+    // test decides: it passes, the edit lands
+    let r = file_run(&h, ok, d.path());
+    assert_eq!((r.rc, r.changed), (0, true));
+    assert_eq!(
+        std::fs::read_to_string(&p).unwrap(),
+        "A yes\nPermitRootLogin no\nB no\nUseDNS no\n"
+    );
+    assert_eq!(mode_of(&p), 0o600);
+    assert!(!file_run(&h, ok, d.path()).changed);
+    // a rejecting validator leaves the file as it was
+    let bad = h
+        .file(s)
+        .line_re("^B ", "B yes")
+        .validate("! grep -q '^B yes' %s")
+        .id();
+    let r = file_run(&h, bad, d.path());
+    assert_eq!((r.rc, r.changed), (1, false));
+    assert_eq!(
+        std::fs::read_to_string(&p).unwrap(),
+        "A yes\nPermitRootLogin no\nB no\nUseDNS no\n"
+    );
+    assert_eq!(leftovers(d.path()), ["sshd_config"]);
+}
+
+#[test]
+fn file_validate_path_with_spaces_and_quotes_in_command() {
+    let d = tempfile::tempdir().unwrap();
+    let p = d.path().join("a b's.conf");
+    let h = host();
+    let id = h
+        .file(p.to_str().unwrap())
+        .content("good\n")
+        .validate("grep -q 'good' %s")
+        .id();
+    let r = file_run(&h, id, d.path());
+    assert_eq!((r.rc, r.changed), (0, true));
+    assert_eq!(std::fs::read_to_string(&p).unwrap(), "good\n");
+}
+
 #[test]
 fn file_dir_absent_mode_owner() {
     let d = tempfile::tempdir().unwrap();

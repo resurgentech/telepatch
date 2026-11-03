@@ -1,0 +1,49 @@
+---
+source: crates/telepatch/tests/ops_snapshots.rs
+expression: "wrapped(&h, id)"
+---
+(
+__tp_esc() { local s=${1//\\/\\\\}; s=${s//\"/\\\"}; printf %s "$s"; }
+__tp_emit() {
+  if [ "$1" -ne 0 ]; then rc=$1; fi
+  case "$rc" in ''|*[!0-9]*) rc=1;; esac
+  case "$changed" in 1) __tp_c=true;; *) __tp_c=false;; esac
+  case "$skipped" in 1) __tp_s=true;; *) __tp_s=false;; esac
+  __tp_i=
+  for __tp_x in "${installed[@]}"; do __tp_i="$__tp_i${__tp_i:+,}\"$(__tp_esc "$__tp_x")\""; done
+  printf '\n__tp_testnonce 0 {"rc":%s,"changed":%s}\n' "$rc" "$__tp_c"
+}
+trap '__tp_emit $?' EXIT
+rc=0; changed=0; skipped=0; installed=()
+rc=0; changed=0
+tp_p='/etc/sudoers.d/ops'
+if [ -d "$tp_p" ]; then echo "telepatch: $tp_p is a directory" >&2; rc=1; fi
+if [ "$rc" -eq 0 ]; then
+  tp_c=$(mktemp "$tp_p.tpXXXXXX") || rc=$?
+fi
+if [ "$rc" -eq 0 ]; then
+  tp_b='JW9wcyBBTEw9KEFMTCkgTk9QQVNTV0Q6IEFMTAo='
+  printf %s "$tp_b" | base64 -d > "$tp_c" || rc=$?
+  changed=0
+  if [ "$rc" -eq 0 ] && { [ ! -e "$tp_p" ] || ! cmp -s "$tp_c" "$tp_p"; }; then
+    chmod 440 "$tp_c" || rc=$?
+    if [ "$rc" -eq 0 ]; then chown 'root:root' "$tp_c" || rc=$?; fi
+    if [ "$rc" -eq 0 ]; then
+      tp_vc='visudo -cf "$tp_c"'
+      ( eval "$tp_vc" ) || rc=$?
+    fi
+    if [ "$rc" -eq 0 ]; then
+      mv -f "$tp_c" "$tp_p"; rc=$?
+      if [ "$rc" -eq 0 ]; then changed=1; fi
+    fi
+  fi
+  rm -f "$tp_c"
+fi
+if [ "$rc" -eq 0 ] && [ "$(stat -L -c %a "$tp_p")" != '440' ]; then
+  if chmod 440 "$tp_p"; then changed=1; else rc=$?; fi
+fi
+if [ "$rc" -eq 0 ] && [ "$(stat -L -c '%U:%G' "$tp_p")" != 'root:root' ]; then
+  if chown 'root:root' "$tp_p"; then changed=1; else rc=$?; fi
+fi
+exit "$rc"
+) </dev/null
