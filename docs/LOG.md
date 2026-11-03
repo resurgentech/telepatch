@@ -317,3 +317,38 @@ are appended, never edited in; a hook refuses rewrites.
   original's unguarded uv installer); telepatch 3m45.6s then 1.3s
   (CHANGED 0). States, versions and pre-states identical.
 - Commits: tp_basic 112975d
+
+## 2026-11-03 — T39 `Mise` pkg source, system layer
+
+- `h.mise([..])`: tools into mise's system layer as root, no sudo.
+  `/etc/mise/config.toml` entries via `mise config set --system` only when
+  they differ (the file is created empty first; mise refuses a missing one
+  as untrusted), `mise install --system` then `mise reshim --system`;
+  installed versions from the system data dir only. Present / Pinned /
+  Latest, root only, keys `pkg:mise:root:<n>`, kind `pkg[mise]`. Present
+  probe needs no network (checked with the container's network cut).
+  Live `mise_system_layer` (`just test-live-mise`) green.
+- Commits: c5be4d5
+
+## 2026-11-03 — T40 `../tp_basic`: oracle intended differences, one `compare_captures`, a mise capture
+
+- `scripts/lib/compare.sh` holds the only `compare_captures`; an optional
+  `tests/oracle/intended/<container>.txt` (`+section|line`,
+  `-section|line`) is applied to the ansible side before the unchanged
+  `diff -u`. `image-state.sh` gains a gated `== mise ==` section.
+  `just test-oracle-selftest`. Live: ubuntu2404 dev_base identical with no
+  file (run with the pinned `ANSIBLE_SHA`); `just test-vm` still green.
+- Commits: tp_basic 7f90178
+
+## 2026-11-03 — T41 `../tp_basic`: `dev_common` installs mise system-wide and `just` through it
+
+- After uv: mise (Script source, mise.run into `/usr/local/bin/mise`),
+  `/etc/profile.d/mise.sh` (system shims on login PATH), `h.mise(["just"])`.
+  First intended divergence: six lines per container in
+  `tests/oracle/intended/`. `test-vm.sh` gates on bot's `bash -lc "just
+  --version"` via the shim. Live: `test-acceptance` 7/7 identical (6
+  intended differences applied); `test-idempotent ubuntu2404 dev_base`
+  CHANGED 0; `test-vm` green (just 1.59.0 as bot); `test-vm-oracle`
+  green, second passes ansible 6.7s (changed=1), telepatch 1.3s (0).
+  tp_basic's git dependency needs c5be4d5 pushed for a fresh clone.
+- Commits: tp_basic bfbaa2a
