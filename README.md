@@ -72,15 +72,16 @@ language that can record what a function asked for.
 ### Measured
 
 The `dev_base` playbook from `tp_basic` (a 37-package development toolchain
-plus the uv installer), applied by the original Ansible playbook and by
-telepatch to two fresh Ubuntu 24.04 VMs from the same image, timed from the
-controller with SSH included. Both left the VMs in an identical state, down
-to package versions.
+plus the uv installer, and on the telepatch side mise and `just`), applied by
+the original Ansible playbook and by telepatch to two fresh Ubuntu 24.04 VMs
+from the same image, timed from the controller with SSH included. Both left
+the VMs in an identical state, down to package versions, apart from the
+declared mise additions.
 
 | | First run | Second run | Still "changed" on the second run |
 |---|---|---|---|
-| Ansible | 4m05s | 7.0s | 1 task |
-| telepatch | 3m46s | 1.3s | 0 ops |
+| Ansible | 4m36s | 6.7s | 1 task |
+| telepatch | 3m57s | 1.3s | 0 ops |
 
 The first run is apt's download either way. The second run is the model:
 Ansible replays every task and still reports a change from an unguarded

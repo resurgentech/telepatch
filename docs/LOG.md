@@ -352,3 +352,17 @@ are appended, never edited in; a hook refuses rewrites.
   green, second passes ansible 6.7s (changed=1), telepatch 1.3s (0).
   tp_basic's git dependency needs c5be4d5 pushed for a fresh clone.
 - Commits: tp_basic bfbaa2a
+
+## 2026-11-04 — Goal 5a housekeeping (direct, at the user's request)
+
+- `pkg[mise]` reshims whenever a wanted tool's installed binary has no
+  system shim, not only right after an install, so a run that died between
+  install and reshim heals on the rerun; a reshim counts as a change. Stub
+  test `mise_reshims_when_an_installed_tool_has_no_shim`; the stub mise now
+  materialises install bin dirs and shims. 4 op snapshots and tp_basic's 52
+  plan snapshots regenerated (diff: the reshim block only). Live
+  `test-live-mise` green.
+- tp_basic `just test-container` pins `ported_ansible` like test-acceptance
+  (a bare run resolved Ansible master, which already has `just`).
+- README timing tables updated to the 2026-11-03 run.
+- Commits: telepatch (this), tp_basic (next)

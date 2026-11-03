@@ -15,9 +15,13 @@
 //! installed versions; `Latest` asks the host's `mise latest <n>` first (a
 //! failed lookup fails the op before the config or anything else changes)
 //! and installs `<n>@<latest>` when that version is not installed. After an
-//! install `mise reshim --system` refreshes the system shims (`install
-//! --system` alone writes them to root's own dir) and the installs are read
-//! again: a name still missing, or a pin or latest not met, fails the op.
+//! install the installs are read again: a name still missing, or a pin or
+//! latest not met, fails the op. Then the shims: every binary under a
+//! wanted tool's `installs/<n>/<v>/bin/` must have a shim in
+//! `<data>/shims/`; when one is missing, `mise reshim --system` rewrites
+//! them (`install --system` alone writes shims to root's own dir, and a run
+//! that died between install and reshim leaves none). A reshim counts as a
+//! change.
 //! `mise` not on PATH (nor at `/usr/local/bin/mise`) fails the op with
 //! "mise not found".
 //!
@@ -80,9 +84,14 @@ pub fn render(names: &[String], wanted: &Wanted) -> String {
     o.push_str(
         "if [ \"$rc\" -eq 0 ]; then\n  mkdir -p \"$tp_cfgdir\" && { [ -e \"$tp_cfgdir/config.toml\" ] || : > \"$tp_cfgdir/config.toml\"; } || rc=1\n  for tp_n in \"${tp_want[@]}\"; do\n    [ \"$rc\" -eq 0 ] || break\n    tp_cur=$(\"$tp_mise\" config get --system \"tools.$tp_n\" 2>/dev/null) || tp_cur=\n    if [ \"$tp_cur\" != \"${tp_spec[$tp_n]}\" ]; then\n      if \"$tp_mise\" config set --system \"tools.$tp_n\" \"${tp_spec[$tp_n]}\"; then changed=1; else rc=1; fi\n    fi\n  done\nfi\n",
     );
-    // Install, shim, read again, verify.
+    // Install, read again, verify.
     o.push_str(
-        "if [ \"$rc\" -eq 0 ] && [ \"${#tp_todo[@]}\" -gt 0 ]; then\n  \"$tp_mise\" install --system \"${tp_args[@]}\"\n  rc=$?\n  if [ \"$rc\" -eq 0 ]; then \"$tp_mise\" reshim --system; rc=$?; fi\n  tp_read\n  for tp_n in \"${tp_want[@]}\"; do\n    if [ \"${tp_have[$tp_n]-}\" != \"${tp_before[$tp_n]-}\" ]; then changed=1; installed+=(\"$tp_n\"); fi\n  done\n  if [ \"$rc\" -eq 0 ]; then\n    for tp_n in \"${tp_todo[@]}\"; do\n      tp_wv=${tp_wantv[$tp_n]-}\n      if [ -n \"$tp_wv\" ]; then tp_has \"$tp_n\" \"$tp_wv\" && continue; else [ -n \"${tp_have[$tp_n]-}\" ] && continue; fi\n      tp_got=${tp_have[$tp_n]-}; tp_got=${tp_got# }\n      echo \"telepatch: mise $tp_n: installed ${tp_got:-absent}, wanted ${tp_wv:-present}\" >&2; rc=1\n    done\n  fi\nfi\n",
+        "if [ \"$rc\" -eq 0 ] && [ \"${#tp_todo[@]}\" -gt 0 ]; then\n  \"$tp_mise\" install --system \"${tp_args[@]}\"\n  rc=$?\n  tp_read\n  for tp_n in \"${tp_want[@]}\"; do\n    if [ \"${tp_have[$tp_n]-}\" != \"${tp_before[$tp_n]-}\" ]; then changed=1; installed+=(\"$tp_n\"); fi\n  done\n  if [ \"$rc\" -eq 0 ]; then\n    for tp_n in \"${tp_todo[@]}\"; do\n      tp_wv=${tp_wantv[$tp_n]-}\n      if [ -n \"$tp_wv\" ]; then tp_has \"$tp_n\" \"$tp_wv\" && continue; else [ -n \"${tp_have[$tp_n]-}\" ] && continue; fi\n      tp_got=${tp_have[$tp_n]-}; tp_got=${tp_got# }\n      echo \"telepatch: mise $tp_n: installed ${tp_got:-absent}, wanted ${tp_wv:-present}\" >&2; rc=1\n    done\n  fi\nfi\n",
+    );
+    // Shims: a wanted tool's binary with no system shim means `install
+    // --system` wrote the shims elsewhere, or a run died before reshim.
+    o.push_str(
+        "if [ \"$rc\" -eq 0 ]; then\n  tp_noshim=0\n  for tp_n in \"${tp_want[@]}\"; do\n    for tp_b in \"$tp_data/installs/$tp_n\"/*/bin/*; do\n      [ -e \"$tp_b\" ] || continue\n      [ -e \"$tp_data/shims/${tp_b##*/}\" ] || { tp_noshim=1; break 2; }\n    done\n  done\n  if [ \"$tp_noshim\" -eq 1 ]; then\n    if \"$tp_mise\" reshim --system; then changed=1; else rc=$?; fi\n  fi\nfi\n",
     );
     o
 }

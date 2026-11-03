@@ -50,7 +50,6 @@ fi
 if [ "$rc" -eq 0 ] && [ "${#tp_todo[@]}" -gt 0 ]; then
   "$tp_mise" install --system "${tp_args[@]}"
   rc=$?
-  if [ "$rc" -eq 0 ]; then "$tp_mise" reshim --system; rc=$?; fi
   tp_read
   for tp_n in "${tp_want[@]}"; do
     if [ "${tp_have[$tp_n]-}" != "${tp_before[$tp_n]-}" ]; then changed=1; installed+=("$tp_n"); fi
@@ -62,6 +61,18 @@ if [ "$rc" -eq 0 ] && [ "${#tp_todo[@]}" -gt 0 ]; then
       tp_got=${tp_have[$tp_n]-}; tp_got=${tp_got# }
       echo "telepatch: mise $tp_n: installed ${tp_got:-absent}, wanted ${tp_wv:-present}" >&2; rc=1
     done
+  fi
+fi
+if [ "$rc" -eq 0 ]; then
+  tp_noshim=0
+  for tp_n in "${tp_want[@]}"; do
+    for tp_b in "$tp_data/installs/$tp_n"/*/bin/*; do
+      [ -e "$tp_b" ] || continue
+      [ -e "$tp_data/shims/${tp_b##*/}" ] || { tp_noshim=1; break 2; }
+    done
+  done
+  if [ "$tp_noshim" -eq 1 ]; then
+    if "$tp_mise" reshim --system; then changed=1; else rc=$?; fi
   fi
 fi
 exit "$rc"

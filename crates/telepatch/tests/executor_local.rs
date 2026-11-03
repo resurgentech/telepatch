@@ -1015,8 +1015,14 @@ install)
     [ -n "$v" ] || v=$(awk -v n="$n" '$1==n {print $2}' "$d/latest")
     [ -n "$v" ] || v=1.0.0
     grep -qx "$n $v" "$d/state" || echo "$n $v" >> "$d/state"
+    # like mise: the tool's binary lands in the install dir, and
+    # `install --system` writes no shim into the system shims dir
+    mkdir -p "$MISE_SYSTEM_DATA_DIR/installs/$n/$v/bin"; : > "$MISE_SYSTEM_DATA_DIR/installs/$n/$v/bin/$n"
   done ;;
-reshim) echo reshim >> "$d/log" ;;
+reshim)
+  echo reshim >> "$d/log"
+  mkdir -p "$MISE_SYSTEM_DATA_DIR/shims"
+  for b in "$MISE_SYSTEM_DATA_DIR"/installs/*/*/bin/*; do [ -e "$b" ] && : > "$MISE_SYSTEM_DATA_DIR/shims/${b##*/}"; done ;;
 latest)
   echo "latest $2" >> "$d/lookups"
   awk -v n="$2" '$1==n {print $2; f=1} END {exit !f}' "$d/latest" ||
@@ -1255,6 +1261,50 @@ fn mise_latest_lookup_failure_fails_the_op_before_anything_changes() {
     assert!(r.render().contains("unknown (latest)"), "{}", r.render());
     assert_eq!(cargo_log(d.path()), "", "no install, no config entry");
     assert_eq!(mise_cfg(d.path()), "");
+}
+
+/// A tool installed in the system layer whose binary has no shim (a run
+/// died between install and reshim, or the shims were lost): the op
+/// reshims and reports a change; the rerun finds the shim and does nothing.
+#[test]
+fn mise_reshims_when_an_installed_tool_has_no_shim() {
+    fn run_(h: Host<PathBuf>) -> PlaybookFuture {
+        Box::pin(async move {
+            h.mise(["just"]);
+            Ok(())
+        })
+    }
+    let d = tempfile::tempdir().unwrap();
+    mise_stub(d.path(), "just 1.59.0\n", "");
+    std::fs::create_dir_all(d.path().join("sys/installs/just/1.59.0/bin")).unwrap();
+    std::fs::write(d.path().join("sys/installs/just/1.59.0/bin/just"), "").unwrap();
+    std::fs::write(
+        d.path().join("etc/config.toml"),
+        "[tools]\njust = \"latest\"\n",
+    )
+    .unwrap();
+    let path = stub_path(d.path());
+    let pb = Playbook {
+        name: "mise",
+        run: run_,
+    };
+    let (r1, out1) = go(&pb, vec![mise_host("h1", d.path(), &path)]);
+    assert_eq!(
+        r1.hosts[0].status,
+        HostStatus::Changed,
+        "{}\n{out1}",
+        r1.render()
+    );
+    assert_eq!(cargo_log(d.path()), "reshim\n", "only a reshim, no install");
+    assert!(d.path().join("sys/shims/just").exists());
+    let (r2, out2) = go(&pb, vec![mise_host("h1", d.path(), &path)]);
+    assert_eq!(
+        r2.hosts[0].status,
+        HostStatus::Ok,
+        "{}\n{out2}",
+        r2.render()
+    );
+    assert_eq!(cargo_log(d.path()), "reshim\n", "nothing ran again");
 }
 
 #[test]
