@@ -22,11 +22,16 @@ use crate::sh::quote;
 use crate::trace::{Node, OpNode, OpSpec, Principal};
 
 mod cargo;
+mod mise;
 mod rustup;
 mod script;
 pub use cargo::{
     CargoProbe, parse_probe as parse_cargo_probe, probe as cargo_probe,
     will_changes as cargo_will_changes,
+};
+pub use mise::{
+    MiseProbe, parse_probe as parse_mise_probe, probe as mise_probe,
+    will_changes as mise_will_changes,
 };
 pub use rustup::{
     DEFAULT_INSTALLER, RustupProbe, RustupSpec, parse_probe as parse_rustup_probe,
@@ -42,6 +47,9 @@ pub enum Manager {
     Pacman,
 }
 
+/// The system config the mise source maintains.
+pub const MISE_CONFIG: &str = "/etc/mise/config.toml";
+
 /// Where a package comes from.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Source {
@@ -50,6 +58,8 @@ pub enum Source {
     Pip,
     /// `cargo install`, per user ([`cargo`]).
     Cargo,
+    /// Tools in mise's system layer, root only ([`mise`]).
+    Mise,
     /// A rust toolchain with targets and components, per user
     /// ([`rustup`]; boxed to keep `OpNode` small).
     Rustup(Box<RustupSpec>),
@@ -122,6 +132,7 @@ impl PkgSpec {
             Source::Distro(_) => Key::pkg(name),
             Source::Pip => Key::pkg(format!("pip:{name}")),
             Source::Cargo => Key::pkg(format!("cargo:{}:{name}", self.user)),
+            Source::Mise => Key::pkg(format!("mise:root:{name}")),
             Source::Rustup(_) => Key::pkg(format!("rustup:{}:{name}", self.user)),
             Source::Script(_) => Key::pkg(format!("script:{}:{name}", self.user)),
         }
@@ -131,7 +142,9 @@ impl PkgSpec {
     /// script, cargo and rustup (they write files nobody listed; A14).
     pub fn default_writes(&self) -> BTreeSet<Key> {
         match &self.source {
-            Source::Script(_) | Source::Cargo | Source::Rustup(_) => BTreeSet::from([Key::Any]),
+            Source::Script(_) | Source::Cargo | Source::Mise | Source::Rustup(_) => {
+                BTreeSet::from([Key::Any])
+            }
             _ => self.keys(),
         }
     }
@@ -147,6 +160,9 @@ impl PkgSpec {
             .collect();
         if let Source::Script(s) = &self.source {
             post.insert(Key::file(&s.bin), Value::Exists(true));
+        }
+        if self.source == Source::Mise {
+            post.insert(Key::file(MISE_CONFIG), Value::Exists(true));
         }
         if let (Source::Rustup(r), Some(tc)) = (&self.source, self.names.first()) {
             for t in &r.targets {
@@ -168,6 +184,7 @@ impl PkgSpec {
         match &self.source {
             Source::Script(_) => "pkg[script]",
             Source::Cargo => "pkg[cargo]",
+            Source::Mise => "pkg[mise]",
             Source::Rustup(_) => "pkg[rustup]",
             _ => "pkg",
         }
@@ -183,7 +200,7 @@ impl PkgSpec {
     pub fn mergeable(&self) -> bool {
         match &self.source {
             Source::Script(_) | Source::Rustup(_) => false,
-            Source::Cargo => !matches!(self.wanted, Wanted::Pinned(_)),
+            Source::Cargo | Source::Mise => !matches!(self.wanted, Wanted::Pinned(_)),
             _ => true,
         }
     }
@@ -215,6 +232,9 @@ impl PkgSpec {
         if self.source == Source::Cargo {
             return cargo::render(&self.names, &self.wanted);
         }
+        if self.source == Source::Mise {
+            return mise::render(&self.names, &self.wanted);
+        }
         if let Source::Rustup(r) = &self.source {
             let name = self.names.first().map(String::as_str).unwrap_or("");
             return rustup::render(name, &self.wanted, r);
@@ -245,7 +265,9 @@ impl PkgSpec {
                 Wanted::Present => pip(&mut o),
             },
             // Rendered above; every source is built.
-            (Source::Cargo | Source::Rustup(_) | Source::Script(_), _) => unreachable!(),
+            (Source::Cargo | Source::Mise | Source::Rustup(_) | Source::Script(_), _) => {
+                unreachable!()
+            }
         }
         o
     }
@@ -538,6 +560,7 @@ impl PkgHandle {
         let mut distro = false;
         let mut script_err = None;
         let mut cargo_pin_many = false;
+        let mut mise_pin_many = false;
         let mut rustup_pin = false;
         self.spec(|s| {
             if matches!(s.source, Source::Distro(_)) {
@@ -554,8 +577,15 @@ impl PkgHandle {
             }
             cargo_pin_many =
                 s.source == Source::Cargo && matches!(w, Wanted::Pinned(_)) && s.names.len() != 1;
+            mise_pin_many =
+                s.source == Source::Mise && matches!(w, Wanted::Pinned(_)) && s.names.len() != 1;
             s.wanted = w;
         });
+        if mise_pin_many {
+            self.0.record_error(TraceError::new(
+                "mise: a pinned op takes exactly one package name",
+            ));
+        }
         if rustup_pin {
             self.0.record_error(TraceError::new(
                 "rustup: Pinned is not supported; name a version toolchain instead (e.g. \"1.94.0\")",
@@ -631,6 +661,9 @@ impl<V> Host<V> {
             Principal::Root => "root".to_string(),
             Principal::User(u) => u.clone(),
         };
+        if spec.source == Source::Mise && spec.user != "root" {
+            self.record_error(TraceError::new("mise source is system-wide (root only)"));
+        }
         PkgHandle(self.op(OpSpec::Pkg(spec)))
     }
 
@@ -687,6 +720,24 @@ impl<V> Host<V> {
         S: AsRef<str>,
     {
         self.pkg_spec_op(PkgSpec::from_source(Source::Cargo, names(crates)))
+    }
+
+    /// Tools installed by `mise` into its system layer (config
+    /// `/etc/mise/config.toml`, installs and shims under
+    /// `/usr/local/share/mise`), root only: on a non-root principal this is
+    /// a trace error ("mise source is system-wide (root only)").
+    /// `Present` and `.latest()` write `"latest"` into the config, `.pin(v)`
+    /// writes `v`. Keys `pkg:mise:root:<name>`; writes `*` unless narrowed
+    /// with `.writes([..])`; posts `Installed` per name and
+    /// `file:/etc/mise/config.toml = Exists(true)`. `.pin(v)` takes one
+    /// name; `.latest()` asks `mise latest` on the host. Users reach the
+    /// tools through `/usr/local/share/mise/shims` on their `PATH`.
+    pub fn mise<I, S>(&self, tools: I) -> PkgHandle
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        self.pkg_spec_op(PkgSpec::from_source(Source::Mise, names(tools)))
     }
 
     /// A rust toolchain (`stable`, `1.94.0`, `nightly-2026-10-01`) for the
@@ -1041,5 +1092,84 @@ mod tests {
         b.wanted = Wanted::Pinned("1.0.0".into());
         assert!(!a.can_merge(&b));
         assert!(!a.mergeable());
+    }
+
+    #[test]
+    fn mise_keys_writes_kind_and_post() {
+        let h = host();
+        h.mise(["just", "fd"]);
+        h.as_user("root")
+            .mise(["bat"])
+            .writes([Key::file("/usr/local/share/mise/installs/bat")]);
+        let t = h.snapshot();
+        assert!(t.errors.is_empty(), "{:?}", t.errors);
+        let ops: Vec<&OpNode> = t
+            .nodes
+            .iter()
+            .map(|n| match n {
+                Node::Op(o) => o,
+                _ => panic!(),
+            })
+            .collect();
+        let post = |o: &OpNode| {
+            o.post
+                .iter()
+                .map(|(k, v)| format!("{k}={v}"))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(ops[0].writes, BTreeSet::from([Key::Any]));
+        assert_eq!(
+            post(ops[0]),
+            [
+                "pkg:mise:root:fd=Installed",
+                "pkg:mise:root:just=Installed",
+                "file:/etc/mise/config.toml=Exists(true)",
+            ]
+        );
+        assert_eq!(
+            post(ops[1]),
+            [
+                "pkg:mise:root:bat=Installed",
+                "file:/etc/mise/config.toml=Exists(true)"
+            ]
+        );
+        assert_eq!(
+            ops[1].writes,
+            BTreeSet::from([Key::file("/usr/local/share/mise/installs/bat")])
+        );
+        assert_eq!(ops[0].spec.kind(), "pkg[mise]");
+    }
+
+    #[test]
+    fn mise_is_root_only() {
+        let h = host();
+        h.as_user("bot").mise(["just"]);
+        assert_eq!(errors(&h), ["mise source is system-wide (root only)"]);
+        let h = host();
+        h.as_user("root").mise(["just"]);
+        h.mise(["just"]);
+        assert!(errors(&h).is_empty());
+    }
+
+    #[test]
+    fn mise_pin_takes_one_name_and_never_merges() {
+        let h = host();
+        h.mise(["a"]).pin("1.0.0");
+        assert!(errors(&h).is_empty());
+        h.mise(["a", "b"]).pin("1.0.0");
+        assert_eq!(
+            errors(&h),
+            ["mise: a pinned op takes exactly one package name"]
+        );
+        let mut a = PkgSpec::from_source(Source::Mise, names(["a"]));
+        let mut b = PkgSpec::from_source(Source::Mise, names(["b"]));
+        assert!(a.can_merge(&b));
+        a.wanted = Wanted::Latest;
+        assert!(!a.can_merge(&b));
+        b.wanted = Wanted::Latest;
+        assert!(a.can_merge(&b));
+        a.wanted = Wanted::Pinned("1".into());
+        b.wanted = Wanted::Pinned("1".into());
+        assert!(!a.can_merge(&b));
     }
 }

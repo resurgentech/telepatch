@@ -987,6 +987,375 @@ fn pinned_cargo_ops_never_merge() {
     );
 }
 
+// ---- pkg[mise] (T39): a stub `mise` first on PATH, keeping the system
+// installs, root's own installs and the config in a temp dir ----
+
+/// `state`: `name version` per system install; `userstate`: root's own
+/// installs (must be ignored); `latest`: `name version` for `mise latest`.
+const STUB_MISE: &str = r##"#!/bin/sh
+d='@D@'
+cfg="$MISE_SYSTEM_CONFIG_DIR/config.toml"
+case "$1" in
+ls)
+  { sed 's/$/ S/' "$d/state"; sed 's/$/ U/' "$d/userstate"; } | sort -k1,1 -s |
+  awk -v sys="$MISE_SYSTEM_DATA_DIR" 'BEGIN {print "{"}
+    { if ($1 != cur) { if (cur != "") print "  ],"; print "  \"" $1 "\": ["; cur = $1 }
+      base = ($3 == "S") ? sys : "/root/.local/share/mise"
+      print "    {"; print "      \"version\": \"" $2 "\","
+      print "      \"install_path\": \"" base "/installs/" $1 "/" $2 "\","
+      print "      \"installed\": true,"; print "      \"active\": false"; print "    }," }
+    END { if (cur != "") print "  ]"; print "}" }' ;;
+install)
+  shift; [ "$1" = --system ] && shift
+  echo "install $*" >> "$d/log"
+  [ -e "$d/refuse" ] && exit 0
+  for a in "$@"; do
+    n=${a%%@*}; v=
+    case "$a" in *@*) v=${a#*@};; esac
+    [ -n "$v" ] || v=$(awk -v n="$n" '$1==n {print $2}' "$d/latest")
+    [ -n "$v" ] || v=1.0.0
+    grep -qx "$n $v" "$d/state" || echo "$n $v" >> "$d/state"
+  done ;;
+reshim) echo reshim >> "$d/log" ;;
+latest)
+  echo "latest $2" >> "$d/lookups"
+  awk -v n="$2" '$1==n {print $2; f=1} END {exit !f}' "$d/latest" ||
+    { echo "mise ERROR $2 not found in mise tool registry" >&2; exit 1; } ;;
+config)
+  sub=$2; shift 3; key=${1#tools.}
+  case "$sub" in
+  get) v=$(sed -n "s/^$key = \"\(.*\)\"\$/\1/p" "$cfg"); [ -n "$v" ] || exit 1; echo "$v" ;;
+  set)
+    echo "config set $key $2" >> "$d/log"
+    { echo '[tools]'; grep -v '^\[tools\]$' "$cfg" | grep -v "^$key = "; echo "$key = \"$2\""; } > "$cfg.new"
+    mv "$cfg.new" "$cfg" ;;
+  esac ;;
+esac
+"##;
+
+fn mise_stub(d: &std::path::Path, installed: &str, latest: &str) {
+    std::fs::create_dir_all(d.join("bin")).unwrap();
+    std::fs::create_dir_all(d.join("etc")).unwrap();
+    std::fs::write(d.join("state"), installed).unwrap();
+    std::fs::write(d.join("userstate"), "").unwrap();
+    std::fs::write(d.join("latest"), latest).unwrap();
+    write_exe(
+        &d.join("bin/mise"),
+        &STUB_MISE.replace("@D@", d.to_str().unwrap()),
+    );
+}
+
+fn mise_cfg(d: &std::path::Path) -> String {
+    std::fs::read_to_string(d.join("etc/config.toml")).unwrap_or_default()
+}
+
+fn mise_host(name: &str, dir: &std::path::Path, path: &str) -> HostSpec<PathBuf> {
+    HostSpec {
+        name: name.into(),
+        target: Target::Local(
+            LocalTransport::new()
+                .uid(0)
+                .env("PATH", path)
+                .env("MISE_SYSTEM_CONFIG_DIR", dir.join("etc").to_str().unwrap())
+                .env("MISE_SYSTEM_DATA_DIR", dir.join("sys").to_str().unwrap()),
+        ),
+        vars: dir.to_path_buf(),
+    }
+}
+
+fn mise_failed(r: &Report, out: &str) {
+    assert!(
+        matches!(r.hosts[0].status, HostStatus::Failed { .. }),
+        "{}\n{out}",
+        r.render()
+    );
+}
+
+#[test]
+fn mise_present_installs_missing_in_one_command_then_changed_0() {
+    fn run_(h: Host<PathBuf>) -> PlaybookFuture {
+        Box::pin(async move {
+            h.mise(["just", "fd", "have"]);
+            Ok(())
+        })
+    }
+    let d = tempfile::tempdir().unwrap();
+    mise_stub(d.path(), "have 1.0.0\n", "");
+    // Root's own install of `just` does not count; the system layer is read.
+    std::fs::write(d.path().join("userstate"), "just 0.9.0\n").unwrap();
+    // Other entries stay; `fd` is already right.
+    std::fs::write(
+        d.path().join("etc/config.toml"),
+        "[tools]\nother = \"1.2.3\"\nfd = \"latest\"\n",
+    )
+    .unwrap();
+    let path = stub_path(d.path());
+    let pb = Playbook {
+        name: "mise",
+        run: run_,
+    };
+    let (r1, out1) = go(&pb, vec![mise_host("h1", d.path(), &path)]);
+    assert_eq!(
+        r1.hosts[0].status,
+        HostStatus::Changed,
+        "{}\n{out1}",
+        r1.render()
+    );
+    assert_eq!(
+        cargo_log(d.path()),
+        "config set just latest\nconfig set have latest\ninstall just fd\nreshim\n"
+    );
+    let cfg = mise_cfg(d.path());
+    for l in [
+        "other = \"1.2.3\"",
+        "fd = \"latest\"",
+        "just = \"latest\"",
+        "have = \"latest\"",
+    ] {
+        assert!(cfg.contains(l), "{l} missing from:\n{cfg}");
+    }
+    let line = "window 1 pkg[mise] root just, fd: absent -> present";
+    assert!(
+        r1.render().contains(&format!("h1: {line}")),
+        "{}",
+        r1.render()
+    );
+    assert!(
+        out1.contains(&format!("== h1 [prepare] {line} ==")),
+        "{out1}"
+    );
+    assert!(out1.contains("pkg[mise] install just fd have"), "{out1}");
+    assert_eq!(r1.hosts[0].will_change.len(), 2);
+    assert_eq!(r1.hosts[0].will_change[0].source, "mise");
+
+    let mtime = std::fs::metadata(d.path().join("etc/config.toml"))
+        .unwrap()
+        .modified()
+        .unwrap();
+    let (r2, out2) = go(&pb, vec![mise_host("h1", d.path(), &path)]);
+    assert_eq!(r2.hosts[0].status, HostStatus::Ok, "{}", r2.render());
+    assert!(r2.hosts[0].ops.iter().all(|o| !o.changed));
+    assert!(r2.hosts[0].will_change.is_empty());
+    assert!(!out2.contains("[prepare]"), "{out2}");
+    assert_eq!(cargo_log(d.path()).lines().count(), 4, "nothing ran again");
+    assert_eq!(
+        std::fs::metadata(d.path().join("etc/config.toml"))
+            .unwrap()
+            .modified()
+            .unwrap(),
+        mtime,
+        "config.toml untouched on the second run"
+    );
+    assert!(!d.path().join("lookups").exists(), "Present never looks up");
+}
+
+#[test]
+fn mise_pinned_installs_when_the_pin_is_not_installed() {
+    fn run_(h: Host<PathBuf>) -> PlaybookFuture {
+        Box::pin(async move {
+            h.mise(["just"]).pin("1.36.0");
+            Ok(())
+        })
+    }
+    let d = tempfile::tempdir().unwrap();
+    mise_stub(d.path(), "just 1.59.0\n", "");
+    let path = stub_path(d.path());
+    let pb = Playbook {
+        name: "mise",
+        run: run_,
+    };
+    let (r1, out1) = go(&pb, vec![mise_host("h1", d.path(), &path)]);
+    assert_eq!(
+        r1.hosts[0].status,
+        HostStatus::Changed,
+        "{}\n{out1}",
+        r1.render()
+    );
+    assert_eq!(
+        cargo_log(d.path()),
+        "config set just 1.36.0\ninstall just@1.36.0\nreshim\n"
+    );
+    assert!(
+        r1.render()
+            .contains("h1: window 1 pkg[mise] root just: 1.59.0 -> 1.36.0"),
+        "{}",
+        r1.render()
+    );
+    assert!(out1.contains("pkg[mise] pin 1.36.0 just"), "{out1}");
+    // Both versions stay installed; the pin is met, so a rerun is a no-op.
+    let (r2, out2) = go(&pb, vec![mise_host("h1", d.path(), &path)]);
+    assert_eq!(r2.hosts[0].status, HostStatus::Ok, "{}", r2.render());
+    assert!(!out2.contains("[prepare]"), "{out2}");
+    assert_eq!(cargo_log(d.path()).lines().count(), 3);
+}
+
+#[test]
+fn mise_latest_asks_mise_latest_on_the_host() {
+    fn run_(h: Host<PathBuf>) -> PlaybookFuture {
+        Box::pin(async move {
+            h.mise(["just", "fd"]).latest();
+            Ok(())
+        })
+    }
+    let d = tempfile::tempdir().unwrap();
+    mise_stub(
+        d.path(),
+        "just 1.36.0\nfd 10.5.0\n",
+        "just 1.59.0\nfd 10.5.0\n",
+    );
+    let path = stub_path(d.path());
+    let pb = Playbook {
+        name: "mise",
+        run: run_,
+    };
+    let (r1, out1) = go(&pb, vec![mise_host("h1", d.path(), &path)]);
+    assert_eq!(
+        r1.hosts[0].status,
+        HostStatus::Changed,
+        "{}\n{out1}",
+        r1.render()
+    );
+    assert_eq!(
+        cargo_log(d.path()),
+        "config set just latest\nconfig set fd latest\ninstall just@1.59.0\nreshim\n"
+    );
+    assert!(
+        r1.render()
+            .contains("h1: window 1 pkg[mise] root just: 1.36.0 -> 1.59.0 (latest)"),
+        "{}",
+        r1.render()
+    );
+    let (r2, _) = go(&pb, vec![mise_host("h1", d.path(), &path)]);
+    assert_eq!(r2.hosts[0].status, HostStatus::Ok, "{}", r2.render());
+    assert_eq!(cargo_log(d.path()).lines().count(), 4);
+}
+
+#[test]
+fn mise_latest_lookup_failure_fails_the_op_before_anything_changes() {
+    fn run_(h: Host<PathBuf>) -> PlaybookFuture {
+        Box::pin(async move {
+            h.mise(["nowhere"]).latest();
+            Ok(())
+        })
+    }
+    let d = tempfile::tempdir().unwrap();
+    mise_stub(d.path(), "", "");
+    let pb = Playbook {
+        name: "mise",
+        run: run_,
+    };
+    let (r, out) = go(&pb, vec![mise_host("h1", d.path(), &stub_path(d.path()))]);
+    mise_failed(&r, &out);
+    assert!(
+        r.render()
+            .contains("mise nowhere: could not resolve the latest version"),
+        "{}",
+        r.render()
+    );
+    assert!(r.render().contains("unknown (latest)"), "{}", r.render());
+    assert_eq!(cargo_log(d.path()), "", "no install, no config entry");
+    assert_eq!(mise_cfg(d.path()), "");
+}
+
+#[test]
+fn mise_install_that_installs_nothing_fails() {
+    fn run_(h: Host<PathBuf>) -> PlaybookFuture {
+        Box::pin(async move {
+            h.mise(["a"]);
+            Ok(())
+        })
+    }
+    let d = tempfile::tempdir().unwrap();
+    mise_stub(d.path(), "", "");
+    std::fs::write(d.path().join("refuse"), "").unwrap();
+    let pb = Playbook {
+        name: "mise",
+        run: run_,
+    };
+    let (r, out) = go(&pb, vec![mise_host("h1", d.path(), &stub_path(d.path()))]);
+    mise_failed(&r, &out);
+    assert!(
+        r.render()
+            .contains("mise a: installed absent, wanted present"),
+        "{}",
+        r.render()
+    );
+}
+
+#[test]
+fn mise_missing_fails_and_prepare_says_unknown() {
+    fn run_(h: Host<PathBuf>) -> PlaybookFuture {
+        Box::pin(async move {
+            h.mise(["a"]);
+            Ok(())
+        })
+    }
+    let d = tempfile::tempdir().unwrap();
+    let bin = d.path().join("nomise");
+    std::fs::create_dir_all(&bin).unwrap();
+    let real = std::env::var("PATH").unwrap_or_default();
+    for t in [
+        "bash", "sh", "cat", "sed", "awk", "grep", "mv", "rm", "dirname", "head", "env", "id",
+        "mktemp", "date", "sleep", "tr", "cut", "stty", "sort", "tail", "touch", "mkdir",
+    ] {
+        if let Some(p) = std::env::split_paths(&real)
+            .map(|dir| dir.join(t))
+            .find(|p| p.exists())
+        {
+            std::os::unix::fs::symlink(p, bin.join(t)).unwrap();
+        }
+    }
+    let pb = Playbook {
+        name: "mise",
+        run: run_,
+    };
+    let (r, out) = go(&pb, vec![mise_host("h1", d.path(), bin.to_str().unwrap())]);
+    mise_failed(&r, &out);
+    assert!(r.render().contains("mise not found"), "{}", r.render());
+    assert!(
+        r.render()
+            .contains("window 1 pkg[mise] root a: unknown -> present"),
+        "{}",
+        r.render()
+    );
+}
+
+#[test]
+fn mise_adjacent_ops_merge_into_one_install() {
+    fn run_(h: Host<PathBuf>) -> PlaybookFuture {
+        Box::pin(async move {
+            h.mise(["a"]);
+            h.mise(["b"]);
+            Ok(())
+        })
+    }
+    let d = tempfile::tempdir().unwrap();
+    mise_stub(d.path(), "", "");
+    let pb = Playbook {
+        name: "mise",
+        run: run_,
+    };
+    let (r, out) = go(&pb, vec![mise_host("h1", d.path(), &stub_path(d.path()))]);
+    assert_eq!(
+        r.hosts[0].status,
+        HostStatus::Changed,
+        "{}\n{out}",
+        r.render()
+    );
+    assert!(
+        cargo_log(d.path()).contains("install a b\n"),
+        "{}",
+        cargo_log(d.path())
+    );
+    assert_eq!(r.hosts[0].ops.len(), 1, "{:?}", r.hosts[0].ops);
+    assert!(
+        r.render()
+            .contains("pkg[mise] root a, b: absent -> present"),
+        "{}",
+        r.render()
+    );
+}
+
 // ---- pkg[rustup] (T34): a stub `rustup` keeping its state in temp files,
 // and a stub installer that drops the stub into `$HOME/.cargo/bin` ----
 

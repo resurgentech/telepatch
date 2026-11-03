@@ -1,7 +1,9 @@
 //! Live tests: need docker (and the network to pull images). All `#[ignore]`;
-//! run with `just test-live-os`, `just test-live-pkg`, `just test-live-ssh`.
+//! run with `just test-live-os`, `just test-live-pkg`, `just test-live-mise`,
+//! `just test-live-ssh`.
 
 mod container;
+mod mise;
 mod pkg;
 mod ssh_exec;
 mod sshd;

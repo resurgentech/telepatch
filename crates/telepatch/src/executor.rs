@@ -288,6 +288,7 @@ fn describe(op: &OpNode) -> String {
                 p.source,
                 crate::ops::pkg::Source::Script(_)
                     | crate::ops::pkg::Source::Cargo
+                    | crate::ops::pkg::Source::Mise
                     | crate::ops::pkg::Source::Rustup(_)
             ) =>
         {

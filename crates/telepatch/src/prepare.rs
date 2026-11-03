@@ -117,7 +117,9 @@ pub fn pkg_probe(source: &Source, names: &[String]) -> String {
                 "printf '%s\\n' \"$tp_l\" | grep -qx -- \"$(printf %s {q} | tr 'A-Z_' 'a-z-')\""
             ),
             // Not probed here (see `pkg_names`): report nothing as present.
-            Source::Cargo | Source::Rustup(_) | Source::Script(_) => "false".to_string(),
+            Source::Cargo | Source::Mise | Source::Rustup(_) | Source::Script(_) => {
+                "false".to_string()
+            }
         };
         s.push_str(&format!("if {test}; then echo \"present \"{q}; fi\n"));
     }
@@ -132,6 +134,7 @@ pub fn manager_name(s: &Source) -> &'static str {
         Source::Distro(Manager::Pacman) => "pacman",
         Source::Pip => "pip",
         Source::Cargo => "cargo",
+        Source::Mise => "mise",
         Source::Rustup(_) => "rustup",
         Source::Script(_) => "script",
     }
@@ -156,6 +159,7 @@ pub fn source_probe(p: &PkgSpec) -> Option<String> {
     match &p.source {
         Source::Script(s) => Some(s.probe(&p.wanted)),
         Source::Cargo => Some(crate::ops::pkg::cargo_probe(&p.names, &p.wanted)),
+        Source::Mise => Some(crate::ops::pkg::mise_probe(&p.names, &p.wanted)),
         Source::Rustup(r) => {
             let tc = p.names.first().map(String::as_str).unwrap_or("");
             Some(crate::ops::pkg::rustup_probe(tc, &p.wanted, r))
@@ -191,6 +195,22 @@ pub fn source_changes(window: usize, p: &PkgSpec, out: Option<&str>) -> Vec<Will
                 .map(crate::ops::pkg::parse_cargo_probe)
                 .unwrap_or_default();
             crate::ops::pkg::cargo_will_changes(&p.names, &probed, &p.wanted)
+                .into_iter()
+                .map(|(name, installed, wanted)| WillChange {
+                    window,
+                    source: manager_name(&p.source).to_string(),
+                    user: p.user.clone(),
+                    name,
+                    installed,
+                    wanted,
+                })
+                .collect()
+        }
+        Source::Mise => {
+            let probed = out
+                .map(crate::ops::pkg::parse_mise_probe)
+                .unwrap_or_default();
+            crate::ops::pkg::mise_will_changes(&p.names, &probed, &p.wanted)
                 .into_iter()
                 .map(|(name, installed, wanted)| WillChange {
                     window,

@@ -341,3 +341,37 @@ fn plan_shows_rustup_effects() {
         .writes([telepatch::Key::file("/home/deploy/.cargo/bin/rustup")]);
     insta::assert_snapshot!(render_host("h", &h.os, &h.snapshot()));
 }
+
+#[test]
+fn mise_present() {
+    let h = host("debian12");
+    let id = h.mise(["just", "fd"]).id();
+    assert!(h.snapshot().errors.is_empty(), "{:?}", h.snapshot().errors);
+    insta::assert_snapshot!(wrapped(&h, id));
+}
+
+#[test]
+fn mise_pinned() {
+    let h = host("debian12");
+    let p = h.mise(["just"]);
+    p.pin("1.36.0");
+    assert!(h.snapshot().errors.is_empty(), "{:?}", h.snapshot().errors);
+    insta::assert_snapshot!(wrapped(&h, p.id()));
+}
+
+#[test]
+fn mise_latest() {
+    let h = host("debian12");
+    let p = h.mise(["just", "fd"]);
+    p.latest();
+    assert!(h.snapshot().errors.is_empty(), "{:?}", h.snapshot().errors);
+    insta::assert_snapshot!(wrapped(&h, p.id()));
+}
+
+#[test]
+fn plan_shows_mise_effects() {
+    let h = host("debian12");
+    h.mise(["just", "fd"]);
+    h.as_user("root").mise(["bat"]).pin("0.25.0");
+    insta::assert_snapshot!(render_host("h", &h.os, &h.snapshot()));
+}

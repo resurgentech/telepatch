@@ -1,0 +1,70 @@
+---
+source: crates/telepatch/tests/ops_snapshots.rs
+expression: "wrapped(&h, p.id())"
+---
+(
+__tp_esc() { local s=${1//\\/\\\\}; s=${s//\"/\\\"}; printf %s "$s"; }
+__tp_emit() {
+  if [ "$1" -ne 0 ]; then rc=$1; fi
+  case "$rc" in ''|*[!0-9]*) rc=1;; esac
+  case "$changed" in 1) __tp_c=true;; *) __tp_c=false;; esac
+  case "$skipped" in 1) __tp_s=true;; *) __tp_s=false;; esac
+  __tp_i=
+  for __tp_x in "${installed[@]}"; do __tp_i="$__tp_i${__tp_i:+,}\"$(__tp_esc "$__tp_x")\""; done
+  printf '\n__tp_testnonce 0 {"rc":%s,"changed":%s,"installed":[%s]}\n' "$rc" "$__tp_c" "$__tp_i"
+}
+trap '__tp_emit $?' EXIT
+rc=0; changed=0; skipped=0; installed=()
+rc=0; changed=0; installed=()
+tp_want=('just' 'fd')
+declare -A tp_have=() tp_before=() tp_spec=() tp_wantv=()
+tp_todo=(); tp_args=()
+tp_cfgdir=${MISE_SYSTEM_CONFIG_DIR:-/etc/mise}; tp_data=${MISE_SYSTEM_DATA_DIR:-/usr/local/share/mise}
+tp_mise=$(command -v mise 2>/dev/null) || tp_mise=
+[ -n "$tp_mise" ] || { [ -x /usr/local/bin/mise ] && tp_mise=/usr/local/bin/mise; }
+tp_list() { awk -v pre="$tp_data/installs/" '/^  "[^"]+": \[/ { t=$0; sub(/^  "/, "", t); sub(/": \[.*/, "", t); next }
+/"version":/ { v=$0; sub(/.*"version": "/, "", v); sub(/".*/, "", v) }
+/"install_path":/ { p=$0; sub(/.*"install_path": "/, "", p); sub(/".*/, "", p); if (index(p, pre) == 1) print t, v }'; }
+tp_read() { local n v; tp_have=(); while read -r n v; do tp_have[$n]+=" $v"; done < <("$tp_mise" ls --json --installed 2>/dev/null | tp_list); }
+tp_has() { case "${tp_have[$1]-} " in *" $2 "*) return 0;; esac; return 1; }
+if [ -z "$tp_mise" ]; then echo 'telepatch: mise not found' >&2; rc=127; fi
+if [ "$rc" -eq 0 ]; then
+  tp_read
+  for tp_k in "${!tp_have[@]}"; do tp_before[$tp_k]=${tp_have[$tp_k]}; done
+  for tp_n in "${tp_want[@]}"; do
+    tp_l=$("$tp_mise" latest "$tp_n" 2>/dev/null) || tp_l=
+    tp_l=${tp_l%%$'\n'*}
+    if [ -z "$tp_l" ]; then echo "telepatch: mise $tp_n: could not resolve the latest version" >&2; rc=1; continue; fi
+    tp_spec[$tp_n]=latest; tp_wantv[$tp_n]=$tp_l
+    tp_has "$tp_n" "$tp_l" || { tp_todo+=("$tp_n"); tp_args+=("$tp_n@$tp_l"); }
+  done
+fi
+if [ "$rc" -eq 0 ]; then
+  mkdir -p "$tp_cfgdir" && { [ -e "$tp_cfgdir/config.toml" ] || : > "$tp_cfgdir/config.toml"; } || rc=1
+  for tp_n in "${tp_want[@]}"; do
+    [ "$rc" -eq 0 ] || break
+    tp_cur=$("$tp_mise" config get --system "tools.$tp_n" 2>/dev/null) || tp_cur=
+    if [ "$tp_cur" != "${tp_spec[$tp_n]}" ]; then
+      if "$tp_mise" config set --system "tools.$tp_n" "${tp_spec[$tp_n]}"; then changed=1; else rc=1; fi
+    fi
+  done
+fi
+if [ "$rc" -eq 0 ] && [ "${#tp_todo[@]}" -gt 0 ]; then
+  "$tp_mise" install --system "${tp_args[@]}"
+  rc=$?
+  if [ "$rc" -eq 0 ]; then "$tp_mise" reshim --system; rc=$?; fi
+  tp_read
+  for tp_n in "${tp_want[@]}"; do
+    if [ "${tp_have[$tp_n]-}" != "${tp_before[$tp_n]-}" ]; then changed=1; installed+=("$tp_n"); fi
+  done
+  if [ "$rc" -eq 0 ]; then
+    for tp_n in "${tp_todo[@]}"; do
+      tp_wv=${tp_wantv[$tp_n]-}
+      if [ -n "$tp_wv" ]; then tp_has "$tp_n" "$tp_wv" && continue; else [ -n "${tp_have[$tp_n]-}" ] && continue; fi
+      tp_got=${tp_have[$tp_n]-}; tp_got=${tp_got# }
+      echo "telepatch: mise $tp_n: installed ${tp_got:-absent}, wanted ${tp_wv:-present}" >&2; rc=1
+    done
+  fi
+fi
+exit "$rc"
+) </dev/null
