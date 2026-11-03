@@ -306,3 +306,14 @@ are appended, never edited in; a hook refuses rewrites.
   sourced by test-vm.sh. On demand. Live: state, versions and pre-states
   identical; `just test-vm` still green after the move.
 - Commits: tp_basic 7082914
+
+## 2026-11-03 — `just test-vm-oracle` timed: two passes per side
+
+- Direct change at the user's request (no roadmap step). Each side now
+  runs twice on its VM, both passes timed from this machine, the second
+  pass's changed count recorded in `timings.txt`; states captured after
+  the second pass. Rerun bug fixed (`ansible-src/` from a previous run).
+- Live, ubuntu2404 dev_base: ansible 4m04.9s then 7.0s (changed=1: the
+  original's unguarded uv installer); telepatch 3m45.6s then 1.3s
+  (CHANGED 0). States, versions and pre-states identical.
+- Commits: tp_basic 112975d
