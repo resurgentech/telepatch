@@ -68,3 +68,22 @@ fn non_apt_managers_are_never_flagged() {
     h.pip(["requests"]);
     assert_eq!(apt_update_needed(&ops(&h)), [false, false]);
 }
+
+#[test]
+fn repo_op_forces_one_update_before_the_next_apt_op() {
+    let h = host();
+    h.pkg(["curl"]);
+    h.repo("docker").apt(telepatch::ops::repo::AptRepo {
+        uris: vec!["https://download.docker.com/linux/debian".into()],
+        suites: vec!["bookworm".into()],
+        components: vec!["stable".into()],
+        key_url: "https://download.docker.com/linux/debian/gpg".into(),
+    });
+    h.pkg(["docker-ce-cli"]);
+    h.pkg(["jq"]);
+    assert_eq!(
+        apt_update_needed(&ops(&h)),
+        [false, false, true, false],
+        "the key and source are under /etc/apt/"
+    );
+}

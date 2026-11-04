@@ -386,6 +386,8 @@ pub fn apt_update_flags(mut stale: bool, ops: &[OpNode]) -> (Vec<bool>, bool) {
     (flags, stale)
 }
 
+/// `repo` ops need no case of their own: the key and source files they
+/// write are under `/etc/apt/`.
 fn writes_apt_sources(k: &Key) -> bool {
     match k {
         Key::Any => true,

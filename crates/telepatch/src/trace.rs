@@ -82,6 +82,8 @@ pub enum OpSpec {
     Group(crate::ops::group::GroupSpec),
     /// Account exists (`h.user`).
     User(crate::ops::user::UserSpec),
+    /// A package repository (`h.repo`).
+    Repo(crate::ops::repo::RepoSpec),
 }
 
 impl OpSpec {
@@ -93,6 +95,7 @@ impl OpSpec {
             OpSpec::File(_) => "file",
             OpSpec::Group(_) => "group",
             OpSpec::User(_) => "user",
+            OpSpec::Repo(_) => "repo",
         }
     }
 
@@ -105,6 +108,7 @@ impl OpSpec {
             OpSpec::File(_) => OpKind::File,
             OpSpec::Group(_) => OpKind::Group,
             OpSpec::User(_) => OpKind::User,
+            OpSpec::Repo(_) => OpKind::Repo,
         }
     }
 
@@ -127,6 +131,7 @@ impl OpSpec {
             OpSpec::Pkg(p) => p.render(),
             OpSpec::File(f) => f.render(),
             OpSpec::Group(g) => g.render(),
+            OpSpec::Repo(r) => r.render(),
         }
     }
 
@@ -138,6 +143,7 @@ impl OpSpec {
             OpSpec::File(f) => BTreeSet::from([Key::file(&f.path)]),
             OpSpec::Group(g) => BTreeSet::from([Key::group(&g.name)]),
             OpSpec::User(u) => BTreeSet::from([Key::user(&u.name)]),
+            OpSpec::Repo(r) => r.default_writes(),
         }
     }
 
@@ -153,6 +159,7 @@ impl OpSpec {
             )]),
             OpSpec::Group(g) => BTreeMap::from([(Key::group(&g.name), Value::Exists(true))]),
             OpSpec::User(u) => BTreeMap::from([(Key::user(&u.name), Value::Exists(true))]),
+            OpSpec::Repo(r) => r.default_post(),
         }
     }
 }

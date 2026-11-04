@@ -139,11 +139,11 @@ impl WillChange {
 }
 
 /// Something a window's op will create, from the prepare probe of its
-/// kind (`group`, `user`). Only items that do not exist yet are listed.
+/// kind (`group`, `user`, `repo`). Only items that do not exist yet are listed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WillCreate {
     pub window: usize,
-    /// The primitive: `group` or `user`.
+    /// The primitive: `group`, `user` or `repo`.
     pub kind: String,
     pub name: String,
     /// What a `user` that exists will get (`groups +docker`,

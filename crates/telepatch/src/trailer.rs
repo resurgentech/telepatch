@@ -46,6 +46,7 @@ pub enum OpKind {
     File,
     Group,
     User,
+    Repo,
     Sh,
 }
 
@@ -86,6 +87,12 @@ pub struct UserResult {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct RepoResult {
+    pub rc: i32,
+    pub changed: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct ShellResult {
     pub rc: i32,
     pub changed: bool,
@@ -103,6 +110,9 @@ impl OpResult for GroupResult {
 }
 impl OpResult for UserResult {
     const KIND: OpKind = OpKind::User;
+}
+impl OpResult for RepoResult {
+    const KIND: OpKind = OpKind::Repo;
 }
 impl OpResult for ShellResult {
     const KIND: OpKind = OpKind::Sh;
@@ -184,13 +194,13 @@ pub fn wrap(kind: OpKind, body: &str, id: usize, nonce: &str) -> String {
     );
     let json = match kind {
         OpKind::Pkg => r#"{"rc":%s,"changed":%s,"installed":[%s]}"#,
-        OpKind::File => r#"{"rc":%s,"changed":%s}"#,
+        OpKind::File | OpKind::Repo => r#"{"rc":%s,"changed":%s}"#,
         OpKind::Group | OpKind::User => r#"{"rc":%s,"changed":%s,"created":%s}"#,
         OpKind::Sh => r#"{"rc":%s,"changed":%s,"skipped":%s}"#,
     };
     let args = match kind {
         OpKind::Pkg => r#""$rc" "$__tp_c" "$__tp_i""#,
-        OpKind::File => r#""$rc" "$__tp_c""#,
+        OpKind::File | OpKind::Repo => r#""$rc" "$__tp_c""#,
         OpKind::Group | OpKind::User => r#""$rc" "$__tp_c" "$__tp_k""#,
         OpKind::Sh => r#""$rc" "$__tp_c" "$__tp_s""#,
     };

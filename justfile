@@ -62,6 +62,13 @@ test-live-ssh:
 test-live-user:
     cargo test -p telepatch --test live -- --ignored --nocapture group:: user::
 
+# Live: the repo primitive with Docker's real repositories on ubuntu:24.04
+# (apt, deb822 + keyring) and rockylinux/rockylinux:10 (dnf .repo), each
+# installing docker-ce-cli from it in the same run; second run must change
+# nothing. Needs docker and the network.
+test-live-repo:
+    cargo test -p telepatch --test live -- --ignored --nocapture repo_
+
 # Build examples/hello for musl and fail unless the binary is static; then
 # smoke-test it.
 musl-example:

@@ -1,0 +1,65 @@
+---
+source: crates/telepatch/tests/repo.rs
+expression: "render_host(\"h\", &h.os, &h.snapshot())"
+---
+host h (os: Debian/Ubuntu 24.04)
+blocking reads: 0
+
+role (none)
+  #0 repo as shell:root reads [] writes [file:/etc/apt/keyrings/docker.asc, file:/etc/apt/sources.list.d/docker.sources, repo:docker] post [file:/etc/apt/keyrings/docker.asc=Exists(true), file:/etc/apt/sources.list.d/docker.sources=Exists(true), repo:docker=Exists(true)]
+      | tp_n='docker'
+      | tp_fetch() {
+      |   if ! command -v curl >/dev/null 2>&1; then
+      |     echo "telepatch: repo $tp_n: curl not found" >&2
+      |     return 1
+      |   fi
+      |   (umask 022; mkdir -p -- "$(dirname -- "$2")") || return 1
+      |   tp_t=$(mktemp "$2.XXXXXX") || return 1
+      |   if curl -fsSL -o "$tp_t" --url "$1" && chmod 0644 "$tp_t" && mv -f -- "$tp_t" "$2"; then
+      |     return 0
+      |   fi
+      |   rm -f -- "$tp_t"
+      |   return 1
+      | }
+      | tp_put() {
+      |   if tp_render "$2" | cmp -s - "$1"; then return 0; fi
+      |   (umask 022; mkdir -p -- "$(dirname -- "$1")") || return 1
+      |   tp_t=$(mktemp "$1.XXXXXX") || return 1
+      |   if tp_render "$2" > "$tp_t" && chmod 0644 "$tp_t" && mv -f -- "$tp_t" "$1"; then
+      |     changed=1
+      |     return 0
+      |   fi
+      |   rm -f -- "$tp_t"
+      |   return 1
+      | }
+      | tp_render() { printf 'Types: deb\nURIs: %s\nSuites: %s\nComponents: %s\nArchitectures: %s\nSigned-By: %s\n' 'https://download.docker.com/linux/ubuntu' 'noble' 'stable' "$1" '/etc/apt/keyrings/docker.asc'; }
+      | tp_key='/etc/apt/keyrings/docker.asc'
+      | tp_src='/etc/apt/sources.list.d/docker.sources'
+      | if [ ! -e "$tp_key" ]; then
+      |   if tp_fetch 'https://download.docker.com/linux/ubuntu/gpg' "$tp_key"; then changed=1; else rc=1; fi
+      | fi
+      | if [ "$rc" -eq 0 ]; then
+      |   tp_arch=$(dpkg --print-architecture)
+      |   if [ -z "$tp_arch" ]; then
+      |     echo "telepatch: repo $tp_n: cannot read the dpkg architecture" >&2
+      |     rc=1
+      |   elif ! tp_put "$tp_src" "$tp_arch"; then
+      |     rc=1
+      |   fi
+      | fi
+  #1 pkg as shell:root reads [] writes [pkg:docker-ce-cli] post [pkg:docker-ce-cli=Installed]
+      | rc=0; changed=0; installed=()
+      | tp_want=('docker-ce-cli')
+      | tp_missing=()
+      | export DEBIAN_FRONTEND=noninteractive
+      | for tp_n in "${tp_want[@]}"; do
+      |   [ "$(dpkg-query -W -f='${db:Status-Status}' "$tp_n" 2>/dev/null)" = installed ] || tp_missing+=("$tp_n")
+      | done
+      | if [ "$rc" -eq 0 ] && [ "${#tp_missing[@]}" -gt 0 ]; then
+      |   if ! find /var/lib/apt/lists -maxdepth 1 -type f ! -name lock 2>/dev/null | grep -q .; then apt-get -q update || rc=$?; fi
+      |   if [ "$rc" -eq 0 ]; then
+      |     apt-get -y -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold install "${tp_missing[@]}"
+      |     rc=$?
+      |     if [ "$rc" -eq 0 ]; then changed=1; installed=("${tp_missing[@]}"); fi
+      |   fi
+      | fi

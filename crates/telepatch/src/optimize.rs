@@ -37,7 +37,20 @@ fn conflicts(a: &Item, b: &Item) -> bool {
     let hit =
         |x: &BTreeSet<Key>, y: &BTreeSet<Key>| x.iter().any(|k| y.iter().any(|l| k.overlaps(l)));
     let (a, b) = (&a.node, &b.node);
+    // A repo op changes what a distro install resolves, so no distro `pkg`
+    // op moves across it, in either direction.
+    if (writes_repo(a) && is_distro_pkg(b)) || (writes_repo(b) && is_distro_pkg(a)) {
+        return true;
+    }
     hit(&a.writes, &b.reads) || hit(&a.writes, &b.writes) || hit(&a.reads, &b.writes)
+}
+
+fn writes_repo(n: &crate::trace::OpNode) -> bool {
+    n.writes.iter().any(|k| matches!(k, Key::Repo(_)))
+}
+
+fn is_distro_pkg(n: &crate::trace::OpNode) -> bool {
+    matches!(&n.spec, OpSpec::Pkg(p) if matches!(p.source, crate::ops::pkg::Source::Distro(_)))
 }
 
 /// What must be equal for two pkg ops to be merge candidates.
@@ -246,6 +259,12 @@ mod tests {
         op(id, spec.clone(), &[], &[Key::file(path)])
     }
 
+    fn repo(id: usize, name: &str) -> Item {
+        let spec = crate::ops::repo::RepoSpec::new(name);
+        let w: Vec<Key> = spec.default_writes().into_iter().collect();
+        op(id, OpSpec::Repo(spec), &[], &w)
+    }
+
     fn with(mut item: Item, f: impl FnOnce(&mut OpNode)) -> Item {
         if let Item::Op(w) = &mut item {
             f(&mut w.node);
@@ -344,5 +363,31 @@ mod tests {
         let g = Graph::from_items(vec![r, pkg(1, "a"), Item::Barrier(NodeId(2))]);
         assert!(g.edges().contains(&(0, 1)));
         assert!(g.edges().contains(&(0, 2)) && g.edges().contains(&(1, 2)));
+    }
+
+    #[test]
+    fn repo_op_blocks_merging_distro_pkgs_across_it() {
+        let g = optimize(vec![pkg(0, "a"), repo(1, "docker"), pkg(2, "b")]);
+        assert_eq!(ids(g), [vec![0], vec![1], vec![2]]);
+    }
+
+    #[test]
+    fn repo_op_conflicts_with_every_distro_pkg_either_way() {
+        let g = Graph::from_items(vec![pkg(0, "a"), repo(1, "r"), pkg(2, "b")]);
+        assert!(g.edges().contains(&(0, 1)) && g.edges().contains(&(1, 2)));
+        // Not with other kinds of op.
+        let g = Graph::from_items(vec![repo(0, "r"), file(1, "/etc/x")]);
+        assert!(!g.edges().contains(&(0, 1)));
+    }
+
+    #[test]
+    fn pkgs_after_a_repo_still_merge_with_each_other() {
+        let g = optimize(vec![
+            pkg(0, "a"),
+            repo(1, "docker"),
+            pkg(2, "b"),
+            pkg(3, "c"),
+        ]);
+        assert_eq!(ids(g), [vec![0], vec![1], vec![2, 3]]);
     }
 }

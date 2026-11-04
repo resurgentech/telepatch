@@ -408,6 +408,29 @@ pub async fn prepare_window<S: ShellSet>(
         root.send(id, &w).await.map_err(|e| e.to_string())?;
         user_id = Some(id);
     }
+    // Repositories, one probe for the window, on the root shell (a repo op
+    // is root only).
+    let mut repo_id = None;
+    let repo_specs: Vec<&crate::ops::repo::RepoSpec> = window
+        .ops
+        .iter()
+        .filter_map(|op| match &op.node.spec {
+            OpSpec::Repo(r) => Some(r),
+            _ => None,
+        })
+        .collect();
+    if !repo_specs.is_empty() {
+        let id = next();
+        let root = shell_of(shells, &Principal::Root)?;
+        let w = wrap(
+            OpKind::Sh,
+            &crate::ops::shell::raw_body(&crate::ops::repo::probe(&repo_specs)),
+            id,
+            root.nonce(),
+        );
+        root.send(id, &w).await.map_err(|e| e.to_string())?;
+        repo_id = Some(id);
+    }
     // Non-distro probes, each in its op's RunAs and principal's shell (as
     // `read_facts` does).
     let mut src_ids: Vec<(&PkgSpec, &Principal, Option<usize>)> = Vec::new();
@@ -488,6 +511,20 @@ pub async fn prepare_window<S: ShellSet>(
                     kind: "user".to_string(),
                     name,
                     detail,
+                });
+            }
+        }
+    }
+    if let Some(id) = repo_id {
+        // Gather only: a failed probe reports nothing.
+        let root = shell_of(shells, &Principal::Root)?;
+        if let Ok((_, out)) = collect(root, id).await {
+            for name in crate::ops::repo::findings(&out) {
+                will.will_create.push(WillCreate {
+                    window: window.number,
+                    kind: "repo".to_string(),
+                    name,
+                    detail: Some("will add".to_string()),
                 });
             }
         }
