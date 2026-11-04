@@ -366,3 +366,72 @@ are appended, never edited in; a hook refuses rewrites.
   (a bare run resolved Ansible master, which already has `just`).
 - README timing tables updated to the 2026-11-03 run.
 - Commits: telepatch (this), tp_basic (next)
+
+## 2026-11-04 — T42 `../tp_basic`: mirror dev_desktop; dev_desktop and admin_users understanding docs
+
+- Mirror of `playbooks/dev_desktop.yml`, `inventories/group_vars` and the
+  nine roles at 79d1ca1 (37 sha256 lines in `conversion/SOURCE`;
+  `default_password` is `""`). `dev_desktop.md` (rows nvm_node, rust_tools,
+  tmux; tmux keep, nvm_node and rust_tools drop, Node in its own role) and
+  `admin_users.md` (keep, port as is). Probes correct the roadmap:
+  `@includedir` ships on Ubuntu, Debian and Arch, not Rocky; Ansible leaves a
+  new account locked (no `NP`); group `sudo` is missing on Arch and AL2023.
+  Not yet reviewed by the user.
+- Commits: tp_basic 98098cc
+
+## 2026-11-04 — T43 `../tp_basic`: docker, golang, vm_server understanding docs
+
+- Dated vendor sources and container probes: Docker's deb822/armored-key
+  apt method and `docker-ce.repo` (rhel path for Rocky/Alma), daemon start
+  per family, podman/runc coexist on Rocky 9/10; go.dev VERSION and dl JSON,
+  godoc deprecated for pkgsite; Ubuntu's `qemu-kvm` is virtual
+  (`qemu-system-x86`), the `libvirt` group's package per family. Decisions:
+  docker rewrite, golang rewrite, vm_server shrink. Not yet reviewed.
+- Commits: tp_basic 68abd44
+
+## 2026-11-04 — T44 `Os::codename()`
+
+- `UBUNTU_CODENAME`, else `VERSION_CODENAME`, else `None`; all 15 fixtures
+  asserted (Pop!_OS `noble`).
+- Commits: 1846b57
+
+## 2026-11-04 — T45 `file(..).validate(cmd)`
+
+- Content and line edits build a candidate beside the target at its final
+  mode and owner, run the validator on it (`%s`), and move it only on exit
+  0. No `%s` is a trace error. Templates without `.validate` unchanged.
+- Commits: 4953049
+
+## 2026-11-04 — T46 `group` primitive
+
+- `h.group(n)` / `.system()`, root only, `getent` then `groupadd`; prepare
+  line `group n: will create`. Live `just test-live-user` (ubuntu:24.04,
+  rockylinux:10, rerun `changed 0`).
+- Commits: 796007d
+
+## 2026-11-04 — T47 `user` primitive
+
+- `h.user(n).shell(..).groups_add([..]).password_hash(..)`: present only,
+  root only; shell enforced and groups appended on an existing user; the
+  hash applied only on create (`chpasswd -e` on stdin, never when empty)
+  and shown as `<hash>` everywhere a reader sees the script. Writes
+  `user:n`, reads `group:g`. Live in `just test-live-user`.
+- Commits: 8fa92ad
+
+## 2026-11-04 — T48 users the run creates, then `as_user`
+
+- An op addressed to `User(u)` after an op writing `user:u` starts the
+  next window, so prepare checks and opens u after u exists; a fact read as
+  u waits for the user op. No existing plan moved. Live case in `just
+  test-live-ssh`.
+- Commits: e7c81cf
+
+## 2026-11-04 — T49 `repo` primitive
+
+- `h.repo(n).apt(AptRepo{..})` (deb822 `.sources`, armored key in
+  `/etc/apt/keyrings`), `.dnf_url(url)`, `.dnf(DnfRepo{..})`; fetched files
+  only when absent, written files compared byte for byte; `optimize`
+  keeps distro `pkg` ops on their side of a repo op; the next apt op
+  updates the cache. Live `just test-live-repo` installs `docker-ce-cli`
+  from Docker's repo on ubuntu:24.04 and rockylinux:10, rerun `changed 0`.
+- Commits: 17c7cc9
