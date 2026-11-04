@@ -1,0 +1,139 @@
+---
+source: crates/telepatch/tests/user.rs
+expression: "format!(\"{}\\n{}\\n{}\", wrapped_display(&h, a), wrapped_display(&h, b),\nwrapped_display(&h, c))"
+---
+(
+__tp_esc() { local s=${1//\\/\\\\}; s=${s//\"/\\\"}; printf %s "$s"; }
+__tp_emit() {
+  if [ "$1" -ne 0 ]; then rc=$1; fi
+  case "$rc" in ''|*[!0-9]*) rc=1;; esac
+  case "$changed" in 1) __tp_c=true;; *) __tp_c=false;; esac
+  case "$skipped" in 1) __tp_s=true;; *) __tp_s=false;; esac
+  __tp_i=
+  for __tp_x in "${installed[@]}"; do __tp_i="$__tp_i${__tp_i:+,}\"$(__tp_esc "$__tp_x")\""; done
+  case "$created" in 1) __tp_k=true;; *) __tp_k=false;; esac
+  printf '\n__tp_t0n 0 {"rc":%s,"changed":%s,"created":%s}\n' "$rc" "$__tp_c" "$__tp_k"
+}
+trap '__tp_emit $?' EXIT
+rc=0; changed=0; skipped=0; installed=()
+created=0
+tp_u='tpdev'
+if [ "$rc" -eq 0 ]; then
+if ! getent passwd "$tp_u" >/dev/null 2>&1; then
+  useradd -m -- "$tp_u"
+  rc=$?
+  if [ "$rc" -eq 0 ]; then changed=1; created=1; fi
+else
+  :
+fi
+fi
+exit "$rc"
+) </dev/null
+
+(
+__tp_esc() { local s=${1//\\/\\\\}; s=${s//\"/\\\"}; printf %s "$s"; }
+__tp_emit() {
+  if [ "$1" -ne 0 ]; then rc=$1; fi
+  case "$rc" in ''|*[!0-9]*) rc=1;; esac
+  case "$changed" in 1) __tp_c=true;; *) __tp_c=false;; esac
+  case "$skipped" in 1) __tp_s=true;; *) __tp_s=false;; esac
+  __tp_i=
+  for __tp_x in "${installed[@]}"; do __tp_i="$__tp_i${__tp_i:+,}\"$(__tp_esc "$__tp_x")\""; done
+  case "$created" in 1) __tp_k=true;; *) __tp_k=false;; esac
+  printf '\n__tp_t0n 1 {"rc":%s,"changed":%s,"created":%s}\n' "$rc" "$__tp_c" "$__tp_k"
+}
+trap '__tp_emit $?' EXIT
+rc=0; changed=0; skipped=0; installed=()
+created=0
+tp_u='tpdev'
+for tp_g in 'sudo' 'docker'; do
+  if ! getent group "$tp_g" >/dev/null 2>&1; then
+    echo "telepatch: user $tp_u: group $tp_g does not exist" >&2
+    rc=1
+  fi
+done
+if [ "$rc" -eq 0 ]; then
+if ! getent passwd "$tp_u" >/dev/null 2>&1; then
+  useradd -m -s '/bin/bash' -G 'sudo,docker' -- "$tp_u"
+  rc=$?
+  if [ "$rc" -eq 0 ]; then changed=1; created=1; fi
+else
+  :
+  tp_cur=$(getent passwd "$tp_u" | cut -d: -f7)
+  if [ "$tp_cur" != '/bin/bash' ]; then
+    usermod -s '/bin/bash' -- "$tp_u"
+    rc=$?
+    if [ "$rc" -eq 0 ]; then changed=1; fi
+  fi
+  if [ "$rc" -eq 0 ]; then
+    tp_have=" $(id -nG "$tp_u") "
+    tp_add=
+    for tp_g in 'sudo' 'docker'; do
+      case "$tp_have" in *" $tp_g "*) ;; *) tp_add="$tp_add,$tp_g";; esac
+    done
+    if [ -n "$tp_add" ]; then
+      usermod -aG "${tp_add#,}" -- "$tp_u"
+      rc=$?
+      if [ "$rc" -eq 0 ]; then changed=1; fi
+    fi
+  fi
+fi
+fi
+exit "$rc"
+) </dev/null
+
+(
+__tp_esc() { local s=${1//\\/\\\\}; s=${s//\"/\\\"}; printf %s "$s"; }
+__tp_emit() {
+  if [ "$1" -ne 0 ]; then rc=$1; fi
+  case "$rc" in ''|*[!0-9]*) rc=1;; esac
+  case "$changed" in 1) __tp_c=true;; *) __tp_c=false;; esac
+  case "$skipped" in 1) __tp_s=true;; *) __tp_s=false;; esac
+  __tp_i=
+  for __tp_x in "${installed[@]}"; do __tp_i="$__tp_i${__tp_i:+,}\"$(__tp_esc "$__tp_x")\""; done
+  case "$created" in 1) __tp_k=true;; *) __tp_k=false;; esac
+  printf '\n__tp_t0n 2 {"rc":%s,"changed":%s,"created":%s}\n' "$rc" "$__tp_c" "$__tp_k"
+}
+trap '__tp_emit $?' EXIT
+rc=0; changed=0; skipped=0; installed=()
+created=0
+tp_u='tpdev'
+for tp_g in 'sudo'; do
+  if ! getent group "$tp_g" >/dev/null 2>&1; then
+    echo "telepatch: user $tp_u: group $tp_g does not exist" >&2
+    rc=1
+  fi
+done
+if [ "$rc" -eq 0 ]; then
+if ! getent passwd "$tp_u" >/dev/null 2>&1; then
+  useradd -m -s '/bin/bash' -G 'sudo' -- "$tp_u"
+  rc=$?
+  if [ "$rc" -eq 0 ]; then changed=1; created=1; fi
+  if [ "$rc" -eq 0 ]; then
+    printf '%s:%s\n' "$tp_u" '<hash>' | chpasswd -e
+    rc=$?
+  fi
+else
+  :
+  tp_cur=$(getent passwd "$tp_u" | cut -d: -f7)
+  if [ "$tp_cur" != '/bin/bash' ]; then
+    usermod -s '/bin/bash' -- "$tp_u"
+    rc=$?
+    if [ "$rc" -eq 0 ]; then changed=1; fi
+  fi
+  if [ "$rc" -eq 0 ]; then
+    tp_have=" $(id -nG "$tp_u") "
+    tp_add=
+    for tp_g in 'sudo'; do
+      case "$tp_have" in *" $tp_g "*) ;; *) tp_add="$tp_add,$tp_g";; esac
+    done
+    if [ -n "$tp_add" ]; then
+      usermod -aG "${tp_add#,}" -- "$tp_u"
+      rc=$?
+      if [ "$rc" -eq 0 ]; then changed=1; fi
+    fi
+  fi
+fi
+fi
+exit "$rc"
+) </dev/null

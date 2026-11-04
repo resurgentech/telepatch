@@ -80,6 +80,8 @@ pub enum OpSpec {
     File(crate::ops::file::FileSpec),
     /// Group exists (`h.group`).
     Group(crate::ops::group::GroupSpec),
+    /// Account exists (`h.user`).
+    User(crate::ops::user::UserSpec),
 }
 
 impl OpSpec {
@@ -90,6 +92,7 @@ impl OpSpec {
             OpSpec::Pkg(p) => p.kind(),
             OpSpec::File(_) => "file",
             OpSpec::Group(_) => "group",
+            OpSpec::User(_) => "user",
         }
     }
 
@@ -101,12 +104,24 @@ impl OpSpec {
             OpSpec::Pkg(_) => OpKind::Pkg,
             OpSpec::File(_) => OpKind::File,
             OpSpec::Group(_) => OpKind::Group,
+            OpSpec::User(_) => OpKind::User,
         }
     }
 
-    /// The shell script this op runs on a host with the given `os`.
-    pub fn script(&self, _os: &Os) -> String {
+    /// The shell script this op runs on a host with the given `os`, as
+    /// every reader sees it (plan, tests): secrets are shown as `<hash>`.
+    /// What the shell receives is [`OpSpec::exec_script`].
+    pub fn script(&self, os: &Os) -> String {
         match self {
+            OpSpec::User(u) => u.render(false),
+            _ => self.exec_script(os),
+        }
+    }
+
+    /// The script as sent to the host: [`OpSpec::script`] with secrets in.
+    pub fn exec_script(&self, _os: &Os) -> String {
+        match self {
+            OpSpec::User(u) => u.render(true),
             OpSpec::Raw { script } => script.clone(),
             OpSpec::Shell(s) => crate::ops::shell::body(s),
             OpSpec::Pkg(p) => p.render(),
@@ -122,6 +137,7 @@ impl OpSpec {
             OpSpec::Pkg(p) => p.default_writes(),
             OpSpec::File(f) => BTreeSet::from([Key::file(&f.path)]),
             OpSpec::Group(g) => BTreeSet::from([Key::group(&g.name)]),
+            OpSpec::User(u) => BTreeSet::from([Key::user(&u.name)]),
         }
     }
 
@@ -136,6 +152,7 @@ impl OpSpec {
                 Value::Exists(f.kind != FileKind::Absent),
             )]),
             OpSpec::Group(g) => BTreeMap::from([(Key::group(&g.name), Value::Exists(true))]),
+            OpSpec::User(u) => BTreeMap::from([(Key::user(&u.name), Value::Exists(true))]),
         }
     }
 }

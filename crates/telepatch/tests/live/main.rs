@@ -9,6 +9,7 @@ mod mise;
 mod pkg;
 mod ssh_exec;
 mod sshd;
+mod user;
 
 use std::path::Path;
 

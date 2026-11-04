@@ -139,19 +139,27 @@ impl WillChange {
 }
 
 /// Something a window's op will create, from the prepare probe of its
-/// kind (`group`). Only items that do not exist yet are listed.
+/// kind (`group`, `user`). Only items that do not exist yet are listed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WillCreate {
     pub window: usize,
-    /// The primitive: `group`.
+    /// The primitive: `group` or `user`.
     pub kind: String,
     pub name: String,
+    /// What a `user` that exists will get (`groups +docker`,
+    /// `shell -> /bin/bash`); `None` for a create.
+    pub detail: Option<String>,
 }
 
 impl WillCreate {
-    /// `group docker: will create`.
+    /// `group docker: will create`, `user bot: groups +docker`.
     pub fn line(&self) -> String {
-        format!("{} {}: will create", self.kind, self.name)
+        format!(
+            "{} {}: {}",
+            self.kind,
+            self.name,
+            self.detail.as_deref().unwrap_or("will create")
+        )
     }
 }
 

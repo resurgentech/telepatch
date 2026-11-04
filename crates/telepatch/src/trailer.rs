@@ -45,6 +45,7 @@ pub enum OpKind {
     Pkg,
     File,
     Group,
+    User,
     Sh,
 }
 
@@ -77,6 +78,14 @@ pub struct GroupResult {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct UserResult {
+    pub rc: i32,
+    pub changed: bool,
+    /// The account did not exist and this op made it.
+    pub created: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct ShellResult {
     pub rc: i32,
     pub changed: bool,
@@ -91,6 +100,9 @@ impl OpResult for FileResult {
 }
 impl OpResult for GroupResult {
     const KIND: OpKind = OpKind::Group;
+}
+impl OpResult for UserResult {
+    const KIND: OpKind = OpKind::User;
 }
 impl OpResult for ShellResult {
     const KIND: OpKind = OpKind::Sh;
@@ -158,7 +170,7 @@ __tp_emit() {
 pub fn render_op(op: &OpNode, id: usize, nonce: &str, os: &Os) -> String {
     let body = match &op.spec {
         crate::trace::OpSpec::Raw { script } => crate::ops::shell::raw_body(script),
-        spec => spec.script(os),
+        spec => spec.exec_script(os),
     };
     wrap(op.spec.op_kind(), &body, id, nonce)
 }
@@ -173,19 +185,19 @@ pub fn wrap(kind: OpKind, body: &str, id: usize, nonce: &str) -> String {
     let json = match kind {
         OpKind::Pkg => r#"{"rc":%s,"changed":%s,"installed":[%s]}"#,
         OpKind::File => r#"{"rc":%s,"changed":%s}"#,
-        OpKind::Group => r#"{"rc":%s,"changed":%s,"created":%s}"#,
+        OpKind::Group | OpKind::User => r#"{"rc":%s,"changed":%s,"created":%s}"#,
         OpKind::Sh => r#"{"rc":%s,"changed":%s,"skipped":%s}"#,
     };
     let args = match kind {
         OpKind::Pkg => r#""$rc" "$__tp_c" "$__tp_i""#,
         OpKind::File => r#""$rc" "$__tp_c""#,
-        OpKind::Group => r#""$rc" "$__tp_c" "$__tp_k""#,
+        OpKind::Group | OpKind::User => r#""$rc" "$__tp_c" "$__tp_k""#,
         OpKind::Sh => r#""$rc" "$__tp_c" "$__tp_s""#,
     };
     let mut o = String::from("(\n");
     o.push_str(PRELUDE);
-    if kind == OpKind::Group {
-        // Only a group op sets `created`; other kinds keep their bytes.
+    if matches!(kind, OpKind::Group | OpKind::User) {
+        // Only a group or user op sets `created`; other kinds keep their bytes.
         o.push_str("  case \"$created\" in 1) __tp_k=true;; *) __tp_k=false;; esac\n");
     }
     let _ = writeln!(o, "  printf '\\n__tp_{nonce} {id} {}\\n' {args}", json);

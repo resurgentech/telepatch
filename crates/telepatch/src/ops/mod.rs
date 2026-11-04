@@ -1,4 +1,4 @@
-//! Primitive op templates: `pkg`, `file`, `group`, `sh`. Each module holds the op's
+//! Primitive op templates: `pkg`, `file`, `group`, `user`, `sh`. Each module holds the op's
 //! spec (data, so T8 can merge it), its builder methods on [`Host`], and the
 //! script body it renders. [`crate::trailer`] wraps bodies for execution.
 //!
@@ -8,3 +8,4 @@ pub mod file;
 pub mod group;
 pub mod pkg;
 pub mod shell;
+pub mod user;

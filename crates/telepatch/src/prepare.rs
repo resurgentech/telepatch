@@ -385,6 +385,29 @@ pub async fn prepare_window<S: ShellSet>(
         root.send(id, &w).await.map_err(|e| e.to_string())?;
         group_id = Some(id);
     }
+    // Accounts, one probe for the window, on the root shell (a user op is
+    // root only).
+    let mut user_id = None;
+    let user_specs: Vec<&crate::ops::user::UserSpec> = window
+        .ops
+        .iter()
+        .filter_map(|op| match &op.node.spec {
+            OpSpec::User(u) => Some(u),
+            _ => None,
+        })
+        .collect();
+    if !user_specs.is_empty() {
+        let id = next();
+        let root = shell_of(shells, &Principal::Root)?;
+        let w = wrap(
+            OpKind::Sh,
+            &crate::ops::shell::raw_body(&crate::ops::user::probe(&user_specs)),
+            id,
+            root.nonce(),
+        );
+        root.send(id, &w).await.map_err(|e| e.to_string())?;
+        user_id = Some(id);
+    }
     // Non-distro probes, each in its op's RunAs and principal's shell (as
     // `read_facts` does).
     let mut src_ids: Vec<(&PkgSpec, &Principal, Option<usize>)> = Vec::new();
@@ -451,6 +474,20 @@ pub async fn prepare_window<S: ShellSet>(
                     window: window.number,
                     kind: "group".to_string(),
                     name,
+                    detail: None,
+                });
+            }
+        }
+    }
+    if let Some(id) = user_id {
+        let root = shell_of(shells, &Principal::Root)?;
+        if let Ok((_, out)) = collect(root, id).await {
+            for (name, detail) in crate::ops::user::findings(&out) {
+                will.will_create.push(WillCreate {
+                    window: window.number,
+                    kind: "user".to_string(),
+                    name,
+                    detail,
                 });
             }
         }

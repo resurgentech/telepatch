@@ -1,0 +1,68 @@
+---
+source: crates/telepatch/tests/user.rs
+expression: "render_host(\"h\", &h.os, &h.snapshot())"
+---
+host h (os: Debian/Debian 12)
+blocking reads: 0
+
+role (none)
+  #0 group as shell:root reads [] writes [group:docker] post [group:docker=Exists(true)]
+      | created=0
+      | tp_g='docker'
+      | if ! getent group "$tp_g" >/dev/null 2>&1; then
+      |   groupadd -- "$tp_g"
+      |   rc=$?
+      |   if [ "$rc" -eq 0 ]; then changed=1; created=1; fi
+      | fi
+  #1 user as shell:root reads [group:docker] writes [user:tpdev] post [user:tpdev=Exists(true)]
+      | created=0
+      | tp_u='tpdev'
+      | for tp_g in 'docker'; do
+      |   if ! getent group "$tp_g" >/dev/null 2>&1; then
+      |     echo "telepatch: user $tp_u: group $tp_g does not exist" >&2
+      |     rc=1
+      |   fi
+      | done
+      | if [ "$rc" -eq 0 ]; then
+      | if ! getent passwd "$tp_u" >/dev/null 2>&1; then
+      |   useradd -m -s '/bin/bash' -G 'docker' -- "$tp_u"
+      |   rc=$?
+      |   if [ "$rc" -eq 0 ]; then changed=1; created=1; fi
+      |   if [ "$rc" -eq 0 ]; then
+      |     printf '%s:%s\n' "$tp_u" '<hash>' | chpasswd -e
+      |     rc=$?
+      |   fi
+      | else
+      |   :
+      |   tp_cur=$(getent passwd "$tp_u" | cut -d: -f7)
+      |   if [ "$tp_cur" != '/bin/bash' ]; then
+      |     usermod -s '/bin/bash' -- "$tp_u"
+      |     rc=$?
+      |     if [ "$rc" -eq 0 ]; then changed=1; fi
+      |   fi
+      |   if [ "$rc" -eq 0 ]; then
+      |     tp_have=" $(id -nG "$tp_u") "
+      |     tp_add=
+      |     for tp_g in 'docker'; do
+      |       case "$tp_have" in *" $tp_g "*) ;; *) tp_add="$tp_add,$tp_g";; esac
+      |     done
+      |     if [ -n "$tp_add" ]; then
+      |       usermod -aG "${tp_add#,}" -- "$tp_u"
+      |       rc=$?
+      |       if [ "$rc" -eq 0 ]; then changed=1; fi
+      |     fi
+      |   fi
+      | fi
+      | fi
+  #2 user as shell:root reads [] writes [user:bare] post [user:bare=Exists(true)]
+      | created=0
+      | tp_u='bare'
+      | if [ "$rc" -eq 0 ]; then
+      | if ! getent passwd "$tp_u" >/dev/null 2>&1; then
+      |   useradd -m -- "$tp_u"
+      |   rc=$?
+      |   if [ "$rc" -eq 0 ]; then changed=1; created=1; fi
+      | else
+      |   :
+      | fi
+      | fi
