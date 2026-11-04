@@ -1,4 +1,4 @@
-//! The local transport: spawn `bash` on this machine, via `sudo -n bash`
+//! The local transport: spawn `bash` on this machine, via `sudo -n -H bash`
 //! unless already root. One shell, no PTY.
 
 use tokio::process::Command;
@@ -35,7 +35,7 @@ impl LocalTransport {
         self
     }
 
-    /// The sudo command to run (default `sudo`); called as `<sudo> -n bash`.
+    /// The sudo command to run (default `sudo`); called as `<sudo> -n -H bash`.
     pub fn sudo(mut self, cmd: &str) -> Self {
         self.sudo = cmd.to_string();
         self
@@ -87,7 +87,8 @@ impl Transport for LocalTransport {
         };
         let via_sudo = uid != 0;
         let argv: Vec<String> = if via_sudo {
-            vec![self.sudo.clone(), "-n".into(), "bash".into()]
+            // -H: root's HOME even under a caller's `!env_reset` (see ssh.rs).
+            vec![self.sudo.clone(), "-n".into(), "-H".into(), "bash".into()]
         } else {
             vec!["bash".into()]
         };

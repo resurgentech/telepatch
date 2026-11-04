@@ -52,7 +52,7 @@ enum Cmd {
     #[command(group(ArgGroup::new("target").required(true).args(["local", "host"])))]
     Run {
         name: String,
-        /// Apply to this machine (uid 0, else `sudo -n bash`).
+        /// Apply to this machine (uid 0, else `sudo -n -H bash`).
         #[arg(long)]
         local: bool,
         /// Apply over SSH to this destination (`user@host`, or

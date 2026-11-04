@@ -514,3 +514,15 @@ are appended, never edited in; a hook refuses rewrites.
   only (`check-conversion` ok, empty list). `just test-acceptance` 7/7
   identical (6 intended differences), 85m. Goal 5b's steps are done.
 - Commits: tp_basic da57d5a
+
+## 2026-11-04 — Root shell opens with `sudo -n -H` (telepatch, tp_basic)
+
+- T55's finding fixed: the root shell is `sudo -n -H bash` on SSH and
+  locally, so `HOME` is root's even under the admin drop-in's
+  `!env_reset`; before, root's mise wrote `/home/bot/.cache/mise`. Stub
+  sudos in three test suites demand `-H` and set `HOME=/root`; the
+  root-shell tests assert the argv and `$HOME`. `test-vm.sh` gates on no
+  mise warning and no foreign-owned file under each admin home. Live
+  `just test-vm ubuntu2404 dev_desktop`: run 2 `CHANGED 0`, 20/20
+  checks, no `tp-*` VM left.
+- Commits: see git log (telepatch, tp_basic)

@@ -218,11 +218,13 @@ async fn sudo_refusal_is_a_limit() {
 #[tokio::test]
 async fn sudo_that_execs_bash_gives_a_working_shell() {
     let d = tempfile::tempdir().unwrap();
-    // Real sudo is called as `sudo -n bash`.
+    // Real sudo is called as `sudo -n -H bash`: `-H` gives the root shell
+    // root's HOME even where sudoers says `!env_reset` for the caller. The
+    // stub refuses anything else and sets HOME the way sudo -H does.
     let sudo = script(
         d.path(),
         "sudo",
-        "[ \"$1\" = -n ] || exit 2\nshift\nexec \"$@\"",
+        "[ \"$1\" = -n ] && [ \"$2\" = -H ] || exit 2\nshift 2\nHOME=/root; export HOME\nexec \"$@\"",
     );
     let t = LocalTransport::new().uid(1000).sudo(&sudo);
     let mut s = t.open("local", &Principal::Root, 1).await;
@@ -230,8 +232,10 @@ async fn sudo_that_execs_bash_gives_a_working_shell() {
     let sh = &mut s.got[0];
     let h = host();
     h.raw("echo hi");
+    h.raw("echo \"$HOME\"");
     let ids = send_all(sh, &h).await;
     assert_eq!(sh.wait(ids[0]).await.unwrap().output, b"hi\n");
+    assert_eq!(sh.wait(ids[1]).await.unwrap().output, b"/root\n");
 }
 
 #[tokio::test]

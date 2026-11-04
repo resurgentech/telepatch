@@ -17,7 +17,7 @@
 //!
 //! `open(host, Root, n)`: each channel's hello proves the connection; then
 //! `id -u`; if not 0, `sudo -n true` (refusal is [`Limit::SudoRefused`]),
-//! then `exec sudo -n bash` and a second hello. The ssh-side text behind
+//! then `exec sudo -n -H bash` and a second hello. The ssh-side text behind
 //! the last [`Limit`] for a host is kept for the report:
 //! [`SshTransport::message`].
 //!
@@ -407,8 +407,12 @@ impl SshTransport {
                 };
                 return Err((Limit::SudoRefused, text));
             }
-            if let Err(e) = sh.exec("sudo -n bash", "root").await {
-                return Err((Limit::SudoRefused, format!("exec sudo -n bash: {e}")));
+            // `-H`: root's HOME, not the login user's. A sudoers
+            // `Defaults:<u> !env_reset` (the admin drop-in) would otherwise
+            // leave HOME=/home/<u>, and tools run as root (mise, uv) would
+            // write their caches and installs into that user's home.
+            if let Err(e) = sh.exec("sudo -n -H bash", "root").await {
+                return Err((Limit::SudoRefused, format!("exec sudo -n -H bash: {e}")));
             }
         }
         Ok(sh)

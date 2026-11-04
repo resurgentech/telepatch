@@ -114,6 +114,8 @@ printf '%s\n' "$*" >> "$TP_STUB_DIR/sudo.log"
 [ "$1" = -n ] || exit 2
 shift
 if [ -n "$TP_STUB_SUDO_FAIL" ]; then echo "sudo: a password is required" >&2; exit 1; fi
+# -H: the target's home, as real sudo sets it even under `!env_reset`.
+if [ "$1" = -H ]; then shift; HOME=/root; export HOME; fi
 if [ "$1" = -iu ]; then
   [ -z "$TP_STUB_NO_USER" ] || { echo "sudo: unknown user $2" >&2; exit 1; }
   [ -z "$TP_STUB_NOLOGIN" ] || { echo "This account is currently not available."; exit 1; }
@@ -383,9 +385,16 @@ async fn non_root_login_becomes_root_through_sudo() {
     assert!(s.limit.is_none(), "{:?} {:?}", s.limit, t.message("bot@h"));
     let mut sh = s.got.remove(0);
     assert_eq!(sh.user(), "root");
-    assert_eq!(stub.sudo_log(), "-n true\n-n bash\n");
-    // The shell is the sudo'd bash: fake id now says 0.
+    // `-H`: root's shell gets root's HOME. Without it a sudoers
+    // `Defaults:bot !env_reset` leaves HOME=/home/bot, and root-run tools
+    // (mise's cache, uv's install) write into the login user's home.
+    assert_eq!(stub.sudo_log(), "-n true\n-n -H bash\n");
+    // The shell is the sudo'd bash: fake id now says 0, HOME is root's.
     assert_eq!(run(&mut sh, "id -u").await, (0, "0\n".to_string()));
+    assert_eq!(
+        run(&mut sh, "echo \"$HOME\"").await,
+        (0, "/root\n".to_string())
+    );
     sh.close().await;
     t.close().await;
 }

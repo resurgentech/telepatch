@@ -1,6 +1,6 @@
 //! The shell pool: a persistent shell process you talk to over stdin/stdout.
 //!
-//! [`Shell::spawn`] runs any argv (`bash`, `sudo -n bash`, later
+//! [`Shell::spawn`] runs any argv (`bash`, `sudo -n -H bash`, later
 //! `docker exec -i ctr bash`, `ssh host bash`) and speaks the trailer
 //! protocol of [`crate::trailer`] with it. Transports differ only in the
 //! argv; everything else lives here.
@@ -200,7 +200,7 @@ impl Shell {
     /// Replace the shell process with `command` (written as `exec
     /// <command>`, so it reads the rest of stdin) and redo the hello
     /// handshake; on success the shell is `user`. Used to turn a login
-    /// shell into root with `sudo -n bash`. No op may be in flight. On
+    /// shell into root with `sudo -n -H bash`. No op may be in flight. On
     /// failure the shell is dead.
     pub async fn exec(&mut self, command: &str, user: &str) -> Result<(), ShellError> {
         let script = format!(

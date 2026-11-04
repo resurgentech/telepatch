@@ -152,7 +152,7 @@ rust_build run  rust_build --host bot@10.0.0.7 --host bot@10.0.0.8 --vars v.toml
 `plan --distro` renders against an embedded os-release fixture for any of
 the fifteen supported distro releases, so you can see what a host would get
 without having one. `run --local` applies to the machine the binary is on, as
-root or through `sudo -n`. `run --host` applies over SSH to each destination
+root or through `sudo -n -H`. `run --host` applies over SSH to each destination
 in parallel, with your ssh config, agent and keys, or `--ssh-key` and
 `--ssh-option K=V` when you want to be explicit.
 
@@ -173,7 +173,7 @@ in parallel, with your ssh config, agent and keys, or `--ssh-key` and
    shell itself; later roles on it are reported as not run.
 
 Over SSH, telepatch opens one multiplexed connection per host and runs every
-shell as a channel on it: a root shell through `sudo -n`, and a login shell
+shell as a channel on it: a root shell through `sudo -n -H`, and a login shell
 per user through `sudo -n -iu`. When the server's session limit is hit it
 opens another connection rather than failing. Authentication, host keys and
 proxies are the user's ssh binary's business, exactly as they are for `ssh`
@@ -193,7 +193,7 @@ The full design, including the parts not built yet, is in
 | `sh!` with `unless`, `creates`, `changed_if`; `raw`; `barrier` | Built |
 | `as_user` | Built; a persistent login shell per user over SSH, a fresh login environment per op elsewhere |
 | Facts: `os`, `exists`, `bin_exists`, `bin_version` | Built; `os` from os-release across 15 distro releases |
-| Transports | Local (`bash`, `sudo -n bash`), `docker exec`, SSH (multiplexed, root and per-user shells) |
+| Transports | Local (`bash`, `sudo -n -H bash`), `docker exec`, SSH (multiplexed, root and per-user shells) |
 | CLI (`list`, `plan`, `run --local`, `run --host …`), JSONL log, static musl binaries | Built |
 | Guards (`.when(op.changed())`) | Traced and planned; the executor refuses them at prepare |
 | `repo`, `svc`, `user`, `fetch`, `git`, `secret` | Designed, not built |

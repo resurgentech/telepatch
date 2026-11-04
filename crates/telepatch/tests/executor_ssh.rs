@@ -87,6 +87,7 @@ const SUDO: &str = r#"
 printf '%s\n' "$*" >> "$TP_STUB_DIR/sudo.log"
 [ "$1" = -n ] || exit 2
 shift
+if [ "$1" = -H ]; then shift; HOME=/root; export HOME; fi
 if [ "$1" = -iu ]; then
   [ -z "$TP_STUB_NO_USER" ] || { echo "sudo: unknown user $2" >&2; exit 1; }
   shift 2
