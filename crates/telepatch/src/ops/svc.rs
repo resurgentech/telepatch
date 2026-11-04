@@ -302,6 +302,14 @@ pub fn findings_after(wants: &[Want], output: &str, earlier: bool) -> Vec<(Strin
             out.push((w.key.clone(), detail.to_string()));
             continue;
         }
+        if earlier && state(&en, &w.unit) == Some("not-found") {
+            out.push((
+                w.key.clone(),
+                "unit not found yet: decided at run time, after this window's earlier ops"
+                    .to_string(),
+            ));
+            continue;
+        }
         let en_needed = w.enabled
             && state(&en, &w.unit)
                 .is_some_and(|s| !matches!(s, "enabled" | "enabled-runtime" | "static" | "alias"));
@@ -359,6 +367,27 @@ mod tests {
             "systemctl yes\nbooted yes\nenabled - docker\nactive - docker\n",
         );
         assert!(f.is_empty(), "{f:?}");
+    }
+
+    #[test]
+    fn findings_unit_not_found_after_earlier_ops_is_decided_at_run_time() {
+        let w = wants(&[SvcSpec {
+            unit: "docker".into(),
+            enabled: true,
+            started: true,
+        }]);
+        let out = "systemctl yes\nbooted yes\nenabled not-found docker\nactive inactive docker\n";
+        assert_eq!(
+            findings_after(&w, out, true),
+            [(
+                "docker.service".into(),
+                "unit not found yet: decided at run time, after this window's earlier ops".into()
+            )]
+        );
+        assert_eq!(
+            findings_after(&w, out, false),
+            [("docker.service".into(), "will enable, will start".into())]
+        );
     }
 
     #[test]
