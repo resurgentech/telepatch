@@ -21,7 +21,7 @@ use crate::optimize::{Item, optimize};
 use crate::plan::node_roles;
 use crate::resolver::Resolved;
 use crate::role::Playbook;
-use crate::trace::{Node, NodeId, OpNode, OpSpec};
+use crate::trace::{Node, NodeId, OpNode, OpSpec, Principal};
 
 /// The host an executor call is about.
 #[derive(Debug, Clone)]
@@ -175,8 +175,15 @@ impl<E: Executor> Engine<E> {
                 Poll::Ready(Err(e)) => return Err(EngineError::Playbook(e)),
                 Poll::Ready(Ok(())) => {
                     let ids = pending_ids(&host);
-                    self.apply(&info, &host, window, WindowKind::Final, ids, &mut apt_stale)
-                        .await?;
+                    self.apply(
+                        &info,
+                        &host,
+                        &mut window,
+                        WindowKind::Final,
+                        ids,
+                        &mut apt_stale,
+                    )
+                    .await?;
                     return Ok(());
                 }
                 Poll::Pending => {
@@ -190,7 +197,7 @@ impl<E: Executor> Engine<E> {
                             queries.push(w.query.clone());
                         }
                     }
-                    self.block_round(&info, &host, window, &queries, &mut apt_stale)
+                    self.block_round(&info, &host, &mut window, &queries, &mut apt_stale)
                         .await?;
                     let values = self.executor.read_facts(&info, window, &queries).await;
                     for w in &waiting {
@@ -218,7 +225,7 @@ impl<E: Executor> Engine<E> {
         &mut self,
         info: &HostInfo,
         host: &Host<V>,
-        window: usize,
+        window: &mut usize,
         queries: &[FactQuery],
         apt_stale: &mut bool,
     ) -> Result<(), EngineError> {
@@ -233,7 +240,17 @@ impl<E: Executor> Engine<E> {
         )
         .await?;
 
-        let keys: Vec<Key> = queries.iter().map(|q| q.fact.effect_key()).collect();
+        let mut keys: Vec<Key> = queries.iter().map(|q| q.fact.effect_key()).collect();
+        // A read in u's principal needs u to exist, so a pending `user` op
+        // for u is applied before the read like any writer it depends on.
+        for q in queries {
+            if let Principal::User(u) = &q.run_as.principal {
+                let k = Key::user(u);
+                if !keys.contains(&k) {
+                    keys.push(k);
+                }
+            }
+        }
         let upto = {
             let trace = host.trace_cell().borrow();
             let resolver = host.resolver_cell().borrow();
@@ -258,7 +275,7 @@ impl<E: Executor> Engine<E> {
             self.executor.observe(
                 info,
                 &Observation::ImplicitBarrier {
-                    window,
+                    window: *window,
                     reads: keys,
                 },
             );
@@ -276,6 +293,31 @@ impl<E: Executor> Engine<E> {
     }
 
     async fn apply<V>(
+        &mut self,
+        info: &HostInfo,
+        host: &Host<V>,
+        window: &mut usize,
+        kind: WindowKind,
+        mut ids: Vec<NodeId>,
+        apt_stale: &mut bool,
+    ) -> Result<(), EngineError> {
+        // One window per piece: an op addressed to a user the run creates
+        // starts the next window, so prepare checks that user after it
+        // exists. Without a `user` op the whole of `ids` is one piece.
+        while !ids.is_empty() {
+            let cut = user_split(host, &ids);
+            let rest = ids.split_off(cut);
+            self.apply_one(info, host, *window, kind, ids, apt_stale)
+                .await?;
+            ids = rest;
+            if !ids.is_empty() {
+                *window += 1;
+            }
+        }
+        Ok(())
+    }
+
+    async fn apply_one<V>(
         &mut self,
         info: &HostInfo,
         host: &Host<V>,
@@ -329,6 +371,30 @@ impl<E: Executor> Engine<E> {
     }
 }
 
+/// Where to end the window that would run `ids`: the index of the first op
+/// addressed to `User(u)` that follows an op in `ids` writing `user:u`
+/// (`ids.len()` when there is none).
+fn user_split<V>(host: &Host<V>, ids: &[NodeId]) -> usize {
+    let trace = host.trace_cell().borrow();
+    let mut created: BTreeSet<&str> = BTreeSet::new();
+    for (i, id) in ids.iter().enumerate() {
+        let Some(Node::Op(op)) = trace.nodes.get(id.0) else {
+            continue;
+        };
+        if let Principal::User(u) = &op.run_as.principal
+            && created.contains(u.as_str())
+        {
+            return i;
+        }
+        for w in &op.writes {
+            if let Key::User(n) = w {
+                created.insert(n.as_str());
+            }
+        }
+    }
+    ids.len()
+}
+
 fn pending_ids<V>(host: &Host<V>) -> Vec<NodeId> {
     let trace = host.trace_cell().borrow();
     let resolver = host.resolver_cell().borrow();
@@ -361,7 +427,9 @@ fn non_mutating_ready<V>(host: &Host<V>) -> Vec<NodeId> {
                     let blocked = op
                         .reads
                         .iter()
-                        .any(|r| mutation_writes.iter().any(|w| w.overlaps(r)));
+                        .any(|r| mutation_writes.iter().any(|w| w.overlaps(r)))
+                        || matches!(&op.run_as.principal, Principal::User(u)
+                            if mutation_writes.contains(&&Key::user(u)));
                     if !fenced && !blocked && op.guard.is_none() {
                         out.push(NodeId(i));
                     }

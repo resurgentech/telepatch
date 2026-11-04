@@ -197,3 +197,44 @@ fn explicit_barrier_does_not_force_execution() {
     }
     insta::assert_snapshot!(go(run, FakeExecutor::new()));
 }
+
+#[test]
+fn user_created_then_as_user_op_splits_the_window() {
+    fn run(h: Host<()>) -> PlaybookFuture {
+        Box::pin(async move {
+            h.user("alice");
+            h.raw("echo root before");
+            h.as_user("alice").raw("cargo install x");
+            h.raw("echo root after");
+            Ok::<(), TraceError>(())
+        })
+    }
+    insta::assert_snapshot!(go(run, FakeExecutor::new()));
+}
+
+#[test]
+fn user_created_then_as_user_fact_read_applies_the_user_first() {
+    fn run(h: Host<()>) -> PlaybookFuture {
+        Box::pin(async move {
+            h.user("alice");
+            let v = h.as_user("alice").bin_version("cargo").await;
+            assert_eq!(v, None);
+            Ok::<(), TraceError>(())
+        })
+    }
+    insta::assert_snapshot!(go(run, FakeExecutor::new()));
+}
+
+#[test]
+fn as_user_op_without_a_user_op_stays_in_one_window() {
+    fn run(h: Host<()>) -> PlaybookFuture {
+        Box::pin(async move {
+            h.raw("echo root before");
+            h.as_user("alice").raw("cargo install x");
+            h.user("bob");
+            h.raw("echo root after");
+            Ok::<(), TraceError>(())
+        })
+    }
+    insta::assert_snapshot!(go(run, FakeExecutor::new()));
+}

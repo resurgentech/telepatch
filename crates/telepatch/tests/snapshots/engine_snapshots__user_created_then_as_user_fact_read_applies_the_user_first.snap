@@ -1,0 +1,13 @@
+---
+source: crates/telepatch/tests/engine_snapshots.rs
+expression: "go(run, FakeExecutor::new())"
+---
+host web1
+window 1
+  -- implicit barrier: read of bin:cargo, user:alice needs pending writes --
+  apply (implicit barrier):
+    #0 user as shell:root: created=0 ; tp_u='alice' ; if [ "$rc" -eq 0 ]; then ; if ! getent passwd "$tp_u" >/dev/null 2>&1; then ;   useradd -m -- "$tp_u" ;   rc=$? ;   if [ "$rc" -eq 0 ]; then changed=1; created=1; fi ; else ;   : ; fi ; fi ; 
+  round trip:
+    read bin_version(cargo) as login:alice = Absent [Block]
+
+blocking reads: 1

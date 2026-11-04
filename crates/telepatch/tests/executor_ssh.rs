@@ -458,3 +458,45 @@ fn local_target_blocks_a_user_window_with_the_transport_limit() {
         assert!(!d.path().join("marker").exists(), "{name}: nothing applied");
     }
 }
+
+/// `h.user(u)` then `as_user(u)` in one role: the engine ends the window
+/// before the as_user op, so the `getent` check and the user's shell come
+/// after the account exists (the stub's `u` already exists, so the user op
+/// is a no-op here; what shows is where the check runs).
+#[test]
+fn user_created_by_the_run_is_checked_and_opened_in_window_two() {
+    fn pb_(h: Host<Vars>) -> PlaybookFuture {
+        Box::pin(async move {
+            h.user(&h.vars.user);
+            let u = h.as_user(&h.vars.user);
+            sh!(u, "echo MARK_USER_AFTER_CREATE");
+            Ok(())
+        })
+    }
+    let stub = Stub::new();
+    let pb = Playbook {
+        name: "created",
+        run: pb_,
+    };
+    let (r, out) = go(&pb, &stub, stub.transport());
+    assert_eq!(r.exit_code(), 0, "{}\n{out}", r.render());
+    assert_eq!(
+        stub.ran("MARK_USER_AFTER_CREATE"),
+        [user_remote()],
+        "{:#?}",
+        stub.channels()
+    );
+    let root = stub
+        .channels()
+        .into_iter()
+        .find(|(r, _)| r == ROOT)
+        .unwrap()
+        .1;
+    let create = root.find("useradd").expect("user op sent on root");
+    let check = root.find("echo \"ok \"").expect("users check sent");
+    assert!(
+        create < check,
+        "check ran before the account was made:\n{root}"
+    );
+    assert_eq!(survivors(&stub.pids()), Vec::<u32>::new());
+}

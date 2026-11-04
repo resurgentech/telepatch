@@ -1,0 +1,15 @@
+---
+source: crates/telepatch/tests/engine_snapshots.rs
+expression: "go(run, FakeExecutor::new())"
+---
+host web1
+window 1
+  apply (final):
+    #0 user as shell:root: created=0 ; tp_u='alice' ; if [ "$rc" -eq 0 ]; then ; if ! getent passwd "$tp_u" >/dev/null 2>&1; then ;   useradd -m -- "$tp_u" ;   rc=$? ;   if [ "$rc" -eq 0 ]; then changed=1; created=1; fi ; else ;   : ; fi ; fi ; 
+    #1 sh as shell:root: echo root before
+window 2
+  apply (final):
+    #2 sh as login:alice: cargo install x
+    #3 sh as shell:root: echo root after
+
+blocking reads: 0

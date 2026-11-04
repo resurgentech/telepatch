@@ -143,3 +143,48 @@ fn ssh_exec_routes_principals_against_sshd() {
         none_left();
     }
 }
+
+fn dave_pb(h: Host<()>) -> PlaybookFuture {
+    Box::pin(async move {
+        h.user("dave").shell("/bin/bash");
+        let d = h.as_user("dave");
+        sh!(
+            d,
+            "id -un > ~/whoami; printf '%s\\n' \"$HOME\" >> ~/whoami",
+            creates = "/home/dave/whoami"
+        );
+        Ok(())
+    })
+}
+
+/// An account the run creates is then addressed with `as_user` in the same
+/// run: the engine ends the window after the `user` op, so prepare's
+/// `getent` check and the `sudo -n -iu dave` shell come after `useradd`.
+#[test]
+#[ignore = "needs docker and the network"]
+fn ssh_exec_runs_as_a_user_the_run_creates() {
+    let _serial = SERIAL.blocking_lock();
+    let d = Sshd::start();
+    assert_eq!(exec(&d, "getent passwd dave || echo none"), "none\n");
+    let pb = Playbook {
+        name: "dave",
+        run: dave_pb,
+    };
+
+    let r1 = go(&d, &pb);
+    assert_eq!(r1.hosts[0].status, HostStatus::Changed, "{}", r1.render());
+    assert_eq!(
+        exec(&d, "cat /home/dave/whoami"),
+        "dave\n/home/dave\n",
+        "{}",
+        r1.render()
+    );
+    none_left();
+
+    let r2 = go(&d, &pb);
+    assert_eq!(r2.hosts[0].status, HostStatus::Ok, "{}", r2.render());
+    let changed = r2.hosts[0].ops.iter().filter(|o| o.changed).count();
+    assert_eq!(changed, 0, "{}", r2.render());
+    println!("second run: changed {changed}");
+    none_left();
+}
