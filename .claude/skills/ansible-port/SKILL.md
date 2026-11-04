@@ -160,12 +160,16 @@ the reviewer's.
   requests. The oracle compares installed names, which can differ
   (`gnupg` resolves through provides on RedHat). Say so wherever it
   applies.
-- **Equivalence first, with the bugs named.** Branches no image reaches
-  are dropped and recorded. Bugs the oracle cannot see are fixed in the
-  port and listed. Changes that would show in the oracle's diff are
-  recorded under "after equivalence". A primitive gap is none of these:
-  it is its own list, with a recommendation to build first or port with a
-  marked hack.
+- **Port the intent, with the bugs named.** The port does what each task
+  was for, not what its text happened to do; "port as is" is never an
+  option offered to the reviewer. Branches no image reaches are dropped
+  and recorded. Every bug the doc finds is fixed in the port: the ones
+  the oracle cannot see are listed as such; the ones that change what
+  the oracle sees are listed under "Intended differences" and declared
+  to the oracle (`tests/oracle/intended/<container>.txt` in the playbook
+  repo), one line per capture line, with the bug named. A primitive gap
+  is none of these: it is its own list, with a recommendation to build
+  first or port with a marked hack.
 
 ## Modes
 

@@ -183,7 +183,10 @@ the port and in what the oracle sees. Then the four lists:
 - Bugs the oracle cannot see, fixed in the port. If there are none, write
   "none found". An unguarded installer, a check that never matched, a
   user looped twice: these are bugs, not style.
-- After equivalence (change what the oracle sees; not made yet).
+- Intended differences: bugs fixed in the port that change what the
+  oracle sees, each with the capture line it adds or removes, so the
+  port can declare it to the oracle. A port never carries a known bug
+  to keep the diff empty.
 - Primitive gaps, carried from level 3, each with "build first" or
   "marked hack" and the reason.
 - Built-primitive defects, carried from level 3, each with the hack the

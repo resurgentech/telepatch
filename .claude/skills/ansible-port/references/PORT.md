@@ -220,9 +220,13 @@ conventions the hand ports settled:
 - **Idempotency.** An op that reruns when its end state is already
   reached is a bug the oracle cannot see, and the doc lists it as one;
   the port fixes it (`creates`, `unless`, or the right primitive) and
-  says so in the comment. Only a change that alters what the oracle
-  compares (a different package, a pinned version where the YAML took
-  latest) waits for "after equivalence".
+  says so in the comment. A fix that alters what the oracle compares (a
+  dropped duplicate line, a kept distro default, a different package) is
+  made too and declared as an intended difference in the oracle's
+  intended file, one line per capture line, with the bug named in a `#`
+  comment; the doc's "Intended differences" list is the source. Only a
+  change that is not a fix of the task's intent (a pinned version where
+  the YAML took latest, a tool swap) waits for the reviewer's decision.
 - **Comments are the understanding.** Each kept fact becomes one comment
   naming the reason, with the YAML `file:line` range (`debian.yml:1-50`),
   next to what implements it. Do not paste YAML.
@@ -307,7 +311,7 @@ In `## Port notes` write: the code files; what each YAML task became (by
 row; the plan snapshot files;
 per distro run, the gating diff verbatim or "empty", and a one-line read
 of the versions diff; each decision that was the agent's (agent-alone);
-each "after equivalence" item left as a comment. A port with TODOs left
+each intended difference and the oracle line that declares it. A port with TODOs left
 unresolved is not done: list them under Open.
 
 ### 7. After green

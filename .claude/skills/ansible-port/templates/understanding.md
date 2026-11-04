@@ -91,8 +91,8 @@ Dropped branches (no image reaches them): <list or none>.
 
 Bugs the oracle cannot see (fixed in the port): <list or none found>.
 
-After equivalence (change what the oracle sees; not made yet): <list or
-none>.
+Intended differences (bugs fixed in the port that the oracle sees, each
+with the capture line it adds or removes): <list or none>.
 
 Primitive gaps: <each with "build first" or "marked hack" and why; or
 none>.
