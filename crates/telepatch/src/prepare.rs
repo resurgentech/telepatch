@@ -275,6 +275,22 @@ pub fn svc_wants(window: &Window) -> Vec<crate::ops::svc::Want> {
     }))
 }
 
+/// True when an op that can install software (a package of any source, a
+/// `sh`, a file) comes before the window's first `svc` op: the svc probe
+/// runs before it, so what it finds missing may exist by run time.
+pub fn svc_after_installers(window: &Window) -> bool {
+    for op in &window.ops {
+        match &op.node.spec {
+            OpSpec::Svc(_) => return false,
+            OpSpec::Pkg(_) | OpSpec::Shell(_) | OpSpec::Raw { .. } | OpSpec::File(_) => {
+                return true;
+            }
+            OpSpec::Group(_) | OpSpec::User(_) | OpSpec::Repo(_) => {}
+        }
+    }
+    false
+}
+
 /// Run `script` in `shell` as a plain op with id `id`; its rc and output.
 pub async fn probe(shell: &mut Shell, id: usize, script: &str) -> Result<(i32, String), String> {
     let wrapped = wrap(
@@ -558,7 +574,8 @@ pub async fn prepare_window<S: ShellSet>(
         // Gather only: a failed probe reports nothing.
         let root = shell_of(shells, &Principal::Root)?;
         if let Ok((_, out)) = collect(root, id).await {
-            for (name, detail) in crate::ops::svc::findings(&svc_list, &out) {
+            let earlier = svc_after_installers(window);
+            for (name, detail) in crate::ops::svc::findings_after(&svc_list, &out, earlier) {
                 will.will_create.push(WillCreate {
                     window: window.number,
                     kind: "svc".to_string(),

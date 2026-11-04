@@ -571,3 +571,44 @@ fn svc_will_create_is_a_json_event() {
     assert_eq!(ev["detail"], "will enable, will start");
     assert_eq!(ev["host"], "h1");
 }
+
+/// No systemctl when prepare looks, but an earlier op of the same window
+/// can bring it (a package, a `sh`, a file): prepare must not promise a
+/// skip, since the script decides at run time. Here a file op writes the
+/// stub `systemctl` into the PATH dir, and the svc op then enables.
+#[test]
+fn executor_no_systemctl_yet_is_decided_at_run_time() {
+    fn run_(h: Host<PathBuf>) -> PlaybookFuture {
+        Box::pin(async move {
+            let stub = std::fs::read(h.vars.join("bin/systemctl")).unwrap();
+            let target = h.vars.join("nosys/systemctl");
+            h.file(&target.display().to_string())
+                .content(stub)
+                .mode(0o755);
+            h.svc("docker").enabled().started();
+            Ok(())
+        })
+    }
+    let pb = Playbook {
+        name: "svc",
+        run: run_,
+    };
+    let d = tempfile::tempdir().unwrap();
+    stubs(d.path());
+    let bin = no_systemctl_bin(d.path());
+    let (r1, out1) = go(&pb, d.path(), &bin, false);
+    assert_eq!(r1.exit_code(), 0, "{}\n{out1}", r1.render());
+    assert!(
+        out1.contains(
+            "== h1 [prepare] svc docker.service: no systemctl yet: decided at run time, after this window's earlier ops =="
+        ),
+        "{out1}"
+    );
+    assert!(!out1.contains("no systemctl: skipped"), "{out1}");
+    assert_eq!(
+        std::fs::read_to_string(d.path().join("state"))
+            .unwrap()
+            .trim(),
+        "enabled"
+    );
+}

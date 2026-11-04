@@ -258,8 +258,17 @@ fn state<'a>(v: &[(&'a str, &'a str)], u: &str) -> Option<&'a str> {
 }
 
 /// `(key, detail)` per unit that has something to say, from [`probe`]'s
-/// output. A unit whose answers are missing or empty is left out.
+/// output, for a window where nothing that could install `systemctl` runs
+/// before the svc ops. A unit whose answers are missing or empty is left out.
 pub fn findings(wants: &[Want], output: &str) -> Vec<(String, String)> {
+    findings_after(wants, output, false)
+}
+
+/// As [`findings`]; `earlier` says an op that can install software (a
+/// package, a `sh`, a file) runs before the window's first svc op. Then a
+/// missing `systemctl` is not a promised skip: the probe ran before those
+/// ops, and the script decides at run time from what the host has then.
+pub fn findings_after(wants: &[Want], output: &str, earlier: bool) -> Vec<(String, String)> {
     let mut systemctl = None;
     let mut booted = None;
     let mut en: Vec<(&str, &str)> = Vec::new();
@@ -285,7 +294,12 @@ pub fn findings(wants: &[Want], output: &str) -> Vec<(String, String)> {
     let mut out = Vec::new();
     for w in wants {
         if !systemctl {
-            out.push((w.key.clone(), "no systemctl: skipped".to_string()));
+            let detail = if earlier {
+                "no systemctl yet: decided at run time, after this window's earlier ops"
+            } else {
+                "no systemctl: skipped"
+            };
+            out.push((w.key.clone(), detail.to_string()));
             continue;
         }
         let en_needed = w.enabled
@@ -345,5 +359,26 @@ mod tests {
             "systemctl yes\nbooted yes\nenabled - docker\nactive - docker\n",
         );
         assert!(f.is_empty(), "{f:?}");
+    }
+
+    #[test]
+    fn findings_no_systemctl_after_earlier_ops_is_not_a_skip() {
+        let w = wants(&[SvcSpec {
+            unit: "docker".into(),
+            enabled: true,
+            started: true,
+        }]);
+        let out = "systemctl no\nbooted no\n";
+        assert_eq!(
+            findings_after(&w, out, false),
+            [("docker.service".into(), "no systemctl: skipped".into())]
+        );
+        assert_eq!(
+            findings_after(&w, out, true),
+            [(
+                "docker.service".into(),
+                "no systemctl yet: decided at run time, after this window's earlier ops".into()
+            )]
+        );
     }
 }
