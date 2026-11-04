@@ -547,3 +547,29 @@ are appended, never edited in; a hook refuses rewrites.
   ignored elsewhere, malformed scope fails with file:line; unscoped
   lines unchanged. 12 new self-tests; `just test-oracle-selftest` 57 ok.
 - Commits: tp_basic 8bef5fe
+
+## 2026-11-04 — T60 `svc` in the docker and vm_server roles (tp_basic)
+
+- docker: `h.svc("docker").enabled().started()` on every family;
+  vm_server: one socket per kit (`libvirtd.socket` Debian/Arch,
+  `virtqemud.socket` RedHat/Amazon). No `HACK(svc)` left; the `sh`
+  barriers go, so on Fedora/EL and Arch the libvirt packages merge into
+  docker's pkg op. 13 `dev_desktop` snapshots move; 65 others byte for
+  byte.
+- Commits: tp_basic efe666b
+
+## 2026-11-04 — T61 svc proofs: Ubuntu VM and init-less containers (tp_basic, telepatch)
+
+- `desktop_services` playbook (curl, ca-certificates, docker, vm_server;
+  13 snapshots) and `just test-services <distro>` (plain container, two
+  runs). ubuntu2404 and rockylinux10: run 2 `CHANGED 0`, docker and the
+  libvirt socket `enabled`; rockylinux10's svc docker enabled offline.
+- `just test-vm ubuntu2404 dev_desktop`: run 1 ok; `disable --now
+  docker`; run 2 `CHANGED 1`, the svc op (`will enable, will start`);
+  run 3 `CHANGED 0`; 24 checks incl. is-enabled/is-active of docker and
+  libvirtd.socket; no `tp-*` VM left.
+- Engine fixes found by the runs: prepare no longer promises `no
+  systemctl: skipped`, or `will enable` for a not-found unit, when a pkg,
+  sh or file op precedes the window's svc ops (`…yet: decided at run
+  time, after this window's earlier ops`).
+- Commits: tp_basic 4f71d29; telepatch 9ad103c, b451246
