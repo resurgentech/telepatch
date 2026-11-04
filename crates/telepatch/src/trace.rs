@@ -84,6 +84,8 @@ pub enum OpSpec {
     User(crate::ops::user::UserSpec),
     /// A package repository (`h.repo`).
     Repo(crate::ops::repo::RepoSpec),
+    /// A systemd unit enabled and/or started (`h.svc`).
+    Svc(crate::ops::svc::SvcSpec),
 }
 
 impl OpSpec {
@@ -96,6 +98,7 @@ impl OpSpec {
             OpSpec::Group(_) => "group",
             OpSpec::User(_) => "user",
             OpSpec::Repo(_) => "repo",
+            OpSpec::Svc(_) => "svc",
         }
     }
 
@@ -109,6 +112,7 @@ impl OpSpec {
             OpSpec::Group(_) => OpKind::Group,
             OpSpec::User(_) => OpKind::User,
             OpSpec::Repo(_) => OpKind::Repo,
+            OpSpec::Svc(_) => OpKind::Svc,
         }
     }
 
@@ -132,6 +136,7 @@ impl OpSpec {
             OpSpec::File(f) => f.render(),
             OpSpec::Group(g) => g.render(),
             OpSpec::Repo(r) => r.render(),
+            OpSpec::Svc(s) => s.render(),
         }
     }
 
@@ -144,6 +149,7 @@ impl OpSpec {
             OpSpec::Group(g) => BTreeSet::from([Key::group(&g.name)]),
             OpSpec::User(u) => BTreeSet::from([Key::user(&u.name)]),
             OpSpec::Repo(r) => r.default_writes(),
+            OpSpec::Svc(s) => BTreeSet::from([Key::svc(s.key_name())]),
         }
     }
 
@@ -160,6 +166,7 @@ impl OpSpec {
             OpSpec::Group(g) => BTreeMap::from([(Key::group(&g.name), Value::Exists(true))]),
             OpSpec::User(u) => BTreeMap::from([(Key::user(&u.name), Value::Exists(true))]),
             OpSpec::Repo(r) => r.default_post(),
+            OpSpec::Svc(s) => BTreeMap::from([(Key::svc(s.key_name()), Value::Exists(true))]),
         }
     }
 }

@@ -69,6 +69,13 @@ test-live-user:
 test-live-repo:
     cargo test -p telepatch --test live -- --ignored --nocapture repo_
 
+# Live: the svc primitive on ubuntu:24.04 and rockylinux/rockylinux:10 in
+# plain containers with no init: skipped without systemctl; with systemd
+# installed, the unit is enabled offline and the start is skipped; second
+# run must change nothing. Needs docker and the network (apt/dnf).
+test-live-svc:
+    cargo test -p telepatch --test live -- --ignored --nocapture svc_
+
 # Build examples/hello for musl and fail unless the binary is static; then
 # smoke-test it.
 musl-example:

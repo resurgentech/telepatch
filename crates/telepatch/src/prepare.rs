@@ -267,6 +267,14 @@ pub fn group_names(window: &Window) -> Vec<String> {
     out
 }
 
+/// What the window's `svc` ops want, merged per unit key.
+pub fn svc_wants(window: &Window) -> Vec<crate::ops::svc::Want> {
+    crate::ops::svc::wants(window.ops.iter().filter_map(|op| match &op.node.spec {
+        OpSpec::Svc(s) => Some(s),
+        _ => None,
+    }))
+}
+
 /// Run `script` in `shell` as a plain op with id `id`; its rc and output.
 pub async fn probe(shell: &mut Shell, id: usize, script: &str) -> Result<(i32, String), String> {
     let wrapped = wrap(
@@ -431,6 +439,23 @@ pub async fn prepare_window<S: ShellSet>(
         root.send(id, &w).await.map_err(|e| e.to_string())?;
         repo_id = Some(id);
     }
+    // Units, one probe for the window, on the root shell (a svc op is root
+    // only), after the repo probe. Gathered, never asserted: the package
+    // may arrive earlier in the same window.
+    let mut svc_id = None;
+    let svc_list = svc_wants(window);
+    if !svc_list.is_empty() {
+        let id = next();
+        let root = shell_of(shells, &Principal::Root)?;
+        let w = wrap(
+            OpKind::Sh,
+            &crate::ops::shell::raw_body(&crate::ops::svc::probe(&svc_list)),
+            id,
+            root.nonce(),
+        );
+        root.send(id, &w).await.map_err(|e| e.to_string())?;
+        svc_id = Some(id);
+    }
     // Non-distro probes, each in its op's RunAs and principal's shell (as
     // `read_facts` does).
     let mut src_ids: Vec<(&PkgSpec, &Principal, Option<usize>)> = Vec::new();
@@ -525,6 +550,20 @@ pub async fn prepare_window<S: ShellSet>(
                     kind: "repo".to_string(),
                     name,
                     detail: Some("will add".to_string()),
+                });
+            }
+        }
+    }
+    if let Some(id) = svc_id {
+        // Gather only: a failed probe reports nothing.
+        let root = shell_of(shells, &Principal::Root)?;
+        if let Ok((_, out)) = collect(root, id).await {
+            for (name, detail) in crate::ops::svc::findings(&svc_list, &out) {
+                will.will_create.push(WillCreate {
+                    window: window.number,
+                    kind: "svc".to_string(),
+                    name,
+                    detail: Some(detail),
                 });
             }
         }

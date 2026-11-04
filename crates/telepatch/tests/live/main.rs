@@ -1,6 +1,6 @@
 //! Live tests: need docker (and the network to pull images). All `#[ignore]`;
 //! run with `just test-live-os`, `just test-live-pkg`, `just test-live-mise`,
-//! `just test-live-user`, `just test-live-repo`,
+//! `just test-live-user`, `just test-live-repo`, `just test-live-svc`,
 //! `just test-live-ssh`.
 
 mod container;
@@ -10,6 +10,7 @@ mod pkg;
 mod repo;
 mod ssh_exec;
 mod sshd;
+mod svc;
 mod user;
 
 use std::path::Path;

@@ -196,7 +196,8 @@ The full design, including the parts not built yet, is in
 | Transports | Local (`bash`, `sudo -n -H bash`), `docker exec`, SSH (multiplexed, root and per-user shells) |
 | CLI (`list`, `plan`, `run --local`, `run --host …`), JSONL log, static musl binaries | Built |
 | Guards (`.when(op.changed())`) | Traced and planned; the executor refuses them at prepare |
-| `repo`, `svc`, `user`, `fetch`, `git`, `secret` | Designed, not built |
+| `svc` (`.enabled()`, `.started()`) | Built; without a running systemd the enable is applied offline and the start is skipped; no `systemctl` skips the op |
+| `repo`, `user`, `fetch`, `git`, `secret` | Designed, not built |
 | Role rollback, templates, reconnect, PTY | Designed, not built |
 
 ## Porting from Ansible

@@ -526,3 +526,24 @@ are appended, never edited in; a hook refuses rewrites.
   `just test-vm ubuntu2404 dev_desktop`: run 2 `CHANGED 0`, 20/20
   checks, no `tp-*` VM left.
 - Commits: see git log (telepatch, tp_basic)
+
+## 2026-11-04 — T58 `svc` primitive (telepatch)
+
+- `h.svc(unit).enabled().started()` (`ops/svc.rs`): is-enabled/enable,
+  is-active/start with daemon-reload when `NeedDaemonReload` says yes;
+  key `svc:<unit>` (`.service` appended), root only, nothing wanted is a
+  trace error. Without a running systemd the enable is applied offline
+  (plain `systemctl enable` works, probed ubuntu:24.04 and rockylinux:10)
+  and the start skipped; no `systemctl` skips the op; a skip is never a
+  change. Prepare probe after the repo probe: `will enable, will start`,
+  `will enable; no running systemd: start skipped`, `no systemctl:
+  skipped`. 21 PATH-fake tests; `just test-live-svc` 2/2 (run 2
+  `CHANGED 0`); tp_basic's 78 plan snapshots byte for byte.
+- Commits: telepatch (this commit)
+
+## 2026-11-04 — T62 intended differences scoped to distros (tp_basic)
+
+- `[distro,distro]+section|line`: applied only on the listed cells,
+  ignored elsewhere, malformed scope fails with file:line; unscoped
+  lines unchanged. 12 new self-tests; `just test-oracle-selftest` 57 ok.
+- Commits: tp_basic 8bef5fe

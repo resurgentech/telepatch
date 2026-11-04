@@ -87,7 +87,19 @@ impl<V> Host<V> {
 
     /// A copy of the trace recorded so far.
     pub fn snapshot(&self) -> Trace {
-        self.trace.borrow().clone()
+        let mut t = self.trace.borrow().clone();
+        t.errors.extend(crate::ops::svc::nothing_wanted(&t));
+        t
+    }
+
+    /// The first playbook bug found so far, recorded or derived from the
+    /// finished ops (an `svc` that wants nothing).
+    pub(crate) fn first_error(&self) -> Option<TraceError> {
+        let t = self.trace.borrow();
+        t.errors
+            .first()
+            .cloned()
+            .or_else(|| crate::ops::svc::nothing_wanted(&t).into_iter().next())
     }
 
     /// Record a playbook bug found while tracing. The run fails with the

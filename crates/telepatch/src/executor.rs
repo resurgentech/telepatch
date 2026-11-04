@@ -315,6 +315,7 @@ fn describe(op: &OpNode) -> String {
         OpSpec::Group(g) => format!("group {}", g.name),
         OpSpec::User(u) => format!("user {}", u.name),
         OpSpec::Repo(r) => format!("repo {}", r.name),
+        OpSpec::Svc(s) => format!("svc {}", s.unit),
         OpSpec::File(f) => {
             use crate::ops::file::FileKind;
             let what = match f.kind {
@@ -345,13 +346,16 @@ fn roles_of(w: &WindowOp) -> Vec<String> {
 }
 
 fn parse_result(kind: OpKind, t: &Trailer) -> Result<(i32, bool, bool), String> {
-    use crate::trailer::{FileResult, GroupResult, PkgResult, RepoResult, ShellResult, UserResult};
+    use crate::trailer::{
+        FileResult, GroupResult, PkgResult, RepoResult, ShellResult, SvcResult, UserResult,
+    };
     let r = match kind {
         OpKind::Pkg => t.typed::<PkgResult>().map(|r| (r.rc, r.changed, false)),
         OpKind::File => t.typed::<FileResult>().map(|r| (r.rc, r.changed, false)),
         OpKind::Group => t.typed::<GroupResult>().map(|r| (r.rc, r.changed, false)),
         OpKind::User => t.typed::<UserResult>().map(|r| (r.rc, r.changed, false)),
         OpKind::Repo => t.typed::<RepoResult>().map(|r| (r.rc, r.changed, false)),
+        OpKind::Svc => t.typed::<SvcResult>().map(|r| (r.rc, r.changed, r.skipped)),
         OpKind::Sh => t
             .typed::<ShellResult>()
             .map(|r| (r.rc, r.changed, r.skipped)),

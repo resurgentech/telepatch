@@ -166,7 +166,7 @@ impl<E: Executor> Engine<E> {
         loop {
             let poll = fut.as_mut().poll(&mut cx);
             // A trace error is a playbook bug: fail before applying anything.
-            let first_error = host.trace_cell().borrow().errors.first().cloned();
+            let first_error = host.first_error();
             if let Some(err) = first_error {
                 return Err(EngineError::Playbook(err));
             }

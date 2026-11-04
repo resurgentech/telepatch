@@ -47,6 +47,7 @@ pub enum OpKind {
     Group,
     User,
     Repo,
+    Svc,
     Sh,
 }
 
@@ -99,11 +100,23 @@ pub struct ShellResult {
     pub skipped: bool,
 }
 
+/// A `svc` op: `skipped` is true when the op did nothing because the host
+/// has no `systemctl` or no running systemd (rc 0, never `changed`).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct SvcResult {
+    pub rc: i32,
+    pub changed: bool,
+    pub skipped: bool,
+}
+
 impl OpResult for PkgResult {
     const KIND: OpKind = OpKind::Pkg;
 }
 impl OpResult for FileResult {
     const KIND: OpKind = OpKind::File;
+}
+impl OpResult for SvcResult {
+    const KIND: OpKind = OpKind::Svc;
 }
 impl OpResult for GroupResult {
     const KIND: OpKind = OpKind::Group;
@@ -196,13 +209,13 @@ pub fn wrap(kind: OpKind, body: &str, id: usize, nonce: &str) -> String {
         OpKind::Pkg => r#"{"rc":%s,"changed":%s,"installed":[%s]}"#,
         OpKind::File | OpKind::Repo => r#"{"rc":%s,"changed":%s}"#,
         OpKind::Group | OpKind::User => r#"{"rc":%s,"changed":%s,"created":%s}"#,
-        OpKind::Sh => r#"{"rc":%s,"changed":%s,"skipped":%s}"#,
+        OpKind::Sh | OpKind::Svc => r#"{"rc":%s,"changed":%s,"skipped":%s}"#,
     };
     let args = match kind {
         OpKind::Pkg => r#""$rc" "$__tp_c" "$__tp_i""#,
         OpKind::File | OpKind::Repo => r#""$rc" "$__tp_c""#,
         OpKind::Group | OpKind::User => r#""$rc" "$__tp_c" "$__tp_k""#,
-        OpKind::Sh => r#""$rc" "$__tp_c" "$__tp_s""#,
+        OpKind::Sh | OpKind::Svc => r#""$rc" "$__tp_c" "$__tp_s""#,
     };
     let mut o = String::from("(\n");
     o.push_str(PRELUDE);
