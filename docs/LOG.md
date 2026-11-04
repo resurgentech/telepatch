@@ -435,3 +435,53 @@ are appended, never edited in; a hook refuses rewrites.
   updates the cache. Live `just test-live-repo` installs `docker-ce-cli`
   from Docker's repo on ubuntu:24.04 and rockylinux:10, rerun `changed 0`.
 - Commits: 17c7cc9
+
+## 2026-11-04 — T50 desktop vars, `dev_desktop` playbook, `admin_users` role (tp_basic)
+
+- `Vars.default_password` (serde default ""); `vars/desktop.toml`
+  (`admin_users = ["bot","tpdev"]`); `dev_desktop` (admin_users,
+  dev_common, rust_build) and `dev_desktop_kept` registered. `admin_users`
+  ports the intent: `^[#@]includedir` → `@includedir` (bug 1), the
+  distro's own `secure_path` with `/usr/local` first (bug 2), `wheel`
+  where no `sudo` group exists (bug 4), every sudoers write `visudo -cf`.
+  13 `dev_desktop` snapshots; 52 container snapshots unchanged.
+- Commits: tp_basic 0b09a8a (docs accepted), 37af8c8; telepatch f100c1a
+  (skill: port the intent).
+
+## 2026-11-04 — T51 tmux and Node roles (tp_basic)
+
+- `node`: `h.mise(["node"])` where nvm_node ran (nvm_node dropped; merged
+  by the optimizer into dev_common's mise op). `tmux`: `tmux` + `tmuxp` on
+  the Debian family and Arch, `tmux` alone elsewhere. `dev_desktop_kept` =
+  admin_users + tmux; 13 + 13 snapshots.
+- Commits: tp_basic 42e6705
+
+## 2026-11-04 — T52 `docker` role on Docker's repository (tp_basic)
+
+- `repo` + `docker-ce`, `docker-ce-cli`, `containerd.io`,
+  `docker-buildx-plugin`, `docker-compose-plugin` on Ubuntu/Pop!_OS
+  (`ubuntu`), Debian (`debian`, suite = codename), Fedora (`fedora`),
+  Rocky/Alma (`rhel`); distro `docker` on Arch/Omarchy and Amazon; any
+  other distro a trace error. `HACK(svc)` `systemctl enable --now docker`
+  (unless active) on Fedora, EL and Arch. `group docker`, each admin user
+  appended. No `get.docker.com`.
+- Commits: tp_basic a2794fa
+
+## 2026-11-04 — T53 `golang` as a `Script` source (tp_basic)
+
+- `h.script("go", ..).latest()`: latest from `go.dev/VERSION?m=text` on
+  the host; INSTALL maps `uname -m`, fetches the tarball and
+  `?mode=json`, checks sha256 (awk, no jq) before replacing
+  `/usr/local/go`. `/etc/profile.d/go.sh` appends `/usr/local/go/bin`.
+  godoc, GOPATH dropped. Shell tests against a fake curl; docker check on
+  ubuntu:24.04: run 1 changed 2, run 2 changed 0 (go1.27.3).
+- Commits: tp_basic 18f3d6f
+
+## 2026-11-04 — T54 `vm_server` shrunk to KVM/libvirt (tp_basic)
+
+- Distro KVM/libvirt/virt-install/bridge-utils per family
+  (`qemu-system-x86` on the Debian family, not the virtual `qemu-kvm`);
+  `HACK(svc)` socket start on Amazon (`virtqemud.socket`) and Arch
+  (`libvirtd.socket`); each admin user appended to `libvirt`. Vagrant,
+  `ansible`, `ruby*` dropped. Playbook in YAML order.
+- Commits: tp_basic 2a3185a
