@@ -485,3 +485,32 @@ are appended, never edited in; a hook refuses rewrites.
   (`libvirtd.socket`); each admin user appended to `libvirt`. Vagrant,
   `ansible`, `ruby*` dropped. Playbook in YAML order.
 - Commits: tp_basic 2a3185a
+
+## 2026-11-04 — T55 `just test-vm ubuntu2404 dev_desktop` (tp_basic)
+
+- `test-vm.sh <distro> <playbook>` (allowlist dev_base, dev_desktop);
+  `vm_up` takes memory and disk; per-user working checks for bot and
+  tpdev. Live: dev_desktop run 1 865s, run 2 9s `CHANGED 0`, 16/16 checks
+  (go1.27.3, node v26.13.0, just 1.59.0, tmux 3.4, virsh 10.0.0,
+  hello-world); dev_base rerun `CHANGED 0`. No `tp-*` VM left. Finding:
+  root shell `sudo -n bash` lacks `-H`, so with the drop-in's
+  `!env_reset` root's mise writes bot's `~/.cache/mise` (not fixed).
+- Commits: tp_basic 979ef3f
+
+## 2026-11-04 — T56 VM oracle for the kept roles, `dev_desktop_kept` (tp_basic)
+
+- `test-vm-oracle.sh ubuntu2404 dev_desktop_kept`: a two-role playbook
+  (admin_users, tmux) written into the script's own ansible export;
+  `image-state.sh --users` adds account and sudoers sections only when
+  asked (docker captures byte-identical). Intended: admin_users bugs 1
+  and 2 (3 sudoers lines). Live: identical (3 intended differences
+  applied); dev_base oracle still identical (6). No `tp-*` VM left.
+- Commits: tp_basic a11010c
+
+## 2026-11-04 — T57 conversion cleanup and the docker oracle rerun (tp_basic)
+
+- Kept facts moved into the role comments; the five understanding docs
+  and every mirrored original removed; `conversion/SOURCE` is header
+  only (`check-conversion` ok, empty list). `just test-acceptance` 7/7
+  identical (6 intended differences), 85m. Goal 5b's steps are done.
+- Commits: tp_basic da57d5a
