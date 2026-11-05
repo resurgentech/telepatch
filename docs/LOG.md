@@ -642,3 +642,19 @@ are appended, never edited in; a hook refuses rewrites.
   dev_base-arch` ok; the dev_base history names tp_basic 1d41d92,
   telepatch 0fc183e and the binary's sha256, as PROVENANCE. Not pushed.
 - Commits: docker_images bc767fb, 174b5b9
+
+## 2026-11-04 — T70 the oracle's telepatch side on docker_images' Dockerfiles (tp_basic)
+
+- `scripts/test-container.sh` builds the telepatch side from
+  `../docker_images/Dockerfiles/telepatch.<family>` (working tree) with
+  `--build-context tp=build/dist`; `scripts/lib/dist-input.sh`
+  (`dist_require`, `preamble_check`); test-idempotent and test-services
+  run from `build/dist` and check their preamble against the shipped
+  Dockerfile; tp_basic's own `Dockerfiles/` deleted.
+- `just test-idempotent ubuntu2404 dev_base` `CHANGED 0`; `just
+  test-acceptance` 7/7 identical (ubuntu cells 6 intended differences,
+  rockylinux10 cells 8), run with a `_dirty` dist built before the
+  commit. The Ansible side came from the pinned export.
+- Entry appended by XO in review: a20b1d6's message names T70 but
+  carried only the T69 entry.
+- Commits: tp_basic 52013f1
