@@ -610,3 +610,21 @@ are appended, never edited in; a hook refuses rewrites.
   `-/usr/local/bin|pyaml`); `test-idempotent ubuntu2404 dev_base` and
   `rust` `CHANGED 0`.
 - Commits: none (outputs under build/)
+
+## 2026-11-04 — T67 the oracle's Ansible side from a pinned docker_images commit (tp_basic)
+
+- `ported_docker_images := 5df316b` passed as `DI_SHA`; one `git
+  archive` export per run into `build/docker_images/<sha>/` (atomic,
+  marker, reused); test-container, test-matrix, test-idempotent and
+  test-services read the hcl, `Dockerfiles/ansible.*` and context from
+  it; a non-commit is exit 2. Live `test-container ubuntu2404 dev_base`
+  identical (6 intended).
+- Commits: tp_basic 3328f2d
+
+## 2026-11-04 — T68 a tp-basic dist with provenance (tp_basic)
+
+- `just dist`: build/dist/{tp-basic, vars/container.toml, PROVENANCE}
+  (tp_basic_url, tp_basic_hash, telepatch_hash with `_dirty`,
+  tp_basic_sha256, rustc); the recipe prints the file and fails on a
+  missing field, junk line or home path (`--self-test` 9 ok).
+- Commits: tp_basic 1d41d92
