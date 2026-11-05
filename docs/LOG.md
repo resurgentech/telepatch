@@ -628,3 +628,17 @@ are appended, never edited in; a hook refuses rewrites.
   tp_basic_sha256, rustc); the recipe prints the file and fails on a
   missing field, junk line or home path (`--self-test` 9 ok).
 - Commits: tp_basic 1d41d92
+
+## 2026-11-04 — T69 docker_images builds with telepatch (docker_images)
+
+- `Dockerfiles/telepatch.{debian,redhat,arch}` (tp-basic from the bake
+  named context `tp` = tp_basic's `build/dist`, `TP_DIST` overrides; the
+  history step reads the dist's PROVENANCE); hcl `family`, tp playbook
+  names, no ansible variables; `ansible.*` deleted (5df316b is the last
+  Ansible-based commit). `check-dist.sh` (17 ok); push refuses a missing
+  or `_dirty` dist before anything (`bake.sh --check-push`, first line
+  of `just push`). bake needs `--allow fs.read=$TP_DIST`.
+- `just check` no `ansible`; `just build ubuntu2404` and `just build
+  dev_base-arch` ok; the dev_base history names tp_basic 1d41d92,
+  telepatch 0fc183e and the binary's sha256, as PROVENANCE. Not pushed.
+- Commits: docker_images bc767fb, 174b5b9
