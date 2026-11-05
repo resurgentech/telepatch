@@ -658,3 +658,18 @@ are appended, never edited in; a hook refuses rewrites.
 - Entry appended by XO in review: a20b1d6's message names T70 but
   carried only the T69 entry.
 - Commits: tp_basic 52013f1
+
+## 2026-11-04 — `just` on the image PATH (docker_images, tp_basic)
+
+- The telepatch-built images had `just` only on login shells' PATH (mise's
+  shims through `/etc/profile.d/mise.sh`); `docker run IMAGE just` failed
+  (`just: not found`). `Dockerfiles/telepatch.*` now set `ENV PATH` to
+  Docker's default with `/usr/local/share/mise/shims` first, a fixed
+  value so layers do not stack it. Built by XO on the user's "fix just".
+- `ORG=tp-fix just build` of `rust_build-ubuntu2404`,
+  `dev_base-rockylinux10`, `dev_base-arch`: `docker run IMAGE just
+  --version` prints `just 1.59.0` in all four images, also as uid 1000.
+  `just test-container` ubuntu2404 and rockylinux10 `dev_base` still
+  identical. A uid with no writable home gets a mise cache warning on
+  stderr; the README says so.
+- Commits: docker_images fdf38ca, tp_basic a456c04
