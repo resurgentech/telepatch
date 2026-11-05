@@ -573,3 +573,40 @@ are appended, never edited in; a hook refuses rewrites.
   sh or file op precedes the window's svc ops (`…yet: decided at run
   time, after this window's earlier ops`).
 - Commits: tp_basic 4f71d29; telepatch 9ad103c, b451246
+
+## 2026-11-04 — T63 dev_common's bugs of intent (tp_basic)
+
+- pip asks for `PyYAML`, not `pyaml`, on the RedHat family and Amazon:
+  declared `-pip|pyaml` and `-/usr/local/bin|pyaml` (its console script),
+  scoped to those seven distros. uv's installer runs with
+  `UV_NO_MODIFY_PATH=1`; not oracle-visible (the installer already skips
+  `env`/rc edits when the install dir is on PATH, as in the image
+  build), so the planned `-env` lines were dropped. Live `test-container
+  rockylinux10 dev_base` identical (8 intended), `ubuntu2404 dev_base`
+  identical (6 intended). 65 snapshots move (uv line; pip op on 35).
+- Commits: tp_basic 21aef75
+
+## 2026-11-04 — T64 rust_kernel's libclang on every family (tp_basic)
+
+- `clang-devel` on the RedHat family and Amazon (probe: only
+  `libclang.so.<N>` from `clang-libs` there; Arch's `clang-libs` ships
+  `libclang.so`). Not oracle-visible. 7 `latest_kernel_build` snapshots
+  gain the op.
+- Commits: tp_basic bfaa4f9
+
+## 2026-11-04 — T65 Intended differences and Open choices (tp_basic)
+
+- Comments only: the "After equivalence" lists in dev_common,
+  rust_build, kernel_build, rust_kernel (and src_repos' one line) become
+  "Intended differences" (T63/T64's fixes, bug and oracle lines) and
+  "Open choices" (the G6-2 rows, accepted defaults, oracle impact); dnf
+  group and `which` items removed with a reason.
+- Commits: tp_basic ffe725b
+
+## 2026-11-04 — T66 docker oracle rerun with the declared fixes (tp_basic)
+
+- tp_basic bfaa4f9: `just test-acceptance` 7/7 identical (ubuntu cells 6
+  intended differences, rockylinux10 cells 8: mise plus `-pip|pyaml`,
+  `-/usr/local/bin|pyaml`); `test-idempotent ubuntu2404 dev_base` and
+  `rust` `CHANGED 0`.
+- Commits: none (outputs under build/)
