@@ -79,7 +79,7 @@ pub async fn kernel_build(h: &Host<Vars>) -> Result<(), TraceError> {
     // roles/kernel_build/tasks/main.yml:16 include redhat.yml
     if redhat_based(&h.os) {
         // roles/kernel_build/tasks/redhat.yml:2 RedHat Update pip3
-        h.pip(["pip"]).latest();
+        h.pkg(["pip"]).pip().latest();
 
         // roles/kernel_build/tasks/redhat.yml:7 RedHat Kernel Build Dependencies
         h.pkg([
@@ -116,19 +116,19 @@ pub async fn kernel_build(h: &Host<Vars>) -> Result<(), TraceError> {
         ]);
 
         // roles/kernel_build/tasks/redhat.yml:43 Various python dependancies
-        h.pip(["jinja2", "GitPython", "pyaml"]);
+        h.pkg(["jinja2", "GitPython", "pyaml"]).pip();
     }
 
     // roles/kernel_build/tasks/main.yml:20 include amazonlinux2.yml
     // TODO(port): roles/kernel_build/tasks/main.yml:20 unreachable branch: `amazonlinux2_based`: no image reaches it; the design doc drops it
     if amazonlinux2_based(&h.os) {
         // roles/kernel_build/tasks/amazonlinux2.yml:2 AmazonLinux2 installing epel
-        h.yum([
+        h.pkg([
             "https://dl.fedoraproject.org/pub/epel/epel-release-latest-7.noarch.rpm",
-        ]);
+        ]).yum();
 
         // roles/kernel_build/tasks/amazonlinux2.yml:8 AmazonLinux2 Kernel Build Dependencies Dependencies
-        h.yum([
+        h.pkg([
             "yum-utils",
             "python3",
             "python3-pip",
@@ -152,7 +152,7 @@ pub async fn kernel_build(h: &Host<Vars>) -> Result<(), TraceError> {
             "cpan",
             "dpkg",
             "dpkg-dev",
-        ]);
+        ]).yum();
 
         // roles/kernel_build/tasks/amazonlinux2.yml:36 AmazonLinux2 Kernel Build Dependencies
         sh!(h, "yumdownloader --source kernel");
@@ -193,7 +193,7 @@ pub async fn kernel_build(h: &Host<Vars>) -> Result<(), TraceError> {
         ]);
 
         // roles/kernel_build/tasks/amazonlinux2023.yml:33 AmazonLinux2023 python dependancies
-        h.pip(["jinja2", "GitPython", "pyaml"]);
+        h.pkg(["jinja2", "GitPython", "pyaml"]).pip();
     }
 
     // roles/kernel_build/tasks/main.yml:28 include archlinux.yml

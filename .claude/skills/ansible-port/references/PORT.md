@@ -9,8 +9,8 @@ will not guess. The porter's job is the TODOs, the structure, and the
 proof. The mapping table stays: it is how you read what the emitter wrote
 and how you write what it did not.
 
-What is built: `#[role]`, `Host` and its facts, `h.pkg`/`h.yum`/`h.pip`,
-`h.cargo`, `h.rustup`, `h.script` and `h.mise` (the `pkg` sources:
+What is built: `#[role]`, `Host` and its facts, `h.pkg` with the source chained (`.yum()`, `.pip()`,
+`.cargo()`, `.rustup()`, `.installer_script(..)`, `.mise()`; the `pkg` sources:
 Distro, Pip, Cargo, Rustup, Script, Mise), `h.file`, `sh!`, `as_user`, `barrier`,
 `.reads/.writes/.allow_fail`, the `plan` command, and the equivalence
 harness. Not built: guards and `notify`, the `repo`, `svc`, `user`,
@@ -326,16 +326,16 @@ equivalence" changes, each in its own change with its own oracle diff.
 | Ansible | telepatch |
 |---|---|
 | `apt`/`dnf`/`pacman` with `name:` list | `h.pkg(["a", "b"])`: manager from `h.os.family` (Debian apt, RedHat dnf, Arch pacman) |
-| `yum` | `h.yum([..])` |
+| `yum` | `h.pkg([..]).yum()` |
 | `apt` with `state: build-dep` | `h.pkg([..]).build_dep()` |
 | `state: latest` | `h.pkg([..]).latest()` |
 | `update_cache: yes/no` | `.update_cache(true)`; the engine already refreshes the apt cache once before the first install and again after anything that writes the sources, so drop per-task flags unless the YAML relies on `no` |
-| `pip` | `h.pip([..])`, `.latest()` for `state: latest` |
+| `pip` | `h.pkg([..]).pip()`, `.latest()` for `state: latest` |
 | `lineinfile` | `h.file(p).line("..")`; with `regexp:` `h.file(p).line_re("^re", "..")` |
 | `copy` with `content:` | `h.file(p).content("..")`, then `.mode(0o644)` and `.owner("u")` if the YAML sets them |
 | `file` `state: directory` / `absent` | `h.file(p).dir()` / `.absent()` |
 | `shell`/`command` | First the Task intent row's Shape. `glue` or `sh`: `sh!(h, "cmd {var}")`; `{var}` is quoted by the macro, `{{` and `}}` are literal braces. Any other shape: that shape's primitive, or `sh!` with a `HACK(<primitive>)` marker |
-| installer (`curl \| sh`, `rustup`, `cargo install`, `get_url` then run) | `h.script(name, ScriptSpec::new()..)` (or `h.cargo`, `h.rustup`, `h.pip`; `h.mise([..])` for a tool mise's registry carries: root only, system-wide, shims in `/usr/local/share/mise/shims`): `.bin(..)`, `.version(..)` (the installed-version probe), the wanted version (`.pin(v)`, or `.latest(Latest::github_release(..) \| Latest::command(..))`), `.install(..)`, `.update(..)`. A source that does not exist yet (`npm`, say): `sh!` with `creates = <binary>` and `// HACK(pkg: no <Source> source yet)` |
+| installer (`curl \| sh`, `rustup`, `cargo install`, `get_url` then run) | `h.pkg([name]).installer_script(InstallerScript::new()..)` (or `h.pkg([..])` with `.cargo()`, `.rustup()`, `.pip()`; `.mise()` for a tool mise's registry carries: root only, system-wide, shims in `/usr/local/share/mise/shims`): `.bin(..)`, `.version(..)` (the installed-version probe), the wanted version (`.pin(v)`, or `.latest(Latest::github_release(..) \| Latest::command(..))`), `.install(..)`, `.update(..)`. A source that does not exist yet (`npm`, say): `sh!` with `creates = <binary>` and `// HACK(pkg: no <Source> source yet)` |
 | `args: creates:` | `sh!(h, "..", creates = "path")` |
 | `register` + `changed_when: false` + `when: rc != 0` (check, then act) | one `sh!(h, "act", unless = "check")` |
 | `changed_when: "<text>" in stdout` | `sh!(h, "..", changed_if = "regex")` |
@@ -364,9 +364,8 @@ pub async fn dev_common(h: &Host<Vars>) -> Result<(), TraceError> {
     } else if arch_based(&h.os) {
         h.pkg(["base-devel", "cmake"]);
     }
-    h.script(
-        "uv",
-        ScriptSpec::new()
+    h.pkg(["uv"]).installer_script(
+        InstallerScript::new()
             .bin("/usr/local/bin/uv")
             .version("uv self version --short")
             .latest(Latest::github_release("astral-sh/uv"))

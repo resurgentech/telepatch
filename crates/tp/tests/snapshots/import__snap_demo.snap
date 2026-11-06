@@ -18,13 +18,13 @@ pub async fn demo(h: &Host<Vars>) -> Result<(), TraceError> {
     h.pkg(["git", "curl"]);
 
     // roles/demo/tasks/main.yml:8 Yum one
-    h.yum(["wget"]);
+    h.pkg(["wget"]).yum();
 
     // roles/demo/tasks/main.yml:12 Build deps
     h.pkg(["linux"]).build_dep();
 
     // roles/demo/tasks/main.yml:17 Pip latest
-    h.pip(["pip"]).latest();
+    h.pkg(["pip"]).pip().latest();
 
     // roles/demo/tasks/main.yml:22 Remove a file
     h.file("/tmp/old").absent();

@@ -27,7 +27,7 @@ fn empty_name(h: Host<()>) -> PlaybookFuture {
 }
 fn control_name(h: Host<()>) -> PlaybookFuture {
     Box::pin(async move {
-        h.pip(["bad\nname"]);
+        h.pkg(["bad\nname"]).pip();
         Ok(())
     })
 }
@@ -181,7 +181,7 @@ fn the_site_is_the_callers_line_through_every_layer() {
     h.pkg(["git"]).pin("1");
     // A source method on a user scope (pkg_spec_op directly).
     let l4 = line!() + 1;
-    h.as_user("bob").mise(["node"]);
+    h.as_user("bob").pkg(["node"]).mise();
     // Recorded on the handle by the host builder (svc is root only).
     let l5 = line!() + 1;
     h.as_user("bob").svc("x").enabled();

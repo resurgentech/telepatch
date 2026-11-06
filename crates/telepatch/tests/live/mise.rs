@@ -1,12 +1,12 @@
 //! Live: the `mise` source's system layer in a fresh ubuntu:24.04 container
-//! as root. mise comes from the T41 `ScriptSpec`; `curl` and
+//! as root. mise comes from the T41 `InstallerScript`; `curl` and
 //! `ca-certificates` (which that installer needs) come from an `h.pkg` op in
 //! the same playbook. Run with `just test-live-mise`.
 
 use std::process::{Command, Stdio};
 
 use telepatch::executor::{HostSpec, RunOpts, Stdout, Target, run};
-use telepatch::ops::pkg::{Latest, ScriptSpec};
+use telepatch::ops::pkg::{InstallerScript, Latest};
 use telepatch::report::{HostStatus, Report};
 use telepatch::transport::docker::DockerTransport;
 use telepatch::{Host, Playbook, PlaybookFuture};
@@ -23,19 +23,16 @@ enum Mode {
 fn pb_run(h: Host<Mode>) -> PlaybookFuture {
     Box::pin(async move {
         h.pkg(["curl", "ca-certificates"]);
-        h.script(
-            "mise",
-            ScriptSpec::new()
+        h.pkg(["mise"]).installer_script(InstallerScript::new()
                 .bin("/usr/local/bin/mise")
                 .version("mise version")
                 .latest(Latest::github_release("jdx/mise"))
                 .install("(set -o pipefail && curl -fsSL https://mise.run | MISE_INSTALL_PATH=/usr/local/bin/mise sh)")
-                .update("mise self-update -y"),
-        );
+                .update("mise self-update -y"));
         match *h.vars {
-            Mode::Present => h.mise(["just"]),
-            Mode::Pin => h.mise(["just"]).pin("1.36.0").clone(),
-            Mode::Latest => h.mise(["just"]).latest().clone(),
+            Mode::Present => h.pkg(["just"]).mise(),
+            Mode::Pin => h.pkg(["just"]).mise().pin("1.36.0").clone(),
+            Mode::Latest => h.pkg(["just"]).mise().latest().clone(),
         };
         Ok(())
     })

@@ -90,7 +90,7 @@ impl Latest {
 /// A vendor installer. `bin`, `version` and `install` are required;
 /// `update` defaults to `install`; `latest` is required for `.latest()`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct ScriptSpec {
+pub struct InstallerScript {
     pub bin: String,
     pub version: String,
     pub latest: Option<Latest>,
@@ -98,9 +98,9 @@ pub struct ScriptSpec {
     pub update: Option<String>,
 }
 
-impl ScriptSpec {
-    pub fn new() -> ScriptSpec {
-        ScriptSpec::default()
+impl InstallerScript {
+    pub fn new() -> InstallerScript {
+        InstallerScript::default()
     }
 
     /// The binary whose presence proves the install (`[ -x bin ]`).
@@ -239,7 +239,7 @@ pub enum Probed {
     Installed(String),
 }
 
-/// Parse [`ScriptSpec::probe`]'s output: what is installed, and the latest
+/// Parse [`InstallerScript::probe`]'s output: what is installed, and the latest
 /// version (`None` when not asked or not resolved).
 pub fn parse_probe(out: &str) -> (Probed, Option<String>) {
     let mut have = Probed::Unknown;

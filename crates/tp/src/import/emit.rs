@@ -781,8 +781,12 @@ fn pkg(t: &Task, host: &str, module: &str) -> Result<Vec<String>, Fail> {
             ));
         }
     };
-    let method = if module == "yum" { "yum" } else { "pkg" };
-    Ok(list_call(&format!("{host}.{method}"), &names, tail))
+    let tail = if module == "yum" {
+        format!(".yum(){tail}")
+    } else {
+        tail.to_string()
+    };
+    Ok(list_call(&format!("{host}.pkg"), &names, &tail))
 }
 
 fn list_call(callee: &str, names: &[String], tail: &str) -> Vec<String> {
@@ -804,8 +808,8 @@ fn pip(t: &Task, host: &str) -> Result<Vec<String>, Fail> {
     only_keys(m, &["name", "state"])?;
     let names = names_of(m)?;
     let tail = match m.get("state").and_then(Value::as_str) {
-        None | Some("present") => "",
-        Some("latest") => ".latest()",
+        None | Some("present") => ".pip()",
+        Some("latest") => ".pip().latest()",
         Some(s) => {
             return Err((
                 "unsupported arguments".into(),
@@ -813,7 +817,7 @@ fn pip(t: &Task, host: &str) -> Result<Vec<String>, Fail> {
             ));
         }
     };
-    Ok(list_call(&format!("{host}.pip"), &names, tail))
+    Ok(list_call(&format!("{host}.pkg"), &names, tail))
 }
 
 fn mode_of(v: &Value) -> Option<String> {

@@ -1,5 +1,5 @@
 //! `Source::Rustup`: one rust toolchain with its targets and components,
-//! per user (`h.rustup("stable")`; the pkg name is the toolchain).
+//! per user (`h.pkg(["stable"]).rustup()`; the pkg name is the toolchain).
 //!
 //! The op, in order, stopping at the first failure:
 //!

@@ -8,12 +8,12 @@ fn run(h: Host<()>) -> PlaybookFuture {
         {
             let _r = h.role_enter("a");
             h.pkg(["python3-pip"]);
-            h.pip(["requests"]);
+            h.pkg(["requests"]).pip();
         }
         {
             let _r = h.role_enter("b");
             h.pkg(["git"]);
-            h.pip(["flask"]);
+            h.pkg(["flask"]).pip();
         }
         Ok::<(), TraceError>(())
     })

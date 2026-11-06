@@ -96,9 +96,9 @@ fn demo_mappings() {
     let code = out.file("demo.rs").unwrap();
     // package modules
     assert!(code.contains("h.pkg([\"git\", \"curl\"]);"), "{code}");
-    assert!(code.contains("h.yum([\"wget\"]);"));
+    assert!(code.contains("h.pkg([\"wget\"]).yum();"));
     assert!(code.contains("h.pkg([\"linux\"]).build_dep();"));
-    assert!(code.contains("h.pip([\"pip\"]).latest();"));
+    assert!(code.contains("h.pkg([\"pip\"]).pip().latest();"));
     assert!(code.contains("h.file(\"/tmp/old\").absent();"));
     assert!(code.contains(".dir()"));
     assert!(code.contains(".mode(0o755)"));

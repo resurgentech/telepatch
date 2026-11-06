@@ -96,7 +96,7 @@ pub async fn dev_common(h: &Host<Vars>) -> Result<(), TraceError> {
     // TODO(port): roles/dev_common/tasks/main.yml:12 unreachable branch: `amazonlinux2_based`: no image reaches it; the design doc drops it
     if amazonlinux2_based(&h.os) {
         // roles/dev_common/tasks/amazonlinux2.yml:2 AmazonLinux2 Common development tools
-        h.yum([
+        h.pkg([
             "@Development Tools",
             "bc",
             "newt",
@@ -112,7 +112,7 @@ pub async fn dev_common(h: &Host<Vars>) -> Result<(), TraceError> {
             "python3-pip",
             "zstd",
             "wget",
-        ]);
+        ]).yum();
     }
 
     // roles/dev_common/tasks/main.yml:16 include amazonlinux2023.yml
@@ -170,7 +170,7 @@ pub async fn dev_common(h: &Host<Vars>) -> Result<(), TraceError> {
 
     // roles/dev_common/tasks/main.yml:26 Various python dependancies
     if !((debian_based(&h.os) || arch_based(&h.os))) {
-        h.pip(["jinja2", "GitPython", "pyaml"]);
+        h.pkg(["jinja2", "GitPython", "pyaml"]).pip();
     }
 
     // roles/dev_common/tasks/main.yml:34 Installing uv for python

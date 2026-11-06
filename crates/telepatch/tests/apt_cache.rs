@@ -65,7 +65,7 @@ fn a_second_sources_write_forces_a_second_update() {
 fn non_apt_managers_are_never_flagged() {
     let h = host();
     h.raw("x");
-    h.pip(["requests"]);
+    h.pkg(["requests"]).pip();
     assert_eq!(apt_update_needed(&ops(&h)), [false, false]);
 }
 

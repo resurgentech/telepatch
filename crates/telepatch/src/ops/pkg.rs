@@ -37,7 +37,9 @@ pub use rustup::{
     DEFAULT_INSTALLER, RustupProbe, RustupSpec, parse_probe as parse_rustup_probe,
     probe as rustup_probe, will_change as rustup_will_change,
 };
-pub use script::{Latest, Probed, ScriptSpec, VERSION_RE, parse_probe, version_token, will_change};
+pub use script::{
+    InstallerScript, Latest, Probed, VERSION_RE, parse_probe, version_token, will_change,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Manager {
@@ -63,9 +65,9 @@ pub enum Source {
     /// A rust toolchain with targets and components, per user
     /// ([`rustup`]; boxed to keep `OpNode` small).
     Rustup(Box<RustupSpec>),
-    /// A vendor installer script ([`ScriptSpec`]; boxed to keep `OpNode`
+    /// A vendor installer script ([`InstallerScript`]; boxed to keep `OpNode`
     /// small).
-    Script(Box<ScriptSpec>),
+    Script(Box<InstallerScript>),
 }
 
 /// Which version of a package is wanted.
@@ -99,6 +101,9 @@ pub struct PkgSpec {
     /// (`pkg:script:<user>:<name>`, `pkg:cargo:<user>:<name>`,
     /// `pkg:rustup:<user>:<toolchain>`); unused by distro and pip.
     pub user: String,
+    /// A source call (`.pip()`, `.yum()`, ...) already ran on this op; a
+    /// second one is a trace error.
+    pub sourced: bool,
 }
 
 impl PkgSpec {
@@ -119,6 +124,42 @@ impl PkgSpec {
             mode: PkgMode::Install,
             update_cache: false,
             user: "root".to_string(),
+            sourced: false,
+        }
+    }
+
+    /// The checks a source puts on the op's names and principal, as
+    /// messages (empty when fine).
+    pub fn source_problems(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        if matches!(self.source, Source::Rustup(_)) && self.names.len() != 1 {
+            out.push("rustup: exactly one toolchain name per rustup op".to_string());
+        }
+        if let Source::Script(s) = &self.source {
+            let name = self.names.first().map(String::as_str).unwrap_or("");
+            if self.names.len() != 1 {
+                out.push(format!(
+                    "script {name}: exactly one package name per script op"
+                ));
+            }
+            out.extend(s.problems(name, &self.wanted));
+        }
+        if self.source == Source::Mise && self.user != "root" {
+            out.push("mise source is system-wide (root only)".to_string());
+        }
+        out
+    }
+
+    /// The source's name for messages.
+    fn source_name(&self) -> &'static str {
+        match &self.source {
+            Source::Distro(Manager::Yum) => "yum",
+            Source::Distro(_) => "the distro manager",
+            Source::Pip => "pip",
+            Source::Cargo => "cargo",
+            Source::Mise => "mise",
+            Source::Rustup(_) => "rustup",
+            Source::Script(_) => "installer_script",
         }
     }
 
@@ -443,6 +484,97 @@ impl PkgHandle {
         });
     }
 
+    /// Switch this op to another source: re-run the source's name and
+    /// principal checks and re-derive the default writes and postconditions
+    /// (a `.writes(..)` or `.post(..)` set before the switch is replaced;
+    /// reads, guard, allowances and `.at_end()` stay). Distro-only state
+    /// (`build_dep`, `update_cache`) is dropped. A second source call on
+    /// one op is a trace error and changes nothing.
+    #[track_caller]
+    fn source(&self, method: &str, source: Source) -> Self {
+        let mut errs: Vec<String> = Vec::new();
+        self.0.edit(|op| {
+            let OpSpec::Pkg(s) = &mut op.spec else { return };
+            if s.sourced {
+                errs.push(format!(
+                    "{method}(): this pkg op's source is already {}; one source call per op",
+                    s.source_name()
+                ));
+                return;
+            }
+            s.sourced = true;
+            s.source = source;
+            s.wanted = Wanted::Present;
+            s.mode = PkgMode::Install;
+            s.update_cache = false;
+            errs.extend(s.source_problems());
+            op.writes = op.spec.default_writes();
+            op.post = op.spec.default_post();
+        });
+        for e in errs {
+            self.0.record_error(TraceError::new(e));
+        }
+        self.clone()
+    }
+
+    /// Install with `yum` instead of the host's default manager.
+    #[track_caller]
+    pub fn yum(&self) -> Self {
+        self.source("yum", Source::Distro(Manager::Yum))
+    }
+
+    /// Python packages via pip (`pkg:pip:<name>` keys).
+    #[track_caller]
+    pub fn pip(&self) -> Self {
+        self.source("pip", Source::Pip)
+    }
+
+    /// Crates installed with `cargo install`, for the op's principal
+    /// (`pkg:cargo:<user>:<name>` keys); writes `*` unless narrowed with
+    /// `.writes([..])`; posts `Installed` per name. `.pin(v)` takes one
+    /// name; `.latest()` asks `cargo search` on the host.
+    #[track_caller]
+    pub fn cargo(&self) -> Self {
+        self.source("cargo", Source::Cargo)
+    }
+
+    /// Tools installed by `mise` into its system layer (config
+    /// `/etc/mise/config.toml`, installs and shims under
+    /// `/usr/local/share/mise`), root only: on a non-root principal this is
+    /// a trace error ("mise source is system-wide (root only)").
+    /// `Present` and `.latest()` write `"latest"` into the config, `.pin(v)`
+    /// writes `v`. Keys `pkg:mise:root:<name>`; writes `*` unless narrowed
+    /// with `.writes([..])`; posts `Installed` per name and
+    /// `file:/etc/mise/config.toml = Exists(true)`. `.pin(v)` takes one
+    /// name; `.latest()` asks `mise latest` on the host. Users reach the
+    /// tools through `/usr/local/share/mise/shims` on their `PATH`.
+    #[track_caller]
+    pub fn mise(&self) -> Self {
+        self.source("mise", Source::Mise)
+    }
+
+    /// The one name is a rust toolchain (`stable`, `1.94.0`,
+    /// `nightly-2026-10-01`) for the op's principal, with options on the
+    /// handle (`.targets`, `.components`, `.profile`, `.set_default`,
+    /// `.installer`). Keys `pkg:rustup:<user>:<tc>` plus
+    /// `...:<tc>/target/<t>` and `...:<tc>/component/<c>`; writes `*`
+    /// unless narrowed. `.latest()` asks `rustup check`; `.pin(..)` is a
+    /// trace error (name a version toolchain instead).
+    #[track_caller]
+    pub fn rustup(&self) -> Self {
+        self.source("rustup", Source::Rustup(Box::default()))
+    }
+
+    /// The one name is a package installed by a vendor script: `script`
+    /// says how to probe, install and update it. Keys
+    /// `pkg:script:<user>:<name>`; writes `*` unless narrowed with
+    /// `.writes([..])`; posts `Installed` and `file:<bin> = Exists(true)`.
+    /// Missing required parts are trace errors.
+    #[track_caller]
+    pub fn installer_script(&self, script: InstallerScript) -> Self {
+        self.source("installer_script", Source::Script(Box::new(script)))
+    }
+
     /// Install the build dependencies of the named source packages instead
     /// (`apt-get build-dep`). Which packages that installs is unknown, so
     /// the op writes `*` and makes no `Installed` postcondition.
@@ -623,9 +755,6 @@ impl PkgHandle {
     }
 }
 
-/// Every source returns the same handle; kept as an alias for `h.pip`.
-pub type PipHandle = PkgHandle;
-
 fn names<I, S>(names: I) -> Vec<String>
 where
     I: IntoIterator<Item = S>,
@@ -658,28 +787,12 @@ impl<V> Host<V> {
         if let Err(e) = check_names(&spec.names) {
             self.record_error(e);
         }
-        if matches!(spec.source, Source::Rustup(_)) && spec.names.len() != 1 {
-            self.record_error(TraceError::new(
-                "rustup: exactly one toolchain name per rustup op",
-            ));
-        }
-        if let Source::Script(s) = &spec.source {
-            let name = spec.names.first().map(String::as_str).unwrap_or("");
-            if spec.names.len() != 1 {
-                self.record_error(TraceError::new(format!(
-                    "script {name}: exactly one package name per script op"
-                )));
-            }
-            for e in s.problems(name, &spec.wanted) {
-                self.record_error(TraceError::new(e));
-            }
-        }
         spec.user = match &self.run_as().principal {
             Principal::Root => "root".to_string(),
             Principal::User(u) => u.clone(),
         };
-        if spec.source == Source::Mise && spec.user != "root" {
-            self.record_error(TraceError::new("mise source is system-wide (root only)"));
+        for e in spec.source_problems() {
+            self.record_error(TraceError::new(e));
         }
         PkgHandle(self.op(OpSpec::Pkg(spec)))
     }
@@ -705,86 +818,6 @@ impl<V> Host<V> {
             }
         };
         self.pkg_op(m, names(pkgs))
-    }
-
-    /// Like [`Host::pkg`] but with `yum`, for RedHat-family hosts without dnf.
-    #[track_caller]
-    pub fn yum<I, S>(&self, pkgs: I) -> PkgHandle
-    where
-        I: IntoIterator<Item = S>,
-        S: AsRef<str>,
-    {
-        self.pkg_op(Manager::Yum, names(pkgs))
-    }
-
-    /// A package installed by a vendor script: `name` is the package name
-    /// (one per op), `spec` says how to probe, install and update it. Keys
-    /// `pkg:script:<user>:<name>`; writes `*` unless narrowed with
-    /// `.writes([..])`; posts `Installed` and `file:<bin> = Exists(true)`.
-    /// Missing required parts are trace errors.
-    #[track_caller]
-    pub fn script(&self, name: impl AsRef<str>, spec: ScriptSpec) -> PkgHandle {
-        self.pkg_spec_op(PkgSpec::from_source(
-            Source::Script(Box::new(spec)),
-            vec![name.as_ref().to_string()],
-        ))
-    }
-
-    /// Crates installed with `cargo install`, for the op's principal
-    /// (`pkg:cargo:<user>:<name>` keys); writes `*` unless narrowed with
-    /// `.writes([..])`; posts `Installed` per name. `.pin(v)` takes one
-    /// name; `.latest()` asks `cargo search` on the host.
-    #[track_caller]
-    pub fn cargo<I, S>(&self, crates: I) -> PkgHandle
-    where
-        I: IntoIterator<Item = S>,
-        S: AsRef<str>,
-    {
-        self.pkg_spec_op(PkgSpec::from_source(Source::Cargo, names(crates)))
-    }
-
-    /// Tools installed by `mise` into its system layer (config
-    /// `/etc/mise/config.toml`, installs and shims under
-    /// `/usr/local/share/mise`), root only: on a non-root principal this is
-    /// a trace error ("mise source is system-wide (root only)").
-    /// `Present` and `.latest()` write `"latest"` into the config, `.pin(v)`
-    /// writes `v`. Keys `pkg:mise:root:<name>`; writes `*` unless narrowed
-    /// with `.writes([..])`; posts `Installed` per name and
-    /// `file:/etc/mise/config.toml = Exists(true)`. `.pin(v)` takes one
-    /// name; `.latest()` asks `mise latest` on the host. Users reach the
-    /// tools through `/usr/local/share/mise/shims` on their `PATH`.
-    #[track_caller]
-    pub fn mise<I, S>(&self, tools: I) -> PkgHandle
-    where
-        I: IntoIterator<Item = S>,
-        S: AsRef<str>,
-    {
-        self.pkg_spec_op(PkgSpec::from_source(Source::Mise, names(tools)))
-    }
-
-    /// A rust toolchain (`stable`, `1.94.0`, `nightly-2026-10-01`) for the
-    /// op's principal, with options on the handle (`.targets`,
-    /// `.components`, `.profile`, `.set_default`, `.installer`). Keys
-    /// `pkg:rustup:<user>:<tc>` plus `...:<tc>/target/<t>` and
-    /// `...:<tc>/component/<c>`; writes `*` unless narrowed. `.latest()`
-    /// asks `rustup check`; `.pin(..)` is a trace error (name a version
-    /// toolchain instead).
-    #[track_caller]
-    pub fn rustup(&self, toolchain: impl AsRef<str>) -> PkgHandle {
-        self.pkg_spec_op(PkgSpec::from_source(
-            Source::Rustup(Box::default()),
-            vec![toolchain.as_ref().to_string()],
-        ))
-    }
-
-    /// Python packages via pip (`pkg:pip:<name>` keys).
-    #[track_caller]
-    pub fn pip<I, S>(&self, pkgs: I) -> PipHandle
-    where
-        I: IntoIterator<Item = S>,
-        S: AsRef<str>,
-    {
-        self.pkg_spec_op(PkgSpec::from_source(Source::Pip, names(pkgs)))
     }
 }
 
@@ -821,7 +854,7 @@ mod tests {
     #[test]
     fn pip_pin_renders_name_eq_version() {
         let h = host();
-        h.pip(["requests", "six"]).pin("2.31.0");
+        h.pkg(["requests", "six"]).pip().pin("2.31.0");
         let s = spec_of(&h, 0);
         assert_eq!(s.wanted, Wanted::Pinned("2.31.0".into()));
         let r = s.render();
@@ -835,7 +868,7 @@ mod tests {
     #[test]
     fn pip_latest_renders_install_u() {
         let h = host();
-        h.pip(["a"]).latest();
+        h.pkg(["a"]).pip().latest();
         let s = spec_of(&h, 0);
         assert_eq!(s.wanted, Wanted::Latest);
         let mut want =
@@ -869,12 +902,14 @@ mod tests {
     #[test]
     fn rustup_keys_writes_kind_and_post() {
         let h = host();
-        h.rustup("stable")
+        h.pkg(["stable"])
+            .rustup()
             .targets(["x86_64-unknown-linux-musl", "x86_64-unknown-linux-musl"])
             .components(["rust-src"]);
-        h.as_user("deploy").rustup("1.94.0");
+        h.as_user("deploy").pkg(["1.94.0"]).rustup();
         h.as_user("root")
-            .rustup("nightly")
+            .pkg(["nightly"])
+            .rustup()
             .writes([Key::file("/root/.cargo/bin/rustc")]);
         let t = h.snapshot();
         assert!(t.errors.is_empty(), "{:?}", t.errors);
@@ -919,7 +954,7 @@ mod tests {
     #[test]
     fn rustup_pinned_is_a_trace_error_and_never_merges() {
         let h = host();
-        h.rustup("stable").pin("1.94.0");
+        h.pkg(["stable"]).rustup().pin("1.94.0");
         assert_eq!(errors(&h).len(), 1);
         assert!(
             errors(&h)[0].contains("name a version toolchain instead"),
@@ -927,7 +962,7 @@ mod tests {
             errors(&h)
         );
         assert_eq!(spec_of(&h, 0).wanted, Wanted::Present);
-        h.rustup("stable").latest();
+        h.pkg(["stable"]).rustup().latest();
         assert_eq!(errors(&h).len(), 1);
         let a = PkgSpec::from_source(Source::Rustup(Box::default()), names(["stable"]));
         assert!(!a.mergeable());
@@ -950,10 +985,10 @@ mod tests {
     #[test]
     fn rustup_builders_on_other_sources_are_trace_errors() {
         let h = host();
-        h.cargo(["x"]).targets(["t"]);
+        h.pkg(["x"]).cargo().targets(["t"]);
         h.pkg(["git"]).components(["c"]);
-        h.pip(["x"]).profile("minimal");
-        h.cargo(["x"]).set_default();
+        h.pkg(["x"]).pip().profile("minimal");
+        h.pkg(["x"]).cargo().set_default();
         h.pkg(["git"]).installer("true");
         assert_eq!(
             errors(&h),
@@ -967,8 +1002,8 @@ mod tests {
         );
     }
 
-    fn uv() -> ScriptSpec {
-        ScriptSpec::new()
+    fn uv() -> InstallerScript {
+        InstallerScript::new()
             .bin("/usr/local/bin/uv")
             .version("uv --version")
             .install("sh install.sh")
@@ -977,7 +1012,7 @@ mod tests {
     #[test]
     fn script_missing_parts_are_trace_errors() {
         let h = host();
-        h.script("uv", ScriptSpec::new());
+        h.pkg(["uv"]).installer_script(InstallerScript::new());
         assert_eq!(
             errors(&h),
             [
@@ -991,19 +1026,20 @@ mod tests {
     #[test]
     fn script_latest_needs_a_latest_source() {
         let h = host();
-        h.script("uv", uv()).latest();
+        h.pkg(["uv"]).installer_script(uv()).latest();
         assert_eq!(errors(&h), ["script uv: latest is required for .latest()"]);
         let h = host();
-        h.script("uv", uv().latest(Latest::command("echo 1")))
+        h.pkg(["uv"])
+            .installer_script(uv().latest(Latest::command("echo 1")))
             .latest();
-        h.script("uv", uv()).pin("1.0");
+        h.pkg(["uv"]).installer_script(uv()).pin("1.0");
         assert!(errors(&h).is_empty(), "{:?}", errors(&h));
     }
 
     #[test]
     fn script_update_defaults_to_install() {
         let h = host();
-        h.script("uv", uv());
+        h.pkg(["uv"]).installer_script(uv());
         let Source::Script(s) = spec_of(&h, 0).source else {
             panic!()
         };
@@ -1014,9 +1050,9 @@ mod tests {
     #[test]
     fn script_keys_name_the_principal() {
         let h = host();
-        h.script("uv", uv());
-        h.as_user("deploy").script("uv", uv());
-        h.as_user("root").script("uv", uv());
+        h.pkg(["uv"]).installer_script(uv());
+        h.as_user("deploy").pkg(["uv"]).installer_script(uv());
+        h.as_user("root").pkg(["uv"]).installer_script(uv());
         let t = h.snapshot();
         let keys: Vec<(String, String)> = t
             .nodes
@@ -1052,7 +1088,8 @@ mod tests {
     #[test]
     fn script_writes_narrowing_keeps_post() {
         let h = host();
-        h.script("uv", uv())
+        h.pkg(["uv"])
+            .installer_script(uv())
             .writes([Key::file("/usr/local/bin/uv")]);
         let Node::Op(o) = &h.snapshot().nodes[0] else {
             panic!()
@@ -1065,10 +1102,11 @@ mod tests {
     #[test]
     fn cargo_keys_writes_kind_and_post() {
         let h = host();
-        h.cargo(["cargo-deb", "cargo-generate-rpm"]);
-        h.as_user("deploy").cargo(["cargo-deb"]);
+        h.pkg(["cargo-deb", "cargo-generate-rpm"]).cargo();
+        h.as_user("deploy").pkg(["cargo-deb"]).cargo();
         h.as_user("root")
-            .cargo(["x"])
+            .pkg(["x"])
+            .cargo()
             .writes([Key::file("/root/.cargo/bin/x")]);
         let t = h.snapshot();
         assert!(t.errors.is_empty(), "{:?}", t.errors);
@@ -1106,9 +1144,9 @@ mod tests {
     #[test]
     fn cargo_pin_takes_one_name_and_never_merges() {
         let h = host();
-        h.cargo(["a"]).pin("1.0.0");
+        h.pkg(["a"]).cargo().pin("1.0.0");
         assert!(errors(&h).is_empty());
-        h.cargo(["a", "b"]).pin("1.0.0");
+        h.pkg(["a", "b"]).cargo().pin("1.0.0");
         assert_eq!(
             errors(&h),
             ["cargo: a pinned op takes exactly one package name"]
@@ -1125,9 +1163,10 @@ mod tests {
     #[test]
     fn mise_keys_writes_kind_and_post() {
         let h = host();
-        h.mise(["just", "fd"]);
+        h.pkg(["just", "fd"]).mise();
         h.as_user("root")
-            .mise(["bat"])
+            .pkg(["bat"])
+            .mise()
             .writes([Key::file("/usr/local/share/mise/installs/bat")]);
         let t = h.snapshot();
         assert!(t.errors.is_empty(), "{:?}", t.errors);
@@ -1171,20 +1210,20 @@ mod tests {
     #[test]
     fn mise_is_root_only() {
         let h = host();
-        h.as_user("bot").mise(["just"]);
+        h.as_user("bot").pkg(["just"]).mise();
         assert_eq!(errors(&h), ["mise source is system-wide (root only)"]);
         let h = host();
-        h.as_user("root").mise(["just"]);
-        h.mise(["just"]);
+        h.as_user("root").pkg(["just"]).mise();
+        h.pkg(["just"]).mise();
         assert!(errors(&h).is_empty());
     }
 
     #[test]
     fn mise_pin_takes_one_name_and_never_merges() {
         let h = host();
-        h.mise(["a"]).pin("1.0.0");
+        h.pkg(["a"]).mise().pin("1.0.0");
         assert!(errors(&h).is_empty());
-        h.mise(["a", "b"]).pin("1.0.0");
+        h.pkg(["a", "b"]).mise().pin("1.0.0");
         assert_eq!(
             errors(&h),
             ["mise: a pinned op takes exactly one package name"]
@@ -1199,5 +1238,141 @@ mod tests {
         a.wanted = Wanted::Pinned("1".into());
         b.wanted = Wanted::Pinned("1".into());
         assert!(!a.can_merge(&b));
+    }
+    // T78: one `pkg`, every source chained.
+
+    fn op_of(h: &Host<()>, i: usize) -> OpNode {
+        match &h.snapshot().nodes[i] {
+            Node::Op(o) => o.clone(),
+            n => panic!("not an op: {n:?}"),
+        }
+    }
+
+    fn chain_script() -> InstallerScript {
+        InstallerScript::new()
+            .bin("/usr/local/bin/uv")
+            .version("uv --version")
+            .install("sh install.sh")
+    }
+
+    #[test]
+    fn chained_pip_switches_the_source_and_keeps_the_op() {
+        let h = host();
+        let handle = h.pkg(["requests", "six"]).pip();
+        let o = op_of(&h, 0);
+        let OpSpec::Pkg(p) = &o.spec else { panic!() };
+        assert_eq!(p.source, Source::Pip);
+        assert_eq!(p.kind(), "pkg");
+        assert_eq!(handle.id().0, 0);
+        assert_eq!(h.snapshot().nodes.len(), 1);
+        let w: Vec<String> = o.writes.iter().map(|k| k.to_string()).collect();
+        assert_eq!(w, ["pkg:pip:requests", "pkg:pip:six"]);
+        assert!(errors(&h).is_empty(), "{:?}", errors(&h));
+    }
+
+    #[test]
+    fn chained_yum_is_the_old_yum_op() {
+        let h = host();
+        h.pkg(["git"]).yum();
+        let p = spec_of(&h, 0);
+        assert_eq!(p.source, Source::Distro(Manager::Yum));
+        assert_eq!(p.kind(), "pkg");
+        assert_eq!(p.keys().iter().next().unwrap().to_string(), "pkg:git");
+    }
+
+    #[test]
+    fn chained_cargo_mise_rustup_installer_script_switch_defaults() {
+        let h = host();
+        h.pkg(["cargo-deb"]).cargo();
+        h.pkg(["just"]).mise();
+        h.pkg(["stable"])
+            .rustup()
+            .targets(["wasm32-unknown-unknown"]);
+        h.pkg(["uv"]).installer_script(chain_script());
+        let kinds: Vec<&str> = (0..4).map(|i| spec_of(&h, i).kind()).collect();
+        assert_eq!(
+            kinds,
+            ["pkg[cargo]", "pkg[mise]", "pkg[rustup]", "pkg[script]"]
+        );
+        for i in 0..4 {
+            assert_eq!(op_of(&h, i).writes, BTreeSet::from([Key::Any]), "{i}");
+        }
+        let post =
+            |i: usize| -> Vec<String> { op_of(&h, i).post.keys().map(|k| k.to_string()).collect() };
+        assert_eq!(post(0), ["pkg:cargo:root:cargo-deb"]);
+        assert_eq!(
+            post(1),
+            ["pkg:mise:root:just", "file:/etc/mise/config.toml"]
+        );
+        assert_eq!(
+            post(2),
+            [
+                "pkg:rustup:root:stable",
+                "pkg:rustup:root:stable/target/wasm32-unknown-unknown"
+            ]
+        );
+        assert_eq!(post(3), ["pkg:script:root:uv", "file:/usr/local/bin/uv"]);
+        assert!(errors(&h).is_empty(), "{:?}", errors(&h));
+    }
+
+    #[test]
+    fn a_second_source_call_is_a_trace_error_at_the_caller() {
+        let h = host();
+        let l = line!() + 1;
+        h.pkg(["x"]).pip().cargo();
+        let t = h.snapshot();
+        assert_eq!(t.errors.len(), 1, "{:?}", t.errors);
+        assert!(
+            t.errors[0].message.contains("source") && t.errors[0].message.contains("cargo"),
+            "{}",
+            t.errors[0].message
+        );
+        let site = t.errors[0].site.expect("site");
+        assert_eq!((site.file, site.line), (file!(), l));
+        // The first source stands.
+        assert_eq!(spec_of(&h, 0).source, Source::Pip);
+        // `.yum().yum()` counts too.
+        let h = host();
+        h.pkg(["x"]).yum().yum();
+        assert_eq!(errors(&h).len(), 1);
+    }
+
+    #[test]
+    fn a_source_switch_reruns_the_source_checks() {
+        let h = host();
+        h.pkg(["stable", "beta"]).rustup();
+        h.pkg(["a", "b"]).installer_script(chain_script());
+        h.pkg(["uv"]).installer_script(InstallerScript::new());
+        h.as_user("bob").pkg(["node"]).mise();
+        assert_eq!(
+            errors(&h),
+            [
+                "rustup: exactly one toolchain name per rustup op",
+                "script a: exactly one package name per script op",
+                "script uv: bin is required",
+                "script uv: version is required",
+                "script uv: install is required",
+                "mise source is system-wide (root only)",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_source_switch_drops_distro_only_state_and_rederives_effects() {
+        let h = host();
+        h.pkg(["libc6"]).build_dep().update_cache(true).pip();
+        let o = op_of(&h, 0);
+        let OpSpec::Pkg(p) = &o.spec else { panic!() };
+        assert_eq!(p.mode, PkgMode::Install);
+        assert!(!p.update_cache);
+        assert_eq!(p.wanted, Wanted::Present);
+        assert_eq!(o.post.len(), 1);
+        assert_eq!(o.writes.len(), 1);
+        // Reads, guards and allowances set before the switch stay.
+        let h = host();
+        h.pkg(["a"]).reads([Key::file("/x")]).at_end().cargo();
+        let o = op_of(&h, 0);
+        assert!(o.at_end);
+        assert_eq!(o.reads, BTreeSet::from([Key::file("/x")]));
     }
 }

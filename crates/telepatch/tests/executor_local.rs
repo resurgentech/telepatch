@@ -337,9 +337,9 @@ fn installer(dir: &str, default: &str) -> String {
     )
 }
 
-fn tool_spec(h: &Host<PathBuf>) -> telepatch::ops::pkg::ScriptSpec {
+fn tool_spec(h: &Host<PathBuf>) -> telepatch::ops::pkg::InstallerScript {
     let dir = h.vars.to_str().unwrap().to_string();
-    telepatch::ops::pkg::ScriptSpec::new()
+    telepatch::ops::pkg::InstallerScript::new()
         .bin(format!("{dir}/tool"))
         .version(format!("{dir}/tool --version"))
         .install(installer(&dir, "1.2.3"))
@@ -354,7 +354,7 @@ fn tool_out(d: &std::path::Path) -> String {
 fn script_present_installs_once() {
     fn run_(h: Host<PathBuf>) -> PlaybookFuture {
         Box::pin(async move {
-            h.script("tool", tool_spec(&h));
+            h.pkg(["tool"]).installer_script(tool_spec(&h));
             Ok(())
         })
     }
@@ -395,7 +395,7 @@ fn script_present_installs_once() {
 fn script_will_change_is_a_json_event() {
     fn run_(h: Host<PathBuf>) -> PlaybookFuture {
         Box::pin(async move {
-            h.script("tool", tool_spec(&h)).pin("2.0.0");
+            h.pkg(["tool"]).installer_script(tool_spec(&h)).pin("2.0.0");
             Ok(())
         })
     }
@@ -435,13 +435,13 @@ fn script_pin_mismatch_runs_update() {
     fn run_(h: Host<PathBuf>) -> PlaybookFuture {
         Box::pin(async move {
             let dir = h.vars.to_str().unwrap().to_string();
-            h.script(
-                "tool",
-                tool_spec(&h)
-                    .install("echo install-must-not-run; exit 9")
-                    .update(installer(&dir, "never")),
-            )
-            .pin("2.0.0");
+            h.pkg(["tool"])
+                .installer_script(
+                    tool_spec(&h)
+                        .install("echo install-must-not-run; exit 9")
+                        .update(installer(&dir, "never")),
+                )
+                .pin("2.0.0");
             Ok(())
         })
     }
@@ -477,7 +477,8 @@ fn script_pin_mismatch_runs_update() {
 fn script_installer_that_creates_nothing_fails() {
     fn run_(h: Host<PathBuf>) -> PlaybookFuture {
         Box::pin(async move {
-            h.script("tool", tool_spec(&h).install("echo pretending"));
+            h.pkg(["tool"])
+                .installer_script(tool_spec(&h).install("echo pretending"));
             Ok(())
         })
     }
@@ -499,14 +500,14 @@ fn script_latest_command_drives_an_update() {
     fn run_(h: Host<PathBuf>) -> PlaybookFuture {
         Box::pin(async move {
             let dir = h.vars.to_str().unwrap().to_string();
-            h.script(
-                "tool",
-                tool_spec(&h)
-                    .install("exit 9")
-                    .update(installer(&dir, "never"))
-                    .latest(telepatch::ops::pkg::Latest::command("echo 1.2.3")),
-            )
-            .latest();
+            h.pkg(["tool"])
+                .installer_script(
+                    tool_spec(&h)
+                        .install("exit 9")
+                        .update(installer(&dir, "never"))
+                        .latest(telepatch::ops::pkg::Latest::command("echo 1.2.3")),
+                )
+                .latest();
             Ok(())
         })
     }
@@ -539,11 +540,11 @@ fn script_latest_command_drives_an_update() {
 fn script_unresolvable_latest_fails_the_op() {
     fn run_(h: Host<PathBuf>) -> PlaybookFuture {
         Box::pin(async move {
-            h.script(
-                "tool",
-                tool_spec(&h).latest(telepatch::ops::pkg::Latest::command("exit 1")),
-            )
-            .latest();
+            h.pkg(["tool"])
+                .installer_script(
+                    tool_spec(&h).latest(telepatch::ops::pkg::Latest::command("exit 1")),
+                )
+                .latest();
             Ok(())
         })
     }
@@ -638,7 +639,7 @@ fn stub_path(d: &std::path::Path) -> String {
 fn cargo_present_installs_missing_in_one_command_then_changed_0() {
     fn run_(h: Host<PathBuf>) -> PlaybookFuture {
         Box::pin(async move {
-            h.cargo(["cargo-deb", "cargo-generate-rpm", "have"]);
+            h.pkg(["cargo-deb", "cargo-generate-rpm", "have"]).cargo();
             Ok(())
         })
     }
@@ -690,7 +691,7 @@ fn cargo_present_installs_missing_in_one_command_then_changed_0() {
 fn cargo_will_change_json_event_is_one_per_name() {
     fn run_(h: Host<PathBuf>) -> PlaybookFuture {
         Box::pin(async move {
-            h.cargo(["a", "b"]);
+            h.pkg(["a", "b"]).cargo();
             Ok(())
         })
     }
@@ -727,7 +728,7 @@ fn cargo_will_change_json_event_is_one_per_name() {
 fn cargo_pinned_installs_with_version_when_different() {
     fn run_(h: Host<PathBuf>) -> PlaybookFuture {
         Box::pin(async move {
-            h.cargo(["cargo-deb"]).pin("0.2.0");
+            h.pkg(["cargo-deb"]).cargo().pin("0.2.0");
             Ok(())
         })
     }
@@ -763,7 +764,7 @@ fn cargo_pinned_installs_with_version_when_different() {
 fn cargo_latest_asks_cargo_search_on_the_host() {
     fn run_(h: Host<PathBuf>) -> PlaybookFuture {
         Box::pin(async move {
-            h.cargo(["cargo-deb", "cargo-generate-rpm"]).latest();
+            h.pkg(["cargo-deb", "cargo-generate-rpm"]).cargo().latest();
             Ok(())
         })
     }
@@ -803,7 +804,7 @@ fn cargo_latest_asks_cargo_search_on_the_host() {
 fn cargo_latest_lookup_failure_fails_the_op() {
     fn run_(h: Host<PathBuf>) -> PlaybookFuture {
         Box::pin(async move {
-            h.cargo(["nowhere"]).latest();
+            h.pkg(["nowhere"]).cargo().latest();
             Ok(())
         })
     }
@@ -833,7 +834,7 @@ fn cargo_latest_lookup_failure_fails_the_op() {
 fn cargo_install_that_installs_nothing_fails() {
     fn run_(h: Host<PathBuf>) -> PlaybookFuture {
         Box::pin(async move {
-            h.cargo(["a"]);
+            h.pkg(["a"]).cargo();
             Ok(())
         })
     }
@@ -862,7 +863,7 @@ fn cargo_install_that_installs_nothing_fails() {
 fn cargo_missing_fails_and_prepare_says_unknown() {
     fn run_(h: Host<PathBuf>) -> PlaybookFuture {
         Box::pin(async move {
-            h.cargo(["a"]);
+            h.pkg(["a"]).cargo();
             Ok(())
         })
     }
@@ -905,8 +906,8 @@ fn cargo_missing_fails_and_prepare_says_unknown() {
 fn cargo_adjacent_ops_merge_into_one_install() {
     fn run_(h: Host<PathBuf>) -> PlaybookFuture {
         Box::pin(async move {
-            h.cargo(["a"]);
-            h.cargo(["b"]);
+            h.pkg(["a"]).cargo();
+            h.pkg(["b"]).cargo();
             Ok(())
         })
     }
@@ -937,9 +938,9 @@ fn cargo_adjacent_ops_merge_into_one_install() {
 fn cargo_ops_do_not_merge_across_a_star_writer() {
     fn run_(h: Host<PathBuf>) -> PlaybookFuture {
         Box::pin(async move {
-            h.cargo(["a"]);
+            h.pkg(["a"]).cargo();
             sh!(h, "true");
-            h.cargo(["b"]);
+            h.pkg(["b"]).cargo();
             Ok(())
         })
     }
@@ -963,8 +964,8 @@ fn cargo_ops_do_not_merge_across_a_star_writer() {
 fn pinned_cargo_ops_never_merge() {
     fn run_(h: Host<PathBuf>) -> PlaybookFuture {
         Box::pin(async move {
-            h.cargo(["a"]).pin("1.0.0");
-            h.cargo(["b"]).pin("1.0.0");
+            h.pkg(["a"]).cargo().pin("1.0.0");
+            h.pkg(["b"]).cargo().pin("1.0.0");
             Ok(())
         })
     }
@@ -1081,7 +1082,7 @@ fn mise_failed(r: &Report, out: &str) {
 fn mise_present_installs_missing_in_one_command_then_changed_0() {
     fn run_(h: Host<PathBuf>) -> PlaybookFuture {
         Box::pin(async move {
-            h.mise(["just", "fd", "have"]);
+            h.pkg(["just", "fd", "have"]).mise();
             Ok(())
         })
     }
@@ -1159,7 +1160,7 @@ fn mise_present_installs_missing_in_one_command_then_changed_0() {
 fn mise_pinned_installs_when_the_pin_is_not_installed() {
     fn run_(h: Host<PathBuf>) -> PlaybookFuture {
         Box::pin(async move {
-            h.mise(["just"]).pin("1.36.0");
+            h.pkg(["just"]).mise().pin("1.36.0");
             Ok(())
         })
     }
@@ -1199,7 +1200,7 @@ fn mise_pinned_installs_when_the_pin_is_not_installed() {
 fn mise_latest_asks_mise_latest_on_the_host() {
     fn run_(h: Host<PathBuf>) -> PlaybookFuture {
         Box::pin(async move {
-            h.mise(["just", "fd"]).latest();
+            h.pkg(["just", "fd"]).mise().latest();
             Ok(())
         })
     }
@@ -1240,7 +1241,7 @@ fn mise_latest_asks_mise_latest_on_the_host() {
 fn mise_latest_lookup_failure_fails_the_op_before_anything_changes() {
     fn run_(h: Host<PathBuf>) -> PlaybookFuture {
         Box::pin(async move {
-            h.mise(["nowhere"]).latest();
+            h.pkg(["nowhere"]).mise().latest();
             Ok(())
         })
     }
@@ -1270,7 +1271,7 @@ fn mise_latest_lookup_failure_fails_the_op_before_anything_changes() {
 fn mise_reshims_when_an_installed_tool_has_no_shim() {
     fn run_(h: Host<PathBuf>) -> PlaybookFuture {
         Box::pin(async move {
-            h.mise(["just"]);
+            h.pkg(["just"]).mise();
             Ok(())
         })
     }
@@ -1311,7 +1312,7 @@ fn mise_reshims_when_an_installed_tool_has_no_shim() {
 fn mise_install_that_installs_nothing_fails() {
     fn run_(h: Host<PathBuf>) -> PlaybookFuture {
         Box::pin(async move {
-            h.mise(["a"]);
+            h.pkg(["a"]).mise();
             Ok(())
         })
     }
@@ -1336,7 +1337,7 @@ fn mise_install_that_installs_nothing_fails() {
 fn mise_missing_fails_and_prepare_says_unknown() {
     fn run_(h: Host<PathBuf>) -> PlaybookFuture {
         Box::pin(async move {
-            h.mise(["a"]);
+            h.pkg(["a"]).mise();
             Ok(())
         })
     }
@@ -1374,8 +1375,8 @@ fn mise_missing_fails_and_prepare_says_unknown() {
 fn mise_adjacent_ops_merge_into_one_install() {
     fn run_(h: Host<PathBuf>) -> PlaybookFuture {
         Box::pin(async move {
-            h.mise(["a"]);
-            h.mise(["b"]);
+            h.pkg(["a"]).mise();
+            h.pkg(["b"]).mise();
             Ok(())
         })
     }
@@ -1584,7 +1585,8 @@ const CHECK_UPTODATE: &str = "stable-x86_64-unknown-linux-gnu - Up to date : 1.9
 fn rustup_fresh_install_with_target_then_changed_0() {
     fn run_(h: Host<PathBuf>) -> PlaybookFuture {
         Box::pin(async move {
-            h.rustup("stable")
+            h.pkg(["stable"])
+                .rustup()
                 .targets(["x86_64-unknown-linux-musl"])
                 .installer(format!("sh {}", p(&h, "installer.sh")));
             Ok(())
@@ -1647,7 +1649,8 @@ fn rustup_fresh_install_with_target_then_changed_0() {
 fn rustup_toolchain_missing_with_rustup_present_installs_it() {
     fn run_(h: Host<PathBuf>) -> PlaybookFuture {
         Box::pin(async move {
-            h.rustup("stable")
+            h.pkg(["stable"])
+                .rustup()
                 .profile("minimal")
                 .components(["rust-src", "rustfmt"])
                 .installer("exit 99");
@@ -1697,7 +1700,7 @@ fn rustup_toolchain_missing_with_rustup_present_installs_it() {
 fn rustup_latest_updates_when_check_says_so() {
     fn run_(h: Host<PathBuf>) -> PlaybookFuture {
         Box::pin(async move {
-            h.rustup("stable").latest();
+            h.pkg(["stable"]).rustup().latest();
             Ok(())
         })
     }
@@ -1744,7 +1747,7 @@ fn rustup_latest_updates_when_check_says_so() {
 fn rustup_latest_without_an_update_changes_nothing() {
     fn run_(h: Host<PathBuf>) -> PlaybookFuture {
         Box::pin(async move {
-            h.rustup("stable").latest();
+            h.pkg(["stable"]).rustup().latest();
             Ok(())
         })
     }
@@ -1773,7 +1776,7 @@ fn rustup_latest_without_an_update_changes_nothing() {
 fn rustup_check_failure_fails_the_op() {
     fn run_(h: Host<PathBuf>) -> PlaybookFuture {
         Box::pin(async move {
-            h.rustup("stable").latest();
+            h.pkg(["stable"]).rustup().latest();
             Ok(())
         })
     }
@@ -1809,7 +1812,7 @@ fn rustup_check_failure_fails_the_op() {
 fn rustup_default_is_set_only_when_needed() {
     fn run_(h: Host<PathBuf>) -> PlaybookFuture {
         Box::pin(async move {
-            h.rustup("stable").set_default();
+            h.pkg(["stable"]).rustup().set_default();
             Ok(())
         })
     }
@@ -1868,7 +1871,8 @@ fn rustup_default_is_set_only_when_needed() {
 fn rustup_finds_the_installer_s_rustup_under_cargo_home() {
     fn run_(h: Host<PathBuf>) -> PlaybookFuture {
         Box::pin(async move {
-            h.rustup("stable")
+            h.pkg(["stable"])
+                .rustup()
                 .installer(format!("sh {}", p(&h, "installer.sh")));
             Ok(())
         })

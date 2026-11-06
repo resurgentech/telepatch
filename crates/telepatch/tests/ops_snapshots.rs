@@ -4,7 +4,7 @@
 use std::rc::Rc;
 
 use telepatch::facts::os::Os;
-use telepatch::ops::pkg::{Latest, ScriptSpec};
+use telepatch::ops::pkg::{InstallerScript, Latest};
 use telepatch::plan::render_host;
 use telepatch::trailer::render_op;
 use telepatch::{Host, Node, NodeId, sh};
@@ -60,7 +60,7 @@ fn dnf_group_and_provide() {
 #[test]
 fn yum() {
     let h = host("amazonlinux2023");
-    let id = h.yum(["git", "@Development Tools"]).id();
+    let id = h.pkg(["git", "@Development Tools"]).yum().id();
     insta::assert_snapshot!(wrapped(&h, id));
 }
 
@@ -74,14 +74,14 @@ fn pacman() {
 #[test]
 fn pip() {
     let h = host("debian12");
-    let id = h.pip(["requests", "pyyaml"]).id();
+    let id = h.pkg(["requests", "pyyaml"]).pip().id();
     insta::assert_snapshot!(wrapped(&h, id));
 }
 
 #[test]
 fn pip_latest() {
     let h = host("debian12");
-    let p = h.pip(["requests"]);
+    let p = h.pkg(["requests"]).pip();
     p.latest();
     insta::assert_snapshot!(wrapped(&h, p.id()));
 }
@@ -153,15 +153,15 @@ fn sh_op() {
 fn plan_shows_pkg_and_file_effects() {
     let h = host("debian12");
     h.pkg(["curl"]);
-    h.pip(["requests"]);
+    h.pkg(["requests"]).pip();
     h.pkg(["python3"]).build_dep();
     h.file("/etc/a").line("x");
     h.file("/etc/b").absent();
     insta::assert_snapshot!(render_host("h", &h.os, &h.snapshot()));
 }
 
-fn uv_spec() -> ScriptSpec {
-    ScriptSpec::new()
+fn uv_spec() -> InstallerScript {
+    InstallerScript::new()
         .bin("/usr/local/bin/uv")
         .version("uv self version --short")
         .install(
@@ -173,7 +173,7 @@ fn uv_spec() -> ScriptSpec {
 #[test]
 fn script_present() {
     let h = host("debian12");
-    let id = h.script("uv", uv_spec()).id();
+    let id = h.pkg(["uv"]).installer_script(uv_spec()).id();
     assert!(h.snapshot().errors.is_empty(), "{:?}", h.snapshot().errors);
     insta::assert_snapshot!(wrapped(&h, id));
 }
@@ -181,7 +181,7 @@ fn script_present() {
 #[test]
 fn script_pinned() {
     let h = host("debian12");
-    let p = h.script("uv", uv_spec());
+    let p = h.pkg(["uv"]).installer_script(uv_spec());
     p.pin("0.9.5");
     assert!(h.snapshot().errors.is_empty(), "{:?}", h.snapshot().errors);
     insta::assert_snapshot!(wrapped(&h, p.id()));
@@ -190,10 +190,9 @@ fn script_pinned() {
 #[test]
 fn script_latest_github_release() {
     let h = host("debian12");
-    let p = h.script(
-        "uv",
-        uv_spec().latest(Latest::github_release("astral-sh/uv")),
-    );
+    let p = h
+        .pkg(["uv"])
+        .installer_script(uv_spec().latest(Latest::github_release("astral-sh/uv")));
     p.latest();
     assert!(h.snapshot().errors.is_empty(), "{:?}", h.snapshot().errors);
     insta::assert_snapshot!(wrapped(&h, p.id()));
@@ -202,9 +201,10 @@ fn script_latest_github_release() {
 #[test]
 fn plan_shows_script_effects() {
     let h = host("debian12");
-    h.script("uv", uv_spec());
+    h.pkg(["uv"]).installer_script(uv_spec());
     h.as_user("deploy")
-        .script("tool", uv_spec().bin("/home/deploy/.local/bin/tool"))
+        .pkg(["tool"])
+        .installer_script(uv_spec().bin("/home/deploy/.local/bin/tool"))
         .writes([telepatch::Key::file("/home/deploy/.local/bin/tool")]);
     insta::assert_snapshot!(render_host("h", &h.os, &h.snapshot()));
 }
@@ -282,7 +282,7 @@ fn write_exe(p: &std::path::Path, text: &str) {
 #[test]
 fn cargo_present() {
     let h = host("debian12");
-    let id = h.cargo(["cargo-deb", "cargo-generate-rpm"]).id();
+    let id = h.pkg(["cargo-deb", "cargo-generate-rpm"]).cargo().id();
     assert!(h.snapshot().errors.is_empty(), "{:?}", h.snapshot().errors);
     insta::assert_snapshot!(wrapped(&h, id));
 }
@@ -290,7 +290,7 @@ fn cargo_present() {
 #[test]
 fn cargo_pinned() {
     let h = host("debian12");
-    let p = h.cargo(["cargo-deb"]);
+    let p = h.pkg(["cargo-deb"]).cargo();
     p.pin("2.1.0");
     assert!(h.snapshot().errors.is_empty(), "{:?}", h.snapshot().errors);
     insta::assert_snapshot!(wrapped(&h, p.id()));
@@ -299,7 +299,7 @@ fn cargo_pinned() {
 #[test]
 fn cargo_latest() {
     let h = host("debian12");
-    let p = h.cargo(["cargo-deb", "cargo-generate-rpm"]);
+    let p = h.pkg(["cargo-deb", "cargo-generate-rpm"]).cargo();
     p.latest();
     assert!(h.snapshot().errors.is_empty(), "{:?}", h.snapshot().errors);
     insta::assert_snapshot!(wrapped(&h, p.id()));
@@ -310,7 +310,7 @@ fn cargo_latest() {
 #[test]
 fn cargo_as_user_root() {
     let h = host("debian12");
-    let id = h.as_user("root").cargo(["cargo-deb"]).id();
+    let id = h.as_user("root").pkg(["cargo-deb"]).cargo().id();
     assert!(h.snapshot().errors.is_empty(), "{:?}", h.snapshot().errors);
     insta::assert_snapshot!(wrapped(&h, id));
 }
@@ -318,9 +318,10 @@ fn cargo_as_user_root() {
 #[test]
 fn plan_shows_cargo_effects() {
     let h = host("debian12");
-    h.cargo(["cargo-deb", "cargo-generate-rpm"]);
+    h.pkg(["cargo-deb", "cargo-generate-rpm"]).cargo();
     h.as_user("deploy")
-        .cargo(["ripgrep"])
+        .pkg(["ripgrep"])
+        .cargo()
         .writes([telepatch::Key::file("/home/deploy/.cargo/bin/rg")]);
     insta::assert_snapshot!(render_host("h", &h.os, &h.snapshot()));
 }
@@ -328,7 +329,7 @@ fn plan_shows_cargo_effects() {
 #[test]
 fn rustup_present() {
     let h = host("debian12");
-    let id = h.rustup("stable").id();
+    let id = h.pkg(["stable"]).rustup().id();
     assert!(h.snapshot().errors.is_empty(), "{:?}", h.snapshot().errors);
     insta::assert_snapshot!(wrapped(&h, id));
 }
@@ -336,7 +337,7 @@ fn rustup_present() {
 #[test]
 fn rustup_latest() {
     let h = host("debian12");
-    let p = h.rustup("stable");
+    let p = h.pkg(["stable"]).rustup();
     p.latest();
     assert!(h.snapshot().errors.is_empty(), "{:?}", h.snapshot().errors);
     insta::assert_snapshot!(wrapped(&h, p.id()));
@@ -346,7 +347,7 @@ fn rustup_latest() {
 #[test]
 fn rustup_with_options_as_user() {
     let h = host("debian12");
-    let p = h.as_user("deploy").rustup("1.94.0");
+    let p = h.as_user("deploy").pkg(["1.94.0"]).rustup();
     p.targets(["x86_64-unknown-linux-musl", "aarch64-unknown-linux-gnu"])
         .components(["rust-src", "clippy"])
         .profile("minimal")
@@ -359,9 +360,12 @@ fn rustup_with_options_as_user() {
 #[test]
 fn plan_shows_rustup_effects() {
     let h = host("debian12");
-    h.rustup("stable").targets(["x86_64-unknown-linux-musl"]);
+    h.pkg(["stable"])
+        .rustup()
+        .targets(["x86_64-unknown-linux-musl"]);
     h.as_user("deploy")
-        .rustup("nightly-2026-10-01")
+        .pkg(["nightly-2026-10-01"])
+        .rustup()
         .components(["rust-src"])
         .writes([telepatch::Key::file("/home/deploy/.cargo/bin/rustup")]);
     insta::assert_snapshot!(render_host("h", &h.os, &h.snapshot()));
@@ -370,7 +374,7 @@ fn plan_shows_rustup_effects() {
 #[test]
 fn mise_present() {
     let h = host("debian12");
-    let id = h.mise(["just", "fd"]).id();
+    let id = h.pkg(["just", "fd"]).mise().id();
     assert!(h.snapshot().errors.is_empty(), "{:?}", h.snapshot().errors);
     insta::assert_snapshot!(wrapped(&h, id));
 }
@@ -378,7 +382,7 @@ fn mise_present() {
 #[test]
 fn mise_pinned() {
     let h = host("debian12");
-    let p = h.mise(["just"]);
+    let p = h.pkg(["just"]).mise();
     p.pin("1.36.0");
     assert!(h.snapshot().errors.is_empty(), "{:?}", h.snapshot().errors);
     insta::assert_snapshot!(wrapped(&h, p.id()));
@@ -387,7 +391,7 @@ fn mise_pinned() {
 #[test]
 fn mise_latest() {
     let h = host("debian12");
-    let p = h.mise(["just", "fd"]);
+    let p = h.pkg(["just", "fd"]).mise();
     p.latest();
     assert!(h.snapshot().errors.is_empty(), "{:?}", h.snapshot().errors);
     insta::assert_snapshot!(wrapped(&h, p.id()));
@@ -396,7 +400,7 @@ fn mise_latest() {
 #[test]
 fn plan_shows_mise_effects() {
     let h = host("debian12");
-    h.mise(["just", "fd"]);
-    h.as_user("root").mise(["bat"]).pin("0.25.0");
+    h.pkg(["just", "fd"]).mise();
+    h.as_user("root").pkg(["bat"]).mise().pin("0.25.0");
     insta::assert_snapshot!(render_host("h", &h.os, &h.snapshot()));
 }

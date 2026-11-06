@@ -368,8 +368,8 @@ fn cargo_stub(d: &Path, installed: &str) -> String {
 fn member_rule(h: Host<PathBuf>) -> PlaybookFuture {
     Box::pin(async move {
         let log = p(&h, "log");
-        let have = h.cargo(["have"]);
-        let new = h.cargo(["new"]);
+        let have = h.pkg(["have"]).cargo();
+        let new = h.pkg(["new"]).cargo();
         sh!(h, "echo MARK_HAVE >> {log}").when(have.changed());
         sh!(h, "echo MARK_NEW >> {log}").when(new.changed());
         Ok(())
@@ -406,8 +406,8 @@ fn a_merged_pkg_member_changed_only_when_its_own_names_were_installed() {
 fn member_rule_later(h: Host<PathBuf>) -> PlaybookFuture {
     Box::pin(async move {
         let log = p(&h, "log");
-        let have = h.cargo(["have"]);
-        let new = h.cargo(["new"]);
+        let have = h.pkg(["have"]).cargo();
+        let new = h.pkg(["new"]).cargo();
         sh!(h, "true");
         let _ = h.bin_exists("tp-no-such-bin-zz").await;
         sh!(h, "echo MARK_HAVE >> {log}").when(have.changed());
@@ -519,8 +519,8 @@ fn a_restart_after_a_start_in_an_earlier_window_is_skipped() {
 /// A restart on a merged pkg op's member: named by its own package.
 fn restart_on_member(h: Host<PathBuf>) -> PlaybookFuture {
     Box::pin(async move {
-        let have = h.cargo(["have"]);
-        let new = h.cargo(["new"]);
+        let have = h.pkg(["have"]).cargo();
+        let new = h.pkg(["new"]).cargo();
         h.svc("app").restart_on(&new);
         h.svc("other").restart_on(&have);
         Ok(())

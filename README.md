@@ -112,11 +112,12 @@ async fn rust_build(h: &Host<Vars>) -> Result<(), TraceError> {
 
     for u in h.vars.admin_users.iter().map(String::as_str).chain(["root"]) {
         let s = h.as_user(u);
-        s.rustup("stable")
+        s.pkg(["stable"])
+            .rustup()
             .targets(["x86_64-unknown-linux-musl"])
             .set_default()
             .latest();
-        s.cargo(["cargo-deb", "cargo-generate-rpm"]);
+        s.pkg(["cargo-deb", "cargo-generate-rpm"]).cargo();
     }
     Ok(())
 }
@@ -131,15 +132,14 @@ fn main() -> ExitCode {
 ```
 
 That is a complete playbook binary. Nothing in the role runs when it is
-called: `h.pkg`, `s.rustup` and `s.cargo` append nodes to the host's trace
+called: `h.pkg` and `s.pkg(..).cargo()` append nodes to the host's trace
 and return handles. Packages have a *source* (the distro manager, pip,
 cargo, rustup, or a vendor install script) and a *wanted* state (present,
 pinned to a version, or latest), and every source knows how to probe, install
 and update, so an installer is never a bare shell line with a `creates`
-guard. The example uses the per-source methods built today; the decided API
-chains the source onto one call, `s.pkg(["stable"]).rustup()` and
-`s.pkg([..]).cargo()`, and removes those methods (designed; see the note's
-"The decided API"). `sh!` is the escape hatch for a need no primitive meets
+guard. One call, `h.pkg(names)`, takes the source as a chained method:
+`.pip()`, `.cargo()`, `.mise()`, `.rustup()`, `.yum()` or
+`.installer_script(..)`. `sh!` is the escape hatch for a need no primitive meets
 yet, with shell-quoted interpolation and `unless`, `creates` and
 `changed_if`. The decided rule is that a role body has no shell: each `sh!`
 carries a `// HACK(<primitive>)` comment and is to be reported as a warning.
@@ -192,8 +192,9 @@ The full design, including the parts not built yet, is in
 |---|---|
 | Trace, resolver, engine loop, optimizer | Built, with snapshot tests and an adversarial plan suite |
 | `pkg` from the distro (apt, dnf, yum, pacman, apt build-dep) | Built; merged across roles; apt cache refreshed once when stale |
-| `pkg` from pip, cargo, rustup, mise and vendor installer scripts | Built, one host method per source; present, pinned or latest; latest resolved on the host by the source's own command |
-| One `pkg` with the source chained (`h.pkg([..]).pip()`, `.cargo().locked()`, `.rustup()`, `.mise()`, `.yum()`, `.installer_script(..)`, `.binary_release(..)`), replacing the per-source methods; pin, latest and absent on the distro manager; a package from a fetched file | Designed, not built |
+| `pkg` from pip, cargo, rustup, mise and vendor installer scripts | Built, one `pkg` with the source chained; present, pinned or latest; latest resolved on the host by the source's own command |
+| One `pkg` with the source chained (`.pip()`, `.cargo()`, `.rustup()`, `.mise()`, `.yum()`, `.installer_script(..)`) | Built |
+| `pkg` chained `.cargo().locked()` and `.binary_release(..)`; pin, latest and absent on the distro manager; a package from a fetched file | Designed, not built |
 | `file` (content, line, line_re, dir, absent, mode, owner, validate) | Built |
 | `repo` (apt deb822, dnf), `user`, `group` | Built |
 | `sh!` with `unless`, `creates`, `changed_if`; `raw`; `barrier` | Built; the warning for `sh!` in a role body is designed |

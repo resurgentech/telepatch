@@ -47,7 +47,7 @@ test-live-pkg:
     cargo test -p telepatch --test live -- --ignored --nocapture pkg_
 
 # Live: the mise source's system layer in a fresh ubuntu:24.04 container as
-# root (mise installed with a ScriptSpec): run 2 changed 0 with the network
+# root (mise installed with an InstallerScript): run 2 changed 0 with the network
 # cut, root-owned config, system shim, a plain user runs it, pin, latest.
 # Needs docker and the network.
 test-live-mise:
