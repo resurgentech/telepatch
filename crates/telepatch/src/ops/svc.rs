@@ -40,6 +40,21 @@
 //! `systemctl daemon-reload` when systemd says `NeedDaemonReload=yes` for the
 //! unit. The decision is made by the script at run time from the host's real
 //! state (the package may arrive earlier in the same window).
+//!
+//! # Restart and reload
+//!
+//! `.restart()` and `.reload()` are actions, on an op of their own (with a
+//! state want, or with each other, a trace error). An action carries a
+//! guard, `.when(g)` or `.restart_on(&op)`; without one it is the policy
+//! error `UnguardedRestart` ([`crate::policy`]). Booted: `systemctl
+//! restart` (which starts an inactive unit), or `systemctl reload` when
+//! the unit is active and `systemctl start` when it is not (Ansible's
+//! `restarted` and `reloaded`); either after a `daemon-reload` when
+//! systemd says `NeedDaemonReload=yes`. Not booted, or no `systemctl`: the
+//! action is skipped. Equal guarded actions of one unit merge with their
+//! guards or-joined ([`crate::optimize`]); a restart or reload of a unit an
+//! earlier op of the run started is skipped (the executor and-nots that
+//! op's `changed` into the guard, [`crate::executor`]).
 
 use std::ops::Deref;
 
@@ -81,6 +96,23 @@ const CAPTURE: &str = concat!(
     "  case \"$tp_as\" in active) tp_was_a=true;; ?*) tp_was_a=false;; esac\n",
 );
 
+/// A guarded action on a unit: `.restart()` or `.reload()`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Action {
+    Restart,
+    Reload,
+}
+
+impl Action {
+    /// `restart` / `reload`.
+    pub fn name(self) -> &'static str {
+        match self {
+            Action::Restart => "restart",
+            Action::Reload => "reload",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SvcSpec {
     /// The unit as the role wrote it (passed to `systemctl` unchanged).
@@ -90,6 +122,10 @@ pub struct SvcSpec {
     pub masked: bool,
     pub started: bool,
     pub stopped: bool,
+    /// `.restart()` / `.reload()`. Both set is a trace error; the last
+    /// wins for the script.
+    pub restart: bool,
+    pub reload: bool,
 }
 
 impl SvcSpec {
@@ -101,7 +137,26 @@ impl SvcSpec {
             masked: false,
             started: false,
             stopped: false,
+            restart: false,
+            reload: false,
         }
+    }
+
+    /// The action this op is, if it is one (restart wins over reload; both
+    /// is a trace error).
+    pub fn action(&self) -> Option<Action> {
+        if self.restart {
+            Some(Action::Restart)
+        } else if self.reload {
+            Some(Action::Reload)
+        } else {
+            None
+        }
+    }
+
+    /// Wants any state (enabled, disabled, masked, started, stopped).
+    fn wants_state(&self) -> bool {
+        self.enabled || self.disabled || self.masked || self.started || self.stopped
     }
 
     /// The unit with `.service` appended when it has no unit suffix: the
@@ -129,6 +184,34 @@ impl SvcSpec {
         );
         if capture {
             s.push_str(CAPTURE);
+        }
+        if let Some(a) = self.action() {
+            s.push_str(concat!(
+                "  if [ -d \"$tp_run\" ]; then\n",
+                "    if [ \"$(systemctl show -p NeedDaemonReload --value -- \"$tp_u\" 2>/dev/null)\" = yes ]; then\n",
+                "      systemctl daemon-reload\n",
+                "      rc=$?\n",
+                "    fi\n",
+                "    if [ \"$rc\" -eq 0 ]; then\n",
+            ));
+            s.push_str(match a {
+                Action::Restart => "      systemctl restart -- \"$tp_u\"\n",
+                Action::Reload => concat!(
+                    "      if systemctl is-active --quiet -- \"$tp_u\"; then\n",
+                    "        systemctl reload -- \"$tp_u\"\n",
+                    "      else\n",
+                    "        systemctl start -- \"$tp_u\"\n",
+                    "      fi\n",
+                ),
+            });
+            s.push_str(concat!(
+                "      rc=$?\n",
+                "      if [ \"$rc\" -eq 0 ]; then changed=1; fi\n",
+                "    fi\n",
+                "  else\n",
+                "    skipped=1\n",
+                "  fi\n",
+            ));
         }
         if self.enabled {
             s.push_str(concat!(
@@ -289,6 +372,41 @@ impl SvcHandle {
         });
         self
     }
+
+    /// Restart the unit (`systemctl restart`, which also starts an
+    /// inactive one). An action: it needs a guard, `.when(g)` or
+    /// [`SvcHandle::restart_on`]; unguarded is the policy error
+    /// `UnguardedRestart`. On an op of its own.
+    #[track_caller]
+    pub fn restart(&self) -> &Self {
+        self.0.edit(|op| {
+            if let OpSpec::Svc(s) = &mut op.spec {
+                s.restart = true;
+            }
+        });
+        self
+    }
+
+    /// Reload the unit (`systemctl reload`; an inactive unit is started).
+    /// An action, guarded as [`SvcHandle::restart`].
+    #[track_caller]
+    pub fn reload(&self) -> &Self {
+        self.0.edit(|op| {
+            if let OpSpec::Svc(s) = &mut op.spec {
+                s.reload = true;
+            }
+        });
+        self
+    }
+
+    /// `.restart().when(op.changed())`, for any op handle. Like `.when`,
+    /// it replaces a guard set before.
+    #[track_caller]
+    pub fn restart_on(&self, op: &OpHandle) -> &Self {
+        self.restart();
+        self.0.when(op.changed());
+        self
+    }
 }
 
 impl<V> Host<V> {
@@ -321,8 +439,35 @@ pub fn nothing_wanted(trace: &Trace) -> Vec<TraceError> {
             continue;
         };
         let mut errs = Vec::new();
-        if !(s.enabled || s.disabled || s.masked || s.started || s.stopped) {
+        if !(s.wants_state() || s.restart || s.reload) {
             errs.push(format!("svc({}): nothing wanted", s.unit));
+        }
+        if let Some(a) = s.action() {
+            let with: Vec<String> = [
+                (s.enabled, "enabled"),
+                (s.disabled, "disabled"),
+                (s.masked, "masked"),
+                (s.started, "started"),
+                (s.stopped, "stopped"),
+            ]
+            .iter()
+            .filter(|(on, _)| *on)
+            .map(|(_, n)| format!(".{n}()"))
+            .collect();
+            if !with.is_empty() {
+                errs.push(format!(
+                    "svc({}): .{}() is an action on an op of its own, not with {}",
+                    s.unit,
+                    a.name(),
+                    with.join(", ")
+                ));
+            }
+        }
+        if s.restart && s.reload {
+            errs.push(format!(
+                "svc({}): .restart() and .reload() are exclusive",
+                s.unit
+            ));
         }
         let names = |v: &[(bool, &str)]| -> Vec<String> {
             v.iter()
@@ -369,10 +514,11 @@ pub struct Want {
     pub stopped: bool,
 }
 
-/// Merge specs by key, first-seen order.
+/// Merge specs by key, first-seen order. Actions (restart, reload) are
+/// not wants: they are left out (prepare does not probe for them).
 pub fn wants<'a>(specs: impl IntoIterator<Item = &'a SvcSpec>) -> Vec<Want> {
     let mut out: Vec<Want> = Vec::new();
-    for s in specs {
+    for s in specs.into_iter().filter(|s| s.action().is_none()) {
         let key = s.key_name();
         match out.iter_mut().find(|w| w.key == key) {
             Some(w) => {

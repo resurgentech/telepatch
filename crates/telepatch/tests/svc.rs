@@ -85,6 +85,8 @@ case "$1" in
   stop) rm -f $D/active;;
   disable) echo disabled > $D/state;;
   mask) echo masked > $D/state;;
+  restart) touch $D/active;;
+  reload) if [ -e $D/active ]; then :; else echo "Job for unit failed: not active" >&2; exit 1; fi;;
   *) exit 64;;
 esac"#
         ),
@@ -982,4 +984,408 @@ fn executor_falls_back_to_is_enabled_when_show_fails() {
         out.contains("== h1 [prepare] svc docker.service: will enable, will start =="),
         "{out}"
     );
+}
+
+// --- restart and reload (T76) ---
+
+fn errors_of(h: &Host<()>) -> Vec<String> {
+    h.snapshot().errors.iter().map(|e| e.to_string()).collect()
+}
+
+#[test]
+fn restart_template_restarts_booted_and_skips_offline() {
+    let d = tempfile::tempdir().unwrap();
+    let bin = stubs(d.path());
+    let h = host();
+    let f = h.file("/etc/x");
+    f.content("x");
+    let id = h.svc("docker").restart().when(f.changed()).id();
+    let (_, res) = run_script(&wrapped(&h, id), d.path(), &bin, true);
+    assert_eq!(res, r(0, true, false));
+    assert!(
+        log(d.path()).contains("systemctl restart -- docker\n"),
+        "{}",
+        log(d.path())
+    );
+    // no running systemd: skipped, never changed
+    let d2 = tempfile::tempdir().unwrap();
+    let bin2 = stubs(d2.path());
+    let (_, res) = run_script(&wrapped(&h, id), d2.path(), &bin2, false);
+    assert_eq!(res, r(0, false, true));
+    assert!(!log(d2.path()).contains("restart"), "{}", log(d2.path()));
+    // no systemctl: skipped
+    let d3 = tempfile::tempdir().unwrap();
+    let nos = no_systemctl_bin(d3.path());
+    let (_, res) = run_script(&wrapped(&h, id), d3.path(), &nos, true);
+    assert_eq!(res, r(0, false, true));
+}
+
+#[test]
+fn restart_runs_daemon_reload_first_when_systemd_says_so() {
+    let d = tempfile::tempdir().unwrap();
+    let bin = stubs(d.path());
+    set(d.path(), "reload", "");
+    let h = host();
+    let f = h.file("/etc/x");
+    f.content("x");
+    let id = h.svc("docker").restart().when(f.changed()).id();
+    let (_, res) = run_script(&wrapped(&h, id), d.path(), &bin, true);
+    assert_eq!(res, r(0, true, false));
+    let l = log(d.path());
+    let dr = l.find("systemctl daemon-reload\n").expect(&l);
+    let rs = l.find("systemctl restart -- docker\n").expect(&l);
+    assert!(dr < rs, "{l}");
+}
+
+#[test]
+fn reload_reloads_an_active_unit_and_starts_an_inactive_one() {
+    let d = tempfile::tempdir().unwrap();
+    let bin = stubs(d.path());
+    set(d.path(), "active", "");
+    let h = host();
+    let f = h.file("/etc/ssh/sshd_config");
+    f.content("x");
+    let id = h.svc("ssh").reload().when(f.changed()).id();
+    let (_, res) = run_script(&wrapped(&h, id), d.path(), &bin, true);
+    assert_eq!(res, r(0, true, false));
+    assert!(
+        log(d.path()).contains("systemctl reload -- ssh\n"),
+        "{}",
+        log(d.path())
+    );
+    let d2 = tempfile::tempdir().unwrap();
+    let bin2 = stubs(d2.path());
+    let (_, res) = run_script(&wrapped(&h, id), d2.path(), &bin2, true);
+    assert_eq!(res, r(0, true, false));
+    let l = log(d2.path());
+    assert!(
+        l.contains("systemctl start -- ssh\n") && !l.contains("reload -- ssh"),
+        "{l}"
+    );
+}
+
+#[test]
+fn restart_template_snapshots() {
+    let h = host();
+    let f = h.file("/etc/x");
+    f.content("x");
+    let a = h.svc("docker").restart().when(f.changed()).id();
+    let b = h.svc("ssh").reload().when(f.changed()).id();
+    insta::assert_snapshot!(format!("{}\n{}", wrapped(&h, a), wrapped(&h, b)));
+}
+
+#[test]
+fn an_unguarded_restart_is_the_policy_error_unguarded_restart() {
+    fn run_(h: Host<()>) -> PlaybookFuture {
+        Box::pin(async move {
+            h.svc("docker").restart();
+            Ok(())
+        })
+    }
+    let e = trace_error(run_);
+    assert!(
+        e.contains("svc docker.service: .restart() has no guard (policy: unguarded-restart)"),
+        "{e}"
+    );
+    assert!(
+        e.contains("to permit: .allow(Policy::UnguardedRestart, \"<reason>\")"),
+        "{e}"
+    );
+    fn reload_(h: Host<()>) -> PlaybookFuture {
+        Box::pin(async move {
+            h.svc("ssh").reload();
+            Ok(())
+        })
+    }
+    let e = trace_error(reload_);
+    assert!(
+        e.contains("svc ssh.service: .reload() has no guard (policy: unguarded-restart)"),
+        "{e}"
+    );
+}
+
+#[test]
+fn a_guard_or_an_allowance_after_restart_satisfies_the_policy() {
+    fn run_(h: Host<()>) -> PlaybookFuture {
+        Box::pin(async move {
+            let toolkit = h.pkg(["nvidia-container-toolkit"]);
+            h.svc("docker").restart().when(toolkit.changed());
+            let conf = h.file("/etc/ssh/sshd_config");
+            conf.content("x");
+            let s = h.svc("ssh");
+            s.reload();
+            s.when(conf.changed());
+            h.svc("flaky-agent").restart().allow(
+                telepatch::Policy::UnguardedRestart,
+                "leaks memory; the vendor says restart daily",
+            );
+            h.svc("containerd").restart_on(&toolkit);
+            Ok(())
+        })
+    }
+    let host = telepatch::testing::FixtureHost::new("h", os(), Rc::new(()));
+    let h = Host::new(host.name.clone(), host.os.clone(), host.vars.clone());
+    let mut engine = telepatch::engine::Engine::new(telepatch::testing::FakeExecutor::new());
+    let res = telepatch::testing::block_on(engine.run_host(
+        &Playbook {
+            name: "t",
+            run: run_,
+        },
+        h,
+    ));
+    assert!(res.is_ok(), "{res:?}");
+}
+
+#[test]
+fn restart_on_is_restart_when_changed() {
+    let h = host();
+    let toolkit = h.pkg(["nvidia-container-toolkit"]);
+    let a = h.svc("docker").restart_on(&toolkit).id();
+    let b = h.svc("docker").restart().when(toolkit.changed()).id();
+    let snap = h.snapshot();
+    let (Node::Op(x), Node::Op(y)) = (&snap.nodes[a.0], &snap.nodes[b.0]) else {
+        panic!()
+    };
+    assert_eq!(x.spec, y.spec);
+    assert_eq!(x.guard, Some(toolkit.changed()));
+    assert_eq!(x.guard, y.guard);
+    assert!(errors_of(&h).is_empty(), "{:?}", errors_of(&h));
+}
+
+#[test]
+fn restart_shares_an_op_with_no_state() {
+    let h = host();
+    let f = h.file("/etc/x");
+    f.content("x");
+    h.svc("docker").started().restart().when(f.changed());
+    h.svc("ssh").restart().reload().when(f.changed());
+    let errs: Vec<String> = h
+        .snapshot()
+        .errors
+        .iter()
+        .map(|e| e.message().to_string())
+        .collect();
+    assert_eq!(
+        errs,
+        [
+            "svc(docker): .restart() is an action on an op of its own, not with .started()",
+            "svc(ssh): .restart() and .reload() are exclusive",
+        ]
+    );
+}
+
+fn trace_error(run_: fn(Host<()>) -> PlaybookFuture) -> String {
+    let host = telepatch::testing::FixtureHost::new("h", os(), Rc::new(()));
+    let h = Host::new(host.name.clone(), host.os.clone(), host.vars.clone());
+    let mut engine = telepatch::engine::Engine::new(telepatch::testing::FakeExecutor::new());
+    let res = telepatch::testing::block_on(engine.run_host(
+        &Playbook {
+            name: "t",
+            run: run_,
+        },
+        h,
+    ));
+    match res {
+        Err(telepatch::engine::EngineError::Playbook(e)) => e.to_string(),
+        other => panic!("expected a trace error, got {other:?}"),
+    }
+}
+
+fn conf(h: &Host<PathBuf>, name: &str) -> String {
+    h.vars.join(name).display().to_string()
+}
+
+/// docker started by one role; a restart on a config file by another.
+fn pb_restart() -> Playbook<PathBuf> {
+    fn run_(h: Host<PathBuf>) -> PlaybookFuture {
+        Box::pin(async move {
+            let daemon = h.file(&conf(&h, "daemon.json"));
+            daemon.content("{}\n");
+            h.svc("docker").restart().when(daemon.changed());
+            Ok(())
+        })
+    }
+    Playbook {
+        name: "svc",
+        run: run_,
+    }
+}
+
+fn restarts(d: &Path) -> usize {
+    log(d)
+        .lines()
+        .filter(|l| {
+            *l == "systemctl restart -- docker" || *l == "systemctl restart -- docker.service"
+        })
+        .count()
+}
+
+#[test]
+fn executor_guarded_restart_says_why_then_a_second_run_is_changed_0() {
+    let d = tempfile::tempdir().unwrap();
+    let bin = stubs(d.path());
+    set(d.path(), "state", "enabled");
+    set(d.path(), "active", "");
+    let (r1, out1) = go(&pb_restart(), d.path(), &bin, true);
+    assert_eq!(
+        r1.hosts[0].status,
+        HostStatus::Changed,
+        "{}\n{out1}",
+        r1.render()
+    );
+    let path = d.path().join("daemon.json").display().to_string();
+    assert!(
+        out1.contains(&format!(
+            "== h1 [prepare] svc docker.service: will restart if file {path} changes =="
+        )),
+        "{out1}"
+    );
+    assert_eq!(restarts(d.path()), 1, "{}", log(d.path()));
+    let (r2, out2) = go(&pb_restart(), d.path(), &bin, true);
+    assert_eq!(
+        r2.hosts[0].status,
+        HostStatus::Ok,
+        "{}\n{out2}",
+        r2.render()
+    );
+    assert!(r2.hosts[0].ops.iter().all(|o| !o.changed));
+    let table = r2.render();
+    let row = table.lines().find(|l| l.starts_with("h1")).expect(&table);
+    let cols: Vec<&str> = row.split_whitespace().collect();
+    assert_eq!(cols[3], "0", "CHANGED column: {table}");
+    assert_eq!(restarts(d.path()), 1, "{}", log(d.path()));
+    let restart = r2.hosts[0]
+        .ops
+        .iter()
+        .find(|o| o.desc.contains("restart"))
+        .expect("the restart op");
+    assert_eq!(restart.outcome, telepatch::report::Outcome::Skipped);
+}
+
+#[test]
+fn executor_restart_of_a_unit_the_run_starts_is_skipped() {
+    fn run_(h: Host<PathBuf>) -> PlaybookFuture {
+        Box::pin(async move {
+            {
+                let _r = h.role_enter("docker");
+                h.svc("docker").enabled().started();
+            }
+            let _r = h.role_enter("nvidia");
+            let daemon = h.file(&conf(&h, "daemon.json"));
+            daemon.content("{}\n");
+            h.svc("docker").restart().when(daemon.changed());
+            Ok(())
+        })
+    }
+    let pb = Playbook {
+        name: "svc",
+        run: run_,
+    };
+    let d = tempfile::tempdir().unwrap();
+    let bin = stubs(d.path());
+    let (r1, out1) = go(&pb, d.path(), &bin, true);
+    assert_eq!(r1.exit_code(), 0, "{}\n{out1}", r1.render());
+    let l = log(d.path());
+    assert!(l.contains("systemctl start -- docker\n"), "{l}");
+    assert_eq!(
+        restarts(d.path()),
+        0,
+        "the start already runs the new config: {l}"
+    );
+    let restart = r1.hosts[0]
+        .ops
+        .iter()
+        .find(|o| o.desc.contains("restart"))
+        .expect("the restart op");
+    assert_eq!(
+        restart.outcome,
+        telepatch::report::Outcome::Skipped,
+        "{out1}"
+    );
+    // The unit runs now; the config changes: this time it restarts.
+    std::fs::write(d.path().join("daemon.json"), "old\n").unwrap();
+    let (r2, out2) = go(&pb, d.path(), &bin, true);
+    assert_eq!(r2.exit_code(), 0, "{}\n{out2}", r2.render());
+    assert_eq!(restarts(d.path()), 1, "{}", log(d.path()));
+}
+
+#[test]
+fn executor_guarded_restarts_of_one_unit_merge_across_roles() {
+    fn run_(h: Host<PathBuf>) -> PlaybookFuture {
+        Box::pin(async move {
+            {
+                let _r = h.role_enter("a");
+                let f = h.file(&conf(&h, "a.conf"));
+                f.content("a\n");
+                h.svc("docker").restart().when(f.changed());
+            }
+            let _r = h.role_enter("b");
+            let f = h.file(&conf(&h, "b.conf"));
+            f.content("b\n");
+            h.svc("docker.service").restart_on(&f);
+            Ok(())
+        })
+    }
+    let pb = Playbook {
+        name: "svc",
+        run: run_,
+    };
+    let d = tempfile::tempdir().unwrap();
+    let bin = stubs(d.path());
+    set(d.path(), "active", "");
+    let (r1, out1) = go(&pb, d.path(), &bin, true);
+    assert_eq!(r1.exit_code(), 0, "{}\n{out1}", r1.render());
+    assert_eq!(restarts(d.path()), 1, "{}", log(d.path()));
+    let a = d.path().join("a.conf").display().to_string();
+    let b = d.path().join("b.conf").display().to_string();
+    assert_eq!(
+        out1.matches(&format!(
+            "== h1 [prepare] svc docker.service: will restart if file {a} changes or file {b} changes =="
+        ))
+        .count(),
+        1,
+        "{out1}"
+    );
+    let ops: Vec<_> = r1.hosts[0]
+        .ops
+        .iter()
+        .filter(|o| o.desc.contains("restart"))
+        .collect();
+    assert_eq!(ops.len(), 1, "{ops:#?}");
+    assert_eq!(ops[0].members.len(), 2);
+}
+
+#[test]
+fn executor_allowed_unguarded_restart_runs_every_run_and_says_so() {
+    fn run_(h: Host<PathBuf>) -> PlaybookFuture {
+        Box::pin(async move {
+            h.svc("flaky-agent").restart().allow(
+                telepatch::Policy::UnguardedRestart,
+                "leaks memory; the vendor says restart daily",
+            );
+            Ok(())
+        })
+    }
+    let pb = Playbook {
+        name: "svc",
+        run: run_,
+    };
+    let d = tempfile::tempdir().unwrap();
+    let bin = stubs(d.path());
+    for n in 1..=2 {
+        let (r, out) = go(&pb, d.path(), &bin, true);
+        assert_eq!(r.exit_code(), 0, "{}\n{out}", r.render());
+        assert!(
+            out.contains(
+                "== h1 [prepare] svc flaky-agent.service: will restart, every run; allowed unguarded-restart: leaks memory; the vendor says restart daily =="
+            ),
+            "{out}"
+        );
+        assert_eq!(
+            log(d.path())
+                .matches("systemctl restart -- flaky-agent\n")
+                .count(),
+            n
+        );
+    }
 }

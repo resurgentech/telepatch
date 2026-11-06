@@ -63,6 +63,19 @@
 //! neither. The guard-skip trailer is rc 0 with `"when":false`, reported as
 //! [`Outcome::Skipped`]: never changed, never failed.
 //!
+//! # Restart and reload
+//!
+//! A `svc` `.restart()` / `.reload()` of a unit that an op earlier in the
+//! run wants `.started()` (any window, merged or not) is sent with that
+//! op's `changed` and-not-ed into its guard: `g & !changed(#start)`. The
+//! start already runs the new configuration. The start is then a guard
+//! source like any other (a variable in the same run, a constant after).
+//! Prepare prints one line per action, from its own guard with the ops
+//! named: `svc docker.service: will restart if pkg
+//! nvidia-container-toolkit changes`; `will restart, every run` for an
+//! allowed unguarded one; `will restart` when every source is reported and
+//! the guard holds; nothing when it is already false.
+//!
 //! # Stream
 //!
 //! Each op prints `== host [role] #id desc ==`, its output lines prefixed
@@ -296,6 +309,11 @@ pub struct HostExec {
     /// The reported outcome of every trace op so far, by member id: the
     /// constants guards in later runs and windows are evaluated with.
     known: HashMap<NodeId, Known>,
+    /// What every op seen so far is, by member id (`pkg docker-ce`, `file
+    /// /etc/x`), for the prepare line of a restart.
+    subjects: HashMap<NodeId, String>,
+    /// The `svc` ops seen so far that want `.started()`: unit key, op id.
+    starts: Vec<(String, NodeId)>,
 }
 
 /// What a guard can know about a reported op.
@@ -446,6 +464,101 @@ fn gate(w: &WindowOp, script: &str, nonce: &str, test: Option<&str>, source: boo
     )
 }
 
+/// What member `m` of `w` is, for a guard's phrase: the op's kind and its
+/// name (`pkg nvidia-container-toolkit`, the member's own names for a
+/// merged `pkg` op; `file /etc/docker/daemon.json`; `svc docker.service`).
+fn subject(w: &WindowOp, m: &crate::engine::Member) -> String {
+    match &w.node.spec {
+        OpSpec::Pkg(p) => {
+            let names = if m.pkg_names.is_empty() {
+                &p.names
+            } else {
+                &m.pkg_names
+            };
+            format!("{} {}", p.kind(), names.join(" "))
+        }
+        OpSpec::File(f) => format!("file {}", f.path),
+        OpSpec::Svc(s) => format!("svc {}", s.key_name()),
+        _ => describe(&w.node),
+    }
+}
+
+/// `g` in words, each op named by its subject: `pkg x changes`, `file /y
+/// succeeds`, `... does not change`, `... fails`, joined with `or` and
+/// `and`, parenthesised where binding needs it, `not (..)` around a
+/// compound.
+fn guard_phrase(g: &Guard, subjects: &HashMap<NodeId, String>) -> String {
+    let name = |n: &NodeId| subjects.get(n).cloned().unwrap_or_else(|| n.to_string());
+    let rank = |g: &Guard| match g {
+        Guard::Or(..) => 0,
+        Guard::And(..) => 1,
+        _ => 2,
+    };
+    let part = |g: &Guard, min: u8| {
+        let p = guard_phrase(g, subjects);
+        if rank(g) < min { format!("({p})") } else { p }
+    };
+    match g {
+        Guard::Changed(n) => format!("{} changes", name(n)),
+        Guard::ExitOk(n) => format!("{} succeeds", name(n)),
+        Guard::Not(inner) => match inner.as_ref() {
+            Guard::Changed(n) => format!("{} does not change", name(n)),
+            Guard::ExitOk(n) => format!("{} fails", name(n)),
+            other => format!("not ({})", guard_phrase(other, subjects)),
+        },
+        Guard::Or(a, b) => format!("{} or {}", part(a, 0), part(b, 0)),
+        Guard::And(a, b) => format!("{} and {}", part(a, 1), part(b, 1)),
+    }
+}
+
+/// `g`'s value when the reported outcomes settle it, else `None`.
+fn decide(g: &Guard, known: &HashMap<NodeId, Known>) -> Option<bool> {
+    match g {
+        Guard::Changed(n) => known.get(n).map(|k| k.changed),
+        Guard::ExitOk(n) => known.get(n).map(|k| k.ok),
+        Guard::Not(g) => decide(g, known).map(|v| !v),
+        Guard::Or(a, b) => match (decide(a, known), decide(b, known)) {
+            (Some(true), _) | (_, Some(true)) => Some(true),
+            (Some(false), Some(false)) => Some(false),
+            _ => None,
+        },
+        Guard::And(a, b) => match (decide(a, known), decide(b, known)) {
+            (Some(false), _) | (_, Some(false)) => Some(false),
+            (Some(true), Some(true)) => Some(true),
+            _ => None,
+        },
+    }
+}
+
+/// The prepare detail of a `svc` restart or reload `w` (its guard as sent
+/// in `w.node.guard`; `base` is the guard the role wrote), with its
+/// allowances; `None` for an op that is no action or whose guard is
+/// already false.
+fn action_line(
+    w: &WindowOp,
+    base: Option<&Guard>,
+    known: &HashMap<NodeId, Known>,
+    subjects: &HashMap<NodeId, String>,
+) -> Option<String> {
+    let OpSpec::Svc(s) = &w.node.spec else {
+        return None;
+    };
+    let verb = s.action()?.name();
+    let sent = w.node.guard.as_ref().map(|g| decide(g, known));
+    if sent == Some(Some(false)) {
+        return None;
+    }
+    let mut line = match base {
+        None => format!("will {verb}, every run"),
+        Some(g) if decide(g, known) == Some(true) => format!("will {verb}"),
+        Some(g) => format!("will {verb} if {}", guard_phrase(g, subjects)),
+    };
+    for a in &w.node.allowed {
+        line.push_str(&format!("; {a}"));
+    }
+    Some(line)
+}
+
 fn describe(op: &OpNode) -> String {
     fn first_line(s: &str) -> String {
         let l = s.lines().next().unwrap_or("").trim();
@@ -490,7 +603,10 @@ fn describe(op: &OpNode) -> String {
         OpSpec::Group(g) => format!("group {}", g.name),
         OpSpec::User(u) => format!("user {}", u.name),
         OpSpec::Repo(r) => format!("repo {}", r.name),
-        OpSpec::Svc(s) => format!("svc {}", s.unit),
+        OpSpec::Svc(s) => match s.action() {
+            Some(a) => format!("svc {} {}", s.unit, a.name()),
+            None => format!("svc {}", s.unit),
+        },
         OpSpec::File(f) => {
             use crate::ops::file::FileKind;
             let what = match f.kind {
@@ -572,7 +688,54 @@ impl HostExec {
             users_ok: BTreeSet::new(),
             seq: PROBE_BASE,
             known: HashMap::new(),
+            subjects: HashMap::new(),
+            starts: Vec::new(),
         }
+    }
+
+    /// `window` as sent: each `svc` restart or reload of a unit an earlier
+    /// op of the run started gets that op's `changed` and-not-ed into its
+    /// guard. Also the prepare lines of the window's actions. Records the
+    /// window's ops (their subjects; the starts) for later windows.
+    fn and_not_starts(&mut self, window: &Window) -> (Window, Vec<crate::report::WillCreate>) {
+        let mut out = window.clone();
+        let mut lines = Vec::new();
+        for w in &mut out.ops {
+            for m in &w.members {
+                self.subjects.insert(m.id, subject(w, m));
+            }
+            let OpSpec::Svc(s) = &w.node.spec else {
+                continue;
+            };
+            let key = s.key_name();
+            if s.action().is_some() {
+                let base = w.node.guard.clone();
+                let started = self
+                    .starts
+                    .iter()
+                    .filter(|(k, _)| *k == key)
+                    .map(|(_, id)| Guard::Changed(*id))
+                    .reduce(|a, b| a | b);
+                if let Some(st) = started {
+                    w.node.guard = Some(match base.clone() {
+                        Some(g) => g & !st,
+                        None => !st,
+                    });
+                }
+                if let Some(detail) = action_line(w, base.as_ref(), &self.known, &self.subjects) {
+                    lines.push(crate::report::WillCreate {
+                        window: window.number,
+                        kind: "svc".to_string(),
+                        name: key.clone(),
+                        detail: Some(detail),
+                    });
+                }
+            }
+            if s.started {
+                self.starts.push((key, w.id));
+            }
+        }
+        (out, lines)
     }
 
     fn block(&mut self, why: String) {
@@ -895,6 +1058,8 @@ impl Executor for HostExec {
             }
             return Ok(());
         }
+        let (window, actions) = self.and_not_starts(window);
+        let window = &window;
 
         // Prepare: nothing is sent to be applied until all of it passes.
         let prepared = prepare::prepare_window(
@@ -906,7 +1071,8 @@ impl Executor for HostExec {
         )
         .await;
         match prepared {
-            Ok(will) => {
+            Ok(mut will) => {
+                will.will_create.extend(actions);
                 for w in will.will_install {
                     self.sink.line(&format!(
                         "== {} [prepare] window {} will install ({}): {} ==",
@@ -1263,4 +1429,153 @@ pub fn run<V: 'static>(playbook: &Playbook<V>, hosts: Vec<HostSpec<V>>, opts: Ru
         out
     }));
     Report { hosts: reports }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn subjects(v: &[(usize, &str)]) -> HashMap<NodeId, String> {
+        v.iter().map(|(i, s)| (NodeId(*i), s.to_string())).collect()
+    }
+
+    #[test]
+    fn guard_phrases_name_the_ops() {
+        let s = subjects(&[
+            (0, "pkg nvidia-container-toolkit"),
+            (1, "file /etc/docker/daemon.json"),
+            (2, "sh make"),
+        ]);
+        let (a, b, c) = (NodeId(0), NodeId(1), NodeId(2));
+        assert_eq!(
+            guard_phrase(&Guard::Changed(a), &s),
+            "pkg nvidia-container-toolkit changes"
+        );
+        assert_eq!(
+            guard_phrase(&(Guard::Changed(a) | Guard::Changed(b)), &s),
+            "pkg nvidia-container-toolkit changes or file /etc/docker/daemon.json changes"
+        );
+        assert_eq!(
+            guard_phrase(
+                &((Guard::Changed(a) | Guard::Changed(b)) & Guard::ExitOk(c)),
+                &s
+            ),
+            "(pkg nvidia-container-toolkit changes or file /etc/docker/daemon.json changes) and sh make succeeds"
+        );
+        assert_eq!(
+            guard_phrase(&!Guard::Changed(b), &s),
+            "file /etc/docker/daemon.json does not change"
+        );
+        assert_eq!(guard_phrase(&!Guard::ExitOk(c), &s), "sh make fails");
+        assert_eq!(
+            guard_phrase(&!(Guard::Changed(a) | Guard::Changed(b)), &s),
+            "not (pkg nvidia-container-toolkit changes or file /etc/docker/daemon.json changes)"
+        );
+        assert_eq!(guard_phrase(&Guard::Changed(NodeId(9)), &s), "#9 changes");
+    }
+
+    #[test]
+    fn a_guard_is_decided_only_when_its_sources_are_reported() {
+        let mut known = HashMap::new();
+        known.insert(
+            NodeId(0),
+            Known {
+                ok: true,
+                changed: false,
+            },
+        );
+        known.insert(
+            NodeId(1),
+            Known {
+                ok: true,
+                changed: true,
+            },
+        );
+        let (a, b, c) = (NodeId(0), NodeId(1), NodeId(2));
+        assert_eq!(decide(&Guard::Changed(a), &known), Some(false));
+        assert_eq!(
+            decide(&(Guard::Changed(a) | Guard::Changed(b)), &known),
+            Some(true)
+        );
+        assert_eq!(decide(&Guard::Changed(c), &known), None);
+        assert_eq!(
+            decide(&(Guard::Changed(b) | Guard::Changed(c)), &known),
+            Some(true)
+        );
+        assert_eq!(
+            decide(&(Guard::Changed(a) & Guard::Changed(c)), &known),
+            Some(false)
+        );
+        assert_eq!(decide(&!Guard::Changed(c), &known), None);
+    }
+
+    fn restart_op(id: usize, guard: Option<Guard>) -> WindowOp {
+        let mut spec = crate::ops::svc::SvcSpec::new("docker");
+        spec.restart = true;
+        let spec = OpSpec::Svc(spec);
+        WindowOp {
+            id: NodeId(id),
+            members: vec![crate::engine::Member {
+                id: NodeId(id),
+                role: String::new(),
+                pkg_names: Vec::new(),
+            }],
+            node: OpNode {
+                writes: spec.default_writes(),
+                post: spec.default_post(),
+                spec,
+                run_as: crate::trace::RunAs::root_shell(),
+                reads: Default::default(),
+                guard,
+                allow_fail: false,
+                site: None,
+                allowed: Vec::new(),
+                at_end: false,
+            },
+        }
+    }
+
+    #[test]
+    fn the_prepare_line_of_a_restart() {
+        let s = subjects(&[(0, "pkg nvidia-container-toolkit")]);
+        let mut known = HashMap::new();
+        let g = Some(Guard::Changed(NodeId(0)));
+        let w = restart_op(1, g.clone());
+        assert_eq!(
+            action_line(&w, g.as_ref(), &known, &s).as_deref(),
+            Some("will restart if pkg nvidia-container-toolkit changes")
+        );
+        known.insert(
+            NodeId(0),
+            Known {
+                ok: true,
+                changed: false,
+            },
+        );
+        assert_eq!(
+            action_line(&w, g.as_ref(), &known, &s),
+            None,
+            "decided: settled"
+        );
+        known.insert(
+            NodeId(0),
+            Known {
+                ok: true,
+                changed: true,
+            },
+        );
+        assert_eq!(
+            action_line(&w, g.as_ref(), &known, &s).as_deref(),
+            Some("will restart")
+        );
+        let mut w = restart_op(1, None);
+        w.node.allowed.push(crate::policy::Allowance {
+            policy: crate::policy::Policy::UnguardedRestart,
+            reason: "leaks memory".into(),
+        });
+        assert_eq!(
+            action_line(&w, None, &known, &s).as_deref(),
+            Some("will restart, every run; allowed unguarded-restart: leaks memory")
+        );
+    }
 }

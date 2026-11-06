@@ -429,6 +429,143 @@ fn the_member_rule_holds_across_windows() {
     assert_eq!(read(d.path(), "log"), "MARK_NEW\n", "{out}");
 }
 
+// ---- restart and reload (T76) ---------------------------------------------------
+
+/// A stub `systemctl` logging every call to `<dir>/systemctl.log`; a unit
+/// is active once `<dir>/active` exists.
+const STUB_SYSTEMCTL: &str = r##"#!/bin/sh
+d='@D@'
+echo "$*" >> "$d/systemctl.log"
+case "$1" in
+is-enabled) echo enabled ;;
+is-active) [ -e "$d/active" ] || exit 3 ;;
+show) case "$*" in *NeedDaemonReload*) echo no ;; *) echo "UnitFileState=enabled"; if [ -e "$d/active" ]; then echo ActiveState=active; else echo ActiveState=inactive; fi ;; esac ;;
+start|restart) touch "$d/active" ;;
+esac
+"##;
+
+/// A local host whose PATH has the stub `systemctl` (and `cargo`) and
+/// whose systemd counts as running. The cargo state (`have` installed at
+/// first) carries over from run to run.
+fn svc_spec(d: &Path) -> HostSpec<PathBuf> {
+    let state = std::fs::read_to_string(d.join("state")).unwrap_or("have 1.0.0\n".into());
+    let path = cargo_stub(d, &state);
+    write_exe(
+        &d.join("bin/systemctl"),
+        &STUB_SYSTEMCTL.replace("@D@", d.to_str().unwrap()),
+    );
+    let run = d.join("run-systemd");
+    std::fs::create_dir_all(&run).unwrap();
+    HostSpec {
+        name: "h1".into(),
+        target: Target::Local(
+            LocalTransport::new()
+                .uid(0)
+                .env("PATH", &path)
+                .env("TP_SVC_RUNDIR", run.to_str().unwrap()),
+        ),
+        vars: d.to_path_buf(),
+    }
+}
+
+fn restarts(d: &Path) -> usize {
+    read(d, "systemctl.log")
+        .lines()
+        .filter(|l| l.starts_with("restart "))
+        .count()
+}
+
+/// The start runs in window 1; the restart, in the final window, reads
+/// the start's `changed` as a constant.
+fn start_then_restart(h: Host<PathBuf>) -> PlaybookFuture {
+    Box::pin(async move {
+        h.svc("app").enabled().started();
+        let _ = h.bin_exists("tp-no-such-bin-zz").await;
+        let conf = h.file(&p(&h, "app.conf"));
+        conf.content("x\n");
+        h.svc("app").restart().when(conf.changed());
+        Ok(())
+    })
+}
+
+#[test]
+fn a_restart_after_a_start_in_an_earlier_window_is_skipped() {
+    let d = tempfile::tempdir().unwrap();
+    let pb = Playbook {
+        name: "g",
+        run: start_then_restart,
+    };
+    let (r1, out1) = go(&pb, vec![svc_spec(d.path())]);
+    assert_eq!(r1.exit_code(), 0, "{}\n{out1}", r1.render());
+    assert!(
+        read(d.path(), "systemctl.log").contains("start -- app\n"),
+        "{out1}"
+    );
+    assert_eq!(restarts(d.path()), 0, "{}", read(d.path(), "systemctl.log"));
+    let op = r1.hosts[0]
+        .ops
+        .iter()
+        .find(|o| o.desc.contains("restart"))
+        .expect("restart op");
+    assert_eq!(op.outcome, Outcome::Skipped, "{out1}");
+    assert_eq!(op.when.as_deref(), Some("changed(#2) & !changed(#0)"));
+    // The start settled; a config change now restarts.
+    std::fs::write(d.path().join("app.conf"), "old\n").unwrap();
+    let (r2, out2) = go(&pb, vec![svc_spec(d.path())]);
+    assert_eq!(r2.exit_code(), 0, "{}\n{out2}", r2.render());
+    assert_eq!(restarts(d.path()), 1, "{out2}");
+}
+
+/// A restart on a merged pkg op's member: named by its own package.
+fn restart_on_member(h: Host<PathBuf>) -> PlaybookFuture {
+    Box::pin(async move {
+        let have = h.cargo(["have"]);
+        let new = h.cargo(["new"]);
+        h.svc("app").restart_on(&new);
+        h.svc("other").restart_on(&have);
+        Ok(())
+    })
+}
+
+#[test]
+fn a_restart_names_its_trigger_and_a_second_run_changes_nothing() {
+    let d = tempfile::tempdir().unwrap();
+    std::fs::write(d.path().join("active"), "").unwrap();
+    let pb = Playbook {
+        name: "g",
+        run: restart_on_member,
+    };
+    let (r1, out1) = go(&pb, vec![svc_spec(d.path())]);
+    assert_eq!(r1.exit_code(), 0, "{}\n{out1}", r1.render());
+    assert!(
+        out1.contains("== h1 [prepare] svc app.service: will restart if pkg[cargo] new changes =="),
+        "{out1}"
+    );
+    assert!(
+        out1.contains(
+            "== h1 [prepare] svc other.service: will restart if pkg[cargo] have changes =="
+        ),
+        "{out1}"
+    );
+    let log = read(d.path(), "systemctl.log");
+    assert!(log.contains("restart -- app\n"), "{log}");
+    assert!(!log.contains("restart -- other"), "{log}");
+    assert_eq!(outcome(&r1, "other restart"), Outcome::Skipped);
+    let (r2, out2) = go(&pb, vec![svc_spec(d.path())]);
+    assert_eq!(
+        r2.hosts[0].status,
+        HostStatus::Ok,
+        "{}\n{out2}",
+        r2.render()
+    );
+    assert!(
+        r2.hosts[0].ops.iter().all(|o| !o.changed),
+        "{}",
+        r2.render()
+    );
+    assert_eq!(restarts(d.path()), 1);
+}
+
 // ---- the merge ----------------------------------------------------------------
 
 fn merged(h: Host<PathBuf>) -> PlaybookFuture {

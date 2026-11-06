@@ -281,6 +281,8 @@ pub fn svc_wants(window: &Window) -> Vec<crate::ops::svc::Want> {
 pub fn svc_after_installers(window: &Window) -> bool {
     for op in &window.ops {
         match &op.node.spec {
+            // A restart or reload is not probed (not a want).
+            OpSpec::Svc(s) if s.action().is_some() => {}
             OpSpec::Svc(_) => return false,
             OpSpec::Pkg(_) | OpSpec::Shell(_) | OpSpec::Raw { .. } | OpSpec::File(_) => {
                 return true;
@@ -606,5 +608,54 @@ mod tests {
     fn probes_quote_names() {
         let s = pkg_probe(&Source::Distro(Manager::Apt), &["it's".to_string()]);
         assert!(s.contains(r"'it'\''s'"), "{s}");
+    }
+
+    #[test]
+    fn a_restart_before_the_installers_is_not_the_first_svc_want() {
+        use crate::engine::{Member, WindowKind, WindowOp};
+        use crate::ops::svc::SvcSpec;
+        use crate::trace::{NodeId, RunAs};
+        let op = |id: usize, spec: OpSpec| WindowOp {
+            id: NodeId(id),
+            members: vec![Member {
+                id: NodeId(id),
+                role: String::new(),
+                pkg_names: Vec::new(),
+            }],
+            node: OpNode {
+                writes: spec.default_writes(),
+                post: spec.default_post(),
+                spec,
+                run_as: RunAs::root_shell(),
+                reads: Default::default(),
+                guard: None,
+                allow_fail: false,
+                site: None,
+                allowed: Vec::new(),
+                at_end: false,
+            },
+        };
+        let restart = SvcSpec {
+            restart: true,
+            ..SvcSpec::new("cron")
+        };
+        let started = SvcSpec {
+            started: true,
+            ..SvcSpec::new("docker")
+        };
+        let w = Window {
+            number: 1,
+            kind: WindowKind::Final,
+            ops: vec![
+                op(0, OpSpec::Svc(restart)),
+                op(
+                    1,
+                    OpSpec::Pkg(PkgSpec::new(Manager::Apt, vec!["docker".into()])),
+                ),
+                op(2, OpSpec::Svc(started)),
+            ],
+        };
+        assert!(svc_after_installers(&w));
+        assert_eq!(svc_wants(&w).len(), 1, "a restart is not probed");
     }
 }

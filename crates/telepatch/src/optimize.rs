@@ -8,6 +8,8 @@
 //!    [`Graph::hoist_is_safe`] holds, i.e. no other item between the
 //!    earliest and the latest member has an edge to a member. Then guarded
 //!    ops with an equal spec (any kind), `RunAs` and `allow_fail` are folded
+//!    (svc units compared by key, so a restart of `docker` and one of
+//!    `docker.service` are equal; a restart and a reload are not)
 //!    into the latest one, their guards or-joined, when
 //!    [`Graph::sink_is_safe`] holds: the earlier op moves forward, so no
 //!    item it passes may overlap its effects or be guarded on it. The
@@ -99,8 +101,18 @@ struct SameKey {
 fn same_key(item: &Item) -> Option<SameKey> {
     let Item::Op(w) = item else { return None };
     w.node.guard.as_ref()?;
+    // `svc("docker")` and `svc("docker.service")` are one unit: compare
+    // svc specs by key name (the merged op keeps the later spelling).
+    let spec = match &w.node.spec {
+        OpSpec::Svc(s) => {
+            let mut s = s.clone();
+            s.unit = s.key_name();
+            OpSpec::Svc(s)
+        }
+        other => other.clone(),
+    };
     Some(SameKey {
-        spec: w.node.spec.clone(),
+        spec,
         run_as: w.node.run_as.clone(),
         allow_fail: w.node.allow_fail,
     })
@@ -550,6 +562,45 @@ mod tests {
         let a = op(0, spec.clone(), &[], &[Key::svc("d")]);
         let b = op(1, spec, &[], &[Key::svc("d")]);
         assert_eq!(ids(optimize(vec![a, b])), [vec![0], vec![1]]);
+    }
+
+    fn svc_action(id: usize, unit: &str, restart: bool, guard: Guard) -> Item {
+        let mut spec = crate::ops::svc::SvcSpec::new(unit);
+        spec.restart = restart;
+        spec.reload = !restart;
+        let spec = OpSpec::Svc(spec);
+        let w: Vec<Key> = spec.default_writes().into_iter().collect();
+        with(op(id, spec, &[], &w), |n| n.guard = Some(guard))
+    }
+
+    #[test]
+    fn restarts_of_one_unit_merge_whatever_the_spelling() {
+        let items = vec![
+            file(0, "/a"),
+            svc_action(1, "docker", true, Guard::Changed(NodeId(0))),
+            file(2, "/b"),
+            svc_action(3, "docker.service", true, Guard::Changed(NodeId(2))),
+        ];
+        let ops = optimize(items).schedule();
+        assert_eq!(ops.len(), 3);
+        assert_eq!(
+            ops[2].members.iter().map(|m| m.id.0).collect::<Vec<_>>(),
+            [1, 3]
+        );
+        assert_eq!(
+            ops[2].node.guard,
+            Some(Guard::Changed(NodeId(0)) | Guard::Changed(NodeId(2)))
+        );
+    }
+
+    #[test]
+    fn a_restart_and_a_reload_of_one_unit_stay_apart() {
+        let items = vec![
+            file(0, "/a"),
+            svc_action(1, "docker", true, Guard::Changed(NodeId(0))),
+            svc_action(2, "docker", false, Guard::Changed(NodeId(0))),
+        ];
+        assert_eq!(ids(optimize(items)), [vec![0], vec![1], vec![2]]);
     }
 
     #[test]

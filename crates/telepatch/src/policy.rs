@@ -3,8 +3,10 @@
 //! it: `.allow(Policy::Name, "reason")`. The reason is required; the plan
 //! and the run report list every allowance with its reason.
 //!
-//! Checked so far: [`Policy::UnitViaFile`]. `UnguardedRestart` and
-//! `Unverified` exist so an op can name them; nothing trips them yet.
+//! Checked so far: [`Policy::UnitViaFile`] and [`Policy::UnguardedRestart`]
+//! (an `svc` `.restart()` / `.reload()` with no guard when the trace is
+//! read, so a `.when(g)` later in the chain counts). `Unverified` exists so
+//! an op can name it; nothing trips it yet.
 
 use std::fmt;
 
@@ -88,6 +90,12 @@ fn trips(op: &OpNode) -> Option<(Policy, String)> {
             Policy::UnitViaFile,
             format!("file {}: unit files go through h.unit", f.path),
         )),
+        OpSpec::Svc(sv) if op.guard.is_none() => sv.action().map(|a| {
+            (
+                Policy::UnguardedRestart,
+                format!("svc {}: .{}() has no guard", sv.key_name(), a.name()),
+            )
+        }),
         _ => None,
     }
 }
