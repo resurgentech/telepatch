@@ -437,10 +437,10 @@ mod tests {
             outcome: Outcome::Changed,
             rc: 0,
             changed: true,
-            allowed: vec![Allowance {
-                policy: Policy::UnitViaFile,
-                reason: "vendor ships this unit".into(),
-            }],
+            allowed: vec![Allowance::new(
+                Policy::UnitViaFile,
+                "vendor ships this unit",
+            )],
             when: None,
         });
         let r = Report { hosts: vec![h] }.render();

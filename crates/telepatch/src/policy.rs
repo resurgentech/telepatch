@@ -8,12 +8,20 @@
 //! read, so a `.when(g)` later in the chain counts) and
 //! [`Policy::Unverified`] (a `file` op that places or unpacks a fetch with
 //! no `.sha256(..)`: the fetch is not an op, so the file op that takes it
-//! carries the error and the allowance).
+//! carries the error and the allowance; and a `pkg` op of the
+//! `binary_release` source with no checksum source).
+//!
+//! An allowance belongs to the trace op that wrote it. When the optimizer
+//! merges ops, the merged op carries every member's allowances, each tagged
+//! with its member ([`Allowance::member`]); a policy check on a merged op
+//! ([`unpermitted`]) lets a member's trip pass only by that member's own
+//! allowance.
 
 use std::fmt;
 
 use crate::host::TraceError;
-use crate::trace::{Node, NodeId, OpNode, OpSpec, Trace};
+use crate::ops::pkg::Source;
+use crate::trace::{Node, NodeId, OpNode, OpSpec, Site, Trace};
 
 /// A rule an op may break only with an allowance.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -57,13 +65,64 @@ impl fmt::Display for Policy {
 pub struct Allowance {
     pub policy: Policy,
     pub reason: String,
+    /// The member of a merged op this allowance came from; `None` on a
+    /// trace op (it is the op's own) and on an op that merged with nothing.
+    pub member: Option<AllowedFor>,
+}
+
+/// The trace op an allowance of a merged op belongs to: its id and the
+/// site of its builder call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AllowedFor {
+    pub id: NodeId,
+    pub site: Option<Site>,
+}
+
+impl Allowance {
+    /// An allowance of the op itself.
+    pub fn new(policy: Policy, reason: impl Into<String>) -> Allowance {
+        Allowance {
+            policy,
+            reason: reason.into(),
+            member: None,
+        }
+    }
+
+    /// Does this allowance permit `policy` for the trace op `member`? An
+    /// untagged allowance is the op's own and permits it for the op; a
+    /// tagged one only for its member.
+    pub fn permits(&self, member: NodeId, policy: Policy) -> bool {
+        self.policy == policy && self.member.is_none_or(|m| m.id == member)
+    }
 }
 
 impl fmt::Display for Allowance {
-    /// `allowed unit-via-file: <reason>`.
+    /// `allowed unit-via-file: <reason>`; on a merged op `... (for #3 at
+    /// <file>:<line>)`.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "allowed {}: {}", self.policy, self.reason)
+        write!(f, "allowed {}: {}", self.policy, self.reason)?;
+        match self.member {
+            Some(AllowedFor {
+                id,
+                site: Some(site),
+            }) => write!(f, " (for {id} at {site})"),
+            Some(AllowedFor { id, site: None }) => write!(f, " (for {id})"),
+            None => Ok(()),
+        }
     }
+}
+
+/// The trips `(member, policy, message)` of a (possibly merged) op that its
+/// allowances do not permit: each member's trip passes only by an
+/// allowance of that member ([`Allowance::permits`]).
+pub fn unpermitted(
+    allowed: &[Allowance],
+    trips: Vec<(NodeId, Policy, String)>,
+) -> Vec<(NodeId, Policy, String)> {
+    trips
+        .into_iter()
+        .filter(|(m, p, _)| !allowed.iter().any(|a| a.permits(*m, *p)))
+        .collect()
 }
 
 /// The policy errors of every op in `trace` that trips a policy it does
@@ -77,17 +136,15 @@ pub fn violations(trace: &Trace) -> Vec<TraceError> {
         .iter()
         .enumerate()
         .filter_map(|(i, n)| match n {
-            Node::Op(op) => Some(
-                trips(op)
-                    .into_iter()
-                    .map(|(p, msg)| (i, p, msg, op))
-                    .collect::<Vec<_>>(),
-            ),
+            Node::Op(op) => {
+                let id = NodeId(i);
+                let t = trips(op).into_iter().map(|(p, m)| (id, p, m)).collect();
+                Some(unpermitted(&op.allowed, t))
+            }
             _ => None,
         })
         .flatten()
-        .filter(|(_, p, _, op)| !op.allowed.iter().any(|a| a.policy == *p))
-        .map(|(i, p, msg, _)| trace.locate(NodeId(i), TraceError::policy(p, msg)))
+        .map(|(id, p, msg)| trace.locate(id, TraceError::policy(p, msg)))
         .collect()
 }
 
@@ -109,6 +166,17 @@ fn trips(op: &OpNode) -> Vec<(Policy, String)> {
                 out.push((
                     Policy::Unverified,
                     format!("file {}: fetch {} has no sha256", f.path, src.fetched.url),
+                ));
+            }
+        }
+        OpSpec::Pkg(p) => {
+            if let Source::BinaryRelease(b) = &p.source
+                && b.sha256.is_none()
+            {
+                let name = p.names.first().map(String::as_str).unwrap_or("");
+                out.push((
+                    Policy::Unverified,
+                    format!("pkg[binary_release] {name}: no checksum source (.sha256(Sum::..))"),
                 ));
             }
         }

@@ -17,12 +17,17 @@
 //! * a checksum that is not the file's blocks the host before apply, with
 //!   the mismatch named and no cache entry for it (run between the two, with
 //!   the server still up).
+//!
+//! And the `binary_release` pkg source (`fetch_*_binary_release`): a
+//! tarball with a JSON checksum and a single binary with a sidecar, served
+//! the same way (see [`fetch_binary_release_from_a_local_server`]).
 
 use std::cell::RefCell;
 use std::process::{Command, Stdio};
 use std::rc::Rc;
 
 use telepatch::executor::{HostSpec, RunOpts, Stdout, Target, run};
+use telepatch::ops::pkg::{BinaryRelease, Latest, Sum};
 use telepatch::report::{FetchState, HostStatus, Report};
 use telepatch::transport::docker::DockerTransport;
 use telepatch::{Host, Playbook, PlaybookFuture};
@@ -260,6 +265,247 @@ fn fetch_from_a_local_server(image: &str) {
         assert!(out2.contains(&l), "{l}\n{out2}");
     }
     assert_eq!(requests(&ctr) - before, 3, "run 2 made no request");
+}
+
+/// The `binary_release` pkg source against the same kind of server: a
+/// tarball (`tool-<v>.linux-<arch>.tar.gz`, top directory `tool-<v>/`
+/// holding `bin/tool`, which prints `tool version <v>`) checked by a JSON
+/// document in go.dev's `?mode=json` layout, with `{version}` from a
+/// `VERSION` text file; and a single binary (`linux-<arch>/one`) checked by a
+/// `.sha256sum` sidecar, with no `{version}`, so latest follows the
+/// published checksum. Run 1 installs both, run 2 is `CHANGED 0` with no
+/// download (only `VERSION` and the sidecar are read), run 3, after the
+/// server publishes 1.2.4 and a new `one`, upgrades both.
+#[derive(Clone)]
+struct B;
+
+fn pb_binary_release(h: Host<B>) -> PlaybookFuture {
+    Box::pin(async move {
+        let base = format!("http://127.0.0.1:{PORT}");
+        h.pkg(["tool"])
+            .binary_release(
+                BinaryRelease::new()
+                    .url(format!("{base}/tool-{{version}}.linux-{{arch}}.tar.gz"))
+                    .sha256(Sum::json(
+                        format!("{base}/releases.json"),
+                        "filename",
+                        "sha256",
+                    ))
+                    .unpack_to("/opt/tool")
+                    .strip(1)
+                    .bin("/opt/tool/bin/tool")
+                    .version("tool --version")
+                    .latest(Latest::text(format!("{base}/VERSION"))),
+            )
+            .latest();
+        h.pkg(["one"])
+            .binary_release(
+                BinaryRelease::new()
+                    .url(format!("{base}/linux-{{arch}}/one"))
+                    .sha256(Sum::sidecar(".sha256sum"))
+                    .bin("/usr/local/bin/tp-one"),
+            )
+            .latest();
+        Ok(())
+    })
+}
+
+fn go_b(ctr: &Container) -> (Report, String) {
+    let pb = Playbook {
+        name: "binary_release",
+        run: pb_binary_release,
+    };
+    let out = Rc::new(RefCell::new(String::new()));
+    let r = run(
+        &pb,
+        vec![HostSpec {
+            name: "c".into(),
+            target: Target::Docker(DockerTransport::new().container("c", &ctr.name)),
+            vars: B,
+        }],
+        RunOpts {
+            log: None,
+            stdout: Stdout::Capture(out.clone()),
+        },
+    );
+    let text = out.borrow().clone();
+    println!("{text}\n{}", r.render());
+    (r, text)
+}
+
+/// Publish tool `<v>` and a `one` printing `one <n>` on the server; the
+/// sums of the tarball and of `one`.
+fn publish(ctr: &Container, arch: &str, v: &str, n: u32) -> (String, String) {
+    let (rc, o) = exec(
+        ctr,
+        &format!(
+            "set -e; d=/srv/src/tool-{v}; mkdir -p $d/bin /srv/www/linux-{arch}; \
+             printf '#!/bin/sh\\necho \"tool version {v}\"\\n' > $d/bin/tool; chmod 755 $d/bin/tool; \
+             tar -czf /srv/www/tool-{v}.linux-{arch}.tar.gz -C /srv/src tool-{v}; \
+             printf 'v{v}\\n' > /srv/www/VERSION; \
+             s=$(sha256sum /srv/www/tool-{v}.linux-{arch}.tar.gz | cut -d' ' -f1); \
+             printf '[\\n {{\\n  \"version\": \"tool{v}\",\\n  \"stable\": true,\\n  \"files\": [\\n   {{\\n    \"filename\": \"tool-{v}.linux-{arch}.tar.gz\",\\n    \"os\": \"linux\",\\n    \"sha256\": \"%s\",\\n    \"kind\": \"archive\"\\n   }}\\n  ]\\n }}\\n]\\n' \"$s\" > /srv/www/releases.json; \
+             printf '#!/bin/sh\\necho one {n}\\n' > /srv/www/linux-{arch}/one; \
+             (cd /srv/www/linux-{arch} && sha256sum one > one.sha256sum)"
+        ),
+    );
+    assert_eq!(rc, 0, "publishing {v}: {o}");
+    let (_, t) = exec(
+        ctr,
+        &format!("sha256sum /srv/www/tool-{v}.linux-{arch}.tar.gz | cut -d' ' -f1"),
+    );
+    let (_, one) = exec(
+        ctr,
+        &format!("sha256sum /srv/www/linux-{arch}/one | cut -d' ' -f1"),
+    );
+    (t, one)
+}
+
+fn fetch_binary_release_from_a_local_server(image: &str) {
+    let ctr = Container::start(image);
+    let (rc, _) = exec(&ctr, "command -v curl");
+    let mut v = V {
+        install: vec!["python3".into()],
+        plain_sum: String::new(),
+        tgz_sum: String::new(),
+    };
+    if rc != 0 {
+        v.install.push("curl".into());
+    }
+    let (r, out) = go(&ctr, "install", &v, pb_install);
+    assert_eq!(r.exit_code(), 0, "install:\n{out}\n{}", r.render());
+    let (_, machine) = exec(&ctr, "uname -m");
+    let arch = match machine.as_str() {
+        "x86_64" => "amd64",
+        "aarch64" => "arm64",
+        m => panic!("no default {{arch}} for {m}"),
+    }
+    .to_string();
+    let (t1, o1) = publish(&ctr, &arch, "1.2.3", 1);
+    let o = Command::new("docker")
+        .args([
+            "exec",
+            "-d",
+            &ctr.name,
+            "sh",
+            "-c",
+            &format!(
+                "cd /srv/www && exec python3 -m http.server {PORT} --bind 127.0.0.1 > /srv/httpd.log 2>&1"
+            ),
+        ])
+        .stdin(Stdio::null())
+        .output()
+        .expect("docker exec -d");
+    assert!(o.status.success(), "starting the server");
+    let (rc, o) = exec(
+        &ctr,
+        &format!(
+            "for i in $(seq 1 50); do curl -fsS -o /dev/null http://127.0.0.1:{PORT}/VERSION && exit 0; sleep 0.2; done; exit 1"
+        ),
+    );
+    assert_eq!(rc, 0, "the server did not come up: {o}");
+    let gets = |ctr: &Container, path: &str| {
+        exec(ctr, &format!("grep -c '\"GET {path} ' /srv/httpd.log"))
+            .1
+            .parse::<usize>()
+            .unwrap_or(0)
+    };
+    let (_, tmp_before) = exec(&ctr, "ls -A /tmp");
+    let tarball = |v: &str| format!("/tool-{v}.linux-{arch}.tar.gz");
+    let one = format!("/linux-{arch}/one");
+
+    // run 1: both installed
+    let (r1, out1) = go_b(&ctr);
+    assert_eq!(
+        r1.hosts[0].status,
+        HostStatus::Changed,
+        "run 1:\n{out1}\n{}",
+        r1.render()
+    );
+    for l in [
+        "== c [prepare] pkg[binary_release] tool: not installed, 1.2.3 wanted; fetched, sha256 ok =="
+            .to_string(),
+        format!(
+            "== c [prepare] pkg[binary_release] one: not installed, sha256 {} wanted; fetched, sha256 ok ==",
+            &o1[..12]
+        ),
+    ] {
+        assert!(out1.contains(&l), "{l}\n{out1}");
+    }
+    assert_eq!(exec(&ctr, "/opt/tool/bin/tool").1, "tool version 1.2.3");
+    assert_eq!(exec(&ctr, "/usr/local/bin/tp-one").1, "one 1");
+    assert_eq!(exec(&ctr, "stat -c %a /usr/local/bin/tp-one").1, "755");
+    let (_, cache) = exec(&ctr, "ls /var/cache/telepatch/sha256");
+    assert!(
+        cache.contains(&t1) && cache.contains(&o1),
+        "cached: {cache}"
+    );
+    assert_eq!((gets(&ctr, &tarball("1.2.3")), gets(&ctr, &one)), (1, 1));
+
+    // run 2: settled; only VERSION and the sidecar are read
+    let (r2, out2) = go_b(&ctr);
+    assert_eq!(
+        r2.hosts[0].status,
+        HostStatus::Ok,
+        "run 2:\n{out2}\n{}",
+        r2.render()
+    );
+    for o in &r2.hosts[0].ops {
+        assert!(!o.changed, "run 2 changed {}: {}", o.id, o.desc);
+    }
+    assert!(!out2.contains("[prepare] pkg[binary_release]"), "{out2}");
+    assert_eq!(
+        (gets(&ctr, &tarball("1.2.3")), gets(&ctr, &one)),
+        (1, 1),
+        "run 2 downloaded nothing"
+    );
+    assert_eq!(gets(&ctr, "/releases.json"), 1, "nor read the checksums");
+
+    // run 3: 1.2.4 and a new `one` are published
+    let (_, o2) = publish(&ctr, &arch, "1.2.4", 2);
+    let (r3, out3) = go_b(&ctr);
+    assert_eq!(
+        r3.hosts[0].status,
+        HostStatus::Changed,
+        "run 3:\n{out3}\n{}",
+        r3.render()
+    );
+    for l in [
+        "== c [prepare] pkg[binary_release] tool: 1.2.3 installed, 1.2.4 wanted; fetched, sha256 ok =="
+            .to_string(),
+        format!(
+            "== c [prepare] pkg[binary_release] one: installed, sha256 {} wanted; fetched, sha256 ok ==",
+            &o2[..12]
+        ),
+    ] {
+        assert!(out3.contains(&l), "{l}\n{out3}");
+    }
+    assert_eq!(exec(&ctr, "/opt/tool/bin/tool").1, "tool version 1.2.4");
+    assert_eq!(exec(&ctr, "/usr/local/bin/tp-one").1, "one 2");
+    let (rc, _) = exec(
+        &ctr,
+        "test -f /opt/tool/.telepatch-fetch && ! test -e /opt/tool/tool-1.2.4",
+    );
+    assert_eq!(rc, 0, "unpacked with strip(1)");
+
+    let (_, stage) = exec(&ctr, "ls -A /var/tmp/telepatch 2>/dev/null");
+    assert_eq!(stage, "", "the staging dir is cleaned");
+    let (_, tmp_after) = exec(&ctr, "ls -A /tmp");
+    assert_eq!(tmp_after, tmp_before, "nothing left in /tmp");
+    let (_, near) = exec(&ctr, "ls -A /opt /usr/local/bin | grep '\\.tp' || true");
+    assert_eq!(near, "", "no candidate or old tree left beside a target");
+}
+
+#[test]
+#[ignore = "needs docker"]
+fn fetch_ubuntu_binary_release() {
+    fetch_binary_release_from_a_local_server("ubuntu:24.04");
+}
+
+#[test]
+#[ignore = "needs docker"]
+fn fetch_rocky_binary_release() {
+    fetch_binary_release_from_a_local_server("rockylinux/rockylinux:10");
 }
 
 #[test]

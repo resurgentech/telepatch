@@ -16,6 +16,9 @@
 //!    later position keeps every guard's sources before the merged op.
 //! 3. Schedule: the surviving ops in trace order ([`Graph::schedule`]).
 //!
+//! A merged op carries every member's allowances, each tagged with the
+//! member it came from (see [`crate::policy::unpermitted`]).
+//!
 //! Merging is per call: the engine calls this once per window, so ops
 //! applied in an earlier window never merge with later ones.
 
@@ -203,6 +206,7 @@ impl Graph {
             let Some(Item::Op(h)) = self.items[head].as_mut() else {
                 panic!("merge: not an op");
             };
+            union_allowed(h, &other);
             h.members.extend(other.members);
             if let (OpSpec::Pkg(a), OpSpec::Pkg(b)) = (&mut h.node.spec, &other.node.spec) {
                 a.merge(b);
@@ -290,6 +294,7 @@ impl Graph {
                 self.renamed.push((m.id, h.id));
             }
         }
+        union_allowed(h, &other);
         let mut members = other.members;
         members.append(&mut h.members);
         members.sort_by_key(|m| m.id);
@@ -344,6 +349,29 @@ impl Graph {
         }
         ops
     }
+}
+
+/// Fold `other`'s allowances into `h`'s, each tagged with the trace op it
+/// came from ([`crate::policy::AllowedFor`]): an untagged allowance is its
+/// op's own, so `h`'s are tagged with `h`'s id and site and `other`'s with
+/// `other`'s; one already tagged (from an earlier merge) keeps its tag.
+fn union_allowed(h: &mut WindowOp, other: &WindowOp) {
+    fn tag(a: &mut crate::policy::Allowance, w: &WindowOp) {
+        a.member.get_or_insert(crate::policy::AllowedFor {
+            id: w.id,
+            site: w.node.site,
+        });
+    }
+    let mut own = std::mem::take(&mut h.node.allowed);
+    for a in &mut own {
+        tag(a, h);
+    }
+    for a in &other.node.allowed {
+        let mut a = a.clone();
+        tag(&mut a, other);
+        own.push(a);
+    }
+    h.node.allowed = own;
 }
 
 /// Rename the ops `g` names along `renamed` (`from -> to`), following

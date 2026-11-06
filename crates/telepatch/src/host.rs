@@ -289,7 +289,7 @@ impl OpHandle {
             )));
             return self.clone();
         }
-        self.edit(|op| op.allowed.push(Allowance { policy, reason }))
+        self.edit(|op| op.allowed.push(Allowance::new(policy, reason)))
             .clone()
     }
 

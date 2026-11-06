@@ -8,7 +8,11 @@
 //! -iu u bash`: the per-user permission check), and gathers package state:
 //! one query per manager over every name in the window's pkg ops, and one
 //! probe per non-distro op (script, cargo: installed version, and latest
-//! when wanted), sent in that op's `RunAs` on its principal's shell.
+//! when wanted), sent in that op's `RunAs` on its principal's shell. A
+//! `binary_release` op's probe also resolves its version and checksum and
+//! fetches it when a change is wanted; unlike the others it can block
+//! (`pkg[binary_release] go: 1.27.2 installed, 1.27.3 wanted; fetched,
+//! sha256 ok` is its prepare line).
 //!
 //! Gathering versus asserting: package state is *gathered* and reported
 //! ("will install: ..."); it is never asserted. The pkg templates already
@@ -117,9 +121,11 @@ pub fn pkg_probe(source: &Source, names: &[String]) -> String {
                 "printf '%s\\n' \"$tp_l\" | grep -qx -- \"$(printf %s {q} | tr 'A-Z_' 'a-z-')\""
             ),
             // Not probed here (see `pkg_names`): report nothing as present.
-            Source::Cargo { .. } | Source::Mise | Source::Rustup(_) | Source::Script(_) => {
-                "false".to_string()
-            }
+            Source::Cargo { .. }
+            | Source::Mise
+            | Source::Rustup(_)
+            | Source::Script(_)
+            | Source::BinaryRelease(_) => "false".to_string(),
         };
         s.push_str(&format!("if {test}; then echo \"present \"{q}; fi\n"));
     }
@@ -137,6 +143,7 @@ pub fn manager_name(s: &Source) -> &'static str {
         Source::Mise => "mise",
         Source::Rustup(_) => "rustup",
         Source::Script(_) => "script",
+        Source::BinaryRelease(_) => "binary_release",
     }
 }
 
@@ -158,6 +165,10 @@ pub fn missing_names(names: &[String], output: &str) -> Vec<String> {
 pub fn source_probe(p: &PkgSpec) -> Option<String> {
     match &p.source {
         Source::Script(s) => Some(s.probe(&p.wanted)),
+        Source::BinaryRelease(b) => {
+            let name = p.names.first().map(String::as_str).unwrap_or("");
+            Some(b.prepare(name, &p.wanted))
+        }
         Source::Cargo { .. } => Some(crate::ops::pkg::cargo_probe(&p.names, &p.wanted)),
         Source::Mise => Some(crate::ops::pkg::mise_probe(&p.names, &p.wanted)),
         Source::Rustup(r) => {
@@ -277,7 +288,8 @@ pub fn source_changes(window: usize, p: &PkgSpec, out: Option<&str>) -> Vec<Will
                 .into_iter()
                 .collect()
         }
-        Source::Distro(_) | Source::Pip => Vec::new(),
+        // Its prepare line is a `WillCreate` ([`prepare_window`]).
+        Source::Distro(_) | Source::Pip | Source::BinaryRelease(_) => Vec::new(),
     }
 }
 
@@ -647,6 +659,16 @@ pub async fn prepare_window<S: ShellSet>(
             },
             None => None,
         };
+        if matches!(p.source, Source::BinaryRelease(_)) {
+            // Resolved, fetched and verified on the host: a failure blocks.
+            let name = p.names.first().map(String::as_str).unwrap_or("");
+            if let Some(w) =
+                crate::ops::pkg::binary_release_prepared(window.number, name, out.as_deref())?
+            {
+                will.will_create.push(w);
+            }
+            continue;
+        }
         if let Some(why) = source_blocker(window.number, p, out.as_deref()) {
             return Err(why);
         }

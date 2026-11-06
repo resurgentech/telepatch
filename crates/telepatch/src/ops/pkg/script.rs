@@ -35,7 +35,7 @@ pub fn version_token(s: &str) -> Option<String> {
 
 /// `p` as a shell word: quoted, except a leading `~`/`~user`, which must
 /// expand on the host (the rule of `FileSpec`'s path, `ops/file.rs:55-74`).
-fn path_word(p: &str) -> String {
+pub(super) fn path_word(p: &str) -> String {
     if let Some(rest) = p.strip_prefix('~') {
         let (user, tail) = match rest.find('/') {
             Some(i) => (&rest[..i], Some(&rest[i + 1..])),
@@ -62,6 +62,11 @@ pub enum Latest {
     /// `owner/repo` on GitHub: the `tag_name` of its latest release, read
     /// with `curl` on the host (a leading `v` dropped).
     GithubRelease(String),
+    /// A url whose body names the latest version (go.dev's
+    /// `VERSION?m=text`: `go1.27.3` then a `time` line), read with `curl`,
+    /// else `wget`, on the host. Callers take the body's first version
+    /// token, so `go1.27.3` and `v1.27.3` are both `1.27.3`.
+    Text(String),
 }
 
 impl Latest {
@@ -71,6 +76,11 @@ impl Latest {
 
     pub fn github_release(repo: impl Into<String>) -> Latest {
         Latest::GithubRelease(repo.into())
+    }
+
+    /// The body of `url` names the latest version ([`Latest::Text`]).
+    pub fn text(url: impl Into<String>) -> Latest {
+        Latest::Text(url.into())
     }
 
     /// Shell printing the latest version (raw; callers take the token).
@@ -83,6 +93,12 @@ impl Latest {
                     "https://api.github.com/repos/{repo}/releases/latest"
                 ))
             ),
+            Latest::Text(url) => {
+                let u = quote(url);
+                format!(
+                    "if command -v curl >/dev/null 2>&1; then curl -fsSL -- {u}; else wget -q -O - -- {u}; fi"
+                )
+            }
         }
     }
 }
@@ -380,6 +396,20 @@ mod tests {
                 .unwrap();
             assert_eq!(String::from_utf8(out.stdout).unwrap().trim_end(), want);
         }
+    }
+
+    #[test]
+    fn text_reads_the_body_with_curl_else_wget() {
+        let r = Latest::text("https://go.dev/VERSION?m=text").render();
+        assert_eq!(
+            r,
+            "if command -v curl >/dev/null 2>&1; then curl -fsSL -- 'https://go.dev/VERSION?m=text'; else wget -q -O - -- 'https://go.dev/VERSION?m=text'; fi"
+        );
+        // the caller's token of go.dev's body
+        assert_eq!(
+            version_token("go1.27.3\ntime 2026-11-01T00:00:00Z\n").as_deref(),
+            Some("1.27.3")
+        );
     }
 
     #[test]

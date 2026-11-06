@@ -91,7 +91,7 @@ impl Fetched {
     }
 }
 
-fn valid_sum(s: &str) -> bool {
+pub(crate) fn valid_sum(s: &str) -> bool {
     s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
@@ -154,7 +154,7 @@ pub fn cleanup_script() -> String {
     )
 }
 
-const LOCATE: &str = "tp_cd=\"${TP_FETCH_CACHE:-/var/cache/telepatch/sha256}\"\ntp_sd=\"${TP_FETCH_STAGE:-/var/tmp/telepatch}\"\n";
+pub(crate) const LOCATE: &str = "tp_cd=\"${TP_FETCH_CACHE:-/var/cache/telepatch/sha256}\"\ntp_sd=\"${TP_FETCH_STAGE:-/var/tmp/telepatch}\"\n";
 
 /// `tp_magic <file>` prints gz, xz, zst, zip, tar or unknown.
 const MAGIC: &str = r#"tp_magic() {
@@ -204,6 +204,27 @@ pub fn items(window: &Window) -> Vec<Item> {
 /// `cached`, `fetched`, `staged`, `mismatch <got>`, `fail <tool> <rc>
 /// <message>`, `notool`, `badarchive`, `needtool <name>`.
 pub fn prepare_script(items: &[Item]) -> String {
+    let mut s = prelude();
+    for (i, it) in items.iter().enumerate() {
+        s.push_str(&format!(
+            "tp_one {i} {} {} {}\n",
+            quote(&it.url),
+            quote(it.sum.as_deref().unwrap_or("")),
+            if it.unpack { 1 } else { 0 }
+        ));
+    }
+    s.push_str("if [ \"$tp_keep\" = 0 ]; then rm -rf -- \"$tp_run\"; fi\n");
+    s
+}
+
+/// The shell [`prepare_script`] runs its items with, also used by the
+/// `binary_release` pkg source: `tp_cd`, `tp_sd`, `tp_run` (this run's
+/// staging directory), `tp_dl` (`curl`, `wget` or empty), `tp_keep`, and
+/// `tp_one <i> <url> <sum> <unpack 0|1>`, which prints one `fetch <i> ..`
+/// line: from the cache, or downloaded into the staging directory, verified
+/// and moved into the cache (with no sum: staged under `u-<hash of the
+/// url>`, and `tp_keep=1`).
+pub(crate) fn prelude() -> String {
     let mut s = String::from(LOCATE);
     s.push_str(&format!(
         "tp_run=\"$tp_sd\"/{}\ntp_dl=\nif command -v curl >/dev/null 2>&1; then tp_dl=curl; elif command -v wget >/dev/null 2>&1; then tp_dl=wget; fi\ntp_keep=0\n",
@@ -269,15 +290,6 @@ tp_one() {
 }
 "#,
     );
-    for (i, it) in items.iter().enumerate() {
-        s.push_str(&format!(
-            "tp_one {i} {} {} {}\n",
-            quote(&it.url),
-            quote(it.sum.as_deref().unwrap_or("")),
-            if it.unpack { 1 } else { 0 }
-        ));
-    }
-    s.push_str("if [ \"$tp_keep\" = 0 ]; then rm -rf -- \"$tp_run\"; fi\n");
     s
 }
 
@@ -373,7 +385,9 @@ pub fn render(f: &FileSpec, src: &FileSrc, o: &mut String) {
     }
 }
 
-fn render_place(f: &FileSpec, o: &mut String) {
+/// `.from`: the candidate beside `tp_p`, renamed over it when its sum is
+/// not `tp_s` (one rename). Needs `rc`, `changed`, `tp_p`, `tp_f`, `tp_s`.
+pub(crate) fn render_place(f: &FileSpec, o: &mut String) {
     o.push_str(
         "if [ \"$rc\" -eq 0 ] && [ -d \"$tp_p\" ]; then echo \"telepatch: $tp_p is a directory\" >&2; rc=1; fi\n",
     );
@@ -402,7 +416,9 @@ fn render_place(f: &FileSpec, o: &mut String) {
     );
 }
 
-fn render_unpack(f: &FileSpec, strip: u32, o: &mut String) {
+/// `.unpack`: a sibling tree swapped in (see the module doc for the
+/// renames). Needs `rc`, `changed`, `tp_p`, `tp_f`, `tp_s`.
+pub(crate) fn render_unpack(f: &FileSpec, strip: u32, o: &mut String) {
     let strip_flag = if strip > 0 {
         format!(" --strip-components={strip}")
     } else {

@@ -21,10 +21,12 @@ use crate::key::{Key, Value};
 use crate::sh::quote;
 use crate::trace::{Node, OpNode, OpSpec, Principal};
 
+mod binary_release;
 mod cargo;
 mod mise;
 mod rustup;
 mod script;
+pub use binary_release::{Arch, BinaryRelease, Sum, prepared as binary_release_prepared};
 pub use cargo::{
     CargoProbe, parse_probe as parse_cargo_probe, probe as cargo_probe,
     will_changes as cargo_will_changes,
@@ -72,6 +74,9 @@ pub enum Source {
     /// A vendor installer script ([`InstallerScript`]; boxed to keep `OpNode`
     /// small).
     Script(Box<InstallerScript>),
+    /// A vendor's tarball or single binary ([`BinaryRelease`]), root only;
+    /// boxed to keep `OpNode` small.
+    BinaryRelease(Box<BinaryRelease>),
 }
 
 /// Which version of a package is wanted.
@@ -148,8 +153,20 @@ impl PkgSpec {
             }
             out.extend(s.problems(name, &self.wanted));
         }
+        if let Source::BinaryRelease(b) = &self.source {
+            let name = self.names.first().map(String::as_str).unwrap_or("");
+            if self.names.len() != 1 {
+                out.push(format!(
+                    "binary_release {name}: exactly one package name per binary_release op"
+                ));
+            }
+            out.extend(b.problems(name));
+        }
         if self.source == Source::Mise && self.user != "root" {
             out.push("mise source is system-wide (root only)".to_string());
+        }
+        if matches!(self.source, Source::BinaryRelease(_)) && self.user != "root" {
+            out.push("binary_release source is system-wide (root only)".to_string());
         }
         out
     }
@@ -164,6 +181,7 @@ impl PkgSpec {
             Source::Mise => "mise",
             Source::Rustup(_) => "rustup",
             Source::Script(_) => "installer_script",
+            Source::BinaryRelease(_) => "binary_release",
         }
     }
 
@@ -180,6 +198,7 @@ impl PkgSpec {
             Source::Mise => Key::pkg(format!("mise:root:{name}")),
             Source::Rustup(_) => Key::pkg(format!("rustup:{}:{name}", self.user)),
             Source::Script(_) => Key::pkg(format!("script:{}:{name}", self.user)),
+            Source::BinaryRelease(_) => Key::pkg(format!("binary_release:{}:{name}", self.user)),
         }
     }
 
@@ -187,9 +206,11 @@ impl PkgSpec {
     /// script, cargo and rustup (they write files nobody listed; A14).
     pub fn default_writes(&self) -> BTreeSet<Key> {
         match &self.source {
-            Source::Script(_) | Source::Cargo { .. } | Source::Mise | Source::Rustup(_) => {
-                BTreeSet::from([Key::Any])
-            }
+            Source::Script(_)
+            | Source::BinaryRelease(_)
+            | Source::Cargo { .. }
+            | Source::Mise
+            | Source::Rustup(_) => BTreeSet::from([Key::Any]),
             _ => self.keys(),
         }
     }
@@ -205,6 +226,9 @@ impl PkgSpec {
             .collect();
         if let Source::Script(s) = &self.source {
             post.insert(Key::file(&s.bin), Value::Exists(true));
+        }
+        if let Source::BinaryRelease(b) = &self.source {
+            post.insert(Key::file(&b.bin), Value::Exists(true));
         }
         if self.source == Source::Mise {
             post.insert(Key::file(MISE_CONFIG), Value::Exists(true));
@@ -228,6 +252,7 @@ impl PkgSpec {
     pub fn kind(&self) -> &'static str {
         match &self.source {
             Source::Script(_) => "pkg[script]",
+            Source::BinaryRelease(_) => "pkg[binary_release]",
             Source::Cargo { .. } => "pkg[cargo]",
             Source::Mise => "pkg[mise]",
             Source::Rustup(_) => "pkg[rustup]",
@@ -251,13 +276,14 @@ impl PkgSpec {
         self.names.iter().map(|n| self.key_of(n)).collect()
     }
 
-    /// May this op ever be folded into another? `Script` ops never merge;
+    /// May this op ever be folded into another? `Script` and
+    /// `BinaryRelease` ops never merge (one name each);
     /// a pinned `Cargo`, `Mise`, `Rustup` or distro op has exactly one name
     /// (the pin is for that name). Rustup ops merge per user and toolchain
     /// (see [`PkgSpec::merge_scope`]).
     pub fn mergeable(&self) -> bool {
         match &self.source {
-            Source::Script(_) => false,
+            Source::Script(_) | Source::BinaryRelease(_) => false,
             Source::Cargo { .. } | Source::Mise | Source::Distro(_) | Source::Rustup(_) => {
                 !matches!(self.wanted, Wanted::Pinned(_))
             }
@@ -321,6 +347,10 @@ impl PkgSpec {
             let name = self.names.first().map(String::as_str).unwrap_or("");
             return s.render(name, &self.wanted);
         }
+        if let Source::BinaryRelease(b) = &self.source {
+            let name = self.names.first().map(String::as_str).unwrap_or("");
+            return b.render(name);
+        }
         if let Source::Cargo { locked } = self.source {
             return cargo::render(&self.names, &self.wanted, locked);
         }
@@ -372,9 +402,14 @@ impl PkgSpec {
                 Wanted::Present => pip(&mut o),
             },
             // Rendered above; every source is built.
-            (Source::Cargo { .. } | Source::Mise | Source::Rustup(_) | Source::Script(_), _) => {
-                unreachable!()
-            }
+            (
+                Source::Cargo { .. }
+                | Source::Mise
+                | Source::Rustup(_)
+                | Source::Script(_)
+                | Source::BinaryRelease(_),
+                _,
+            ) => unreachable!(),
         }
         o
     }
@@ -757,6 +792,18 @@ impl PkgHandle {
         self.source("installer_script", Source::Script(Box::new(script)))
     }
 
+    /// The one name is a vendor's binary release: `release` says where to
+    /// download it, how to verify it, and where it goes ([`BinaryRelease`];
+    /// the source module's doc has the rules). Root only. Keys
+    /// `pkg:binary_release:root:<name>`; writes `*` unless narrowed with
+    /// `.writes([..])`; posts `Installed` and `file:<bin> = Exists(true)`.
+    /// `.pin(v)` and `.latest()` chain on the handle. No checksum source is
+    /// the policy error `Unverified`.
+    #[track_caller]
+    pub fn binary_release(&self, release: BinaryRelease) -> Self {
+        self.source("binary_release", Source::BinaryRelease(Box::new(release)))
+    }
+
     /// Install the build dependencies of the named source packages instead
     /// (`apt-get build-dep`). Which packages that installs is unknown, so
     /// the op writes `*` and makes no `Installed` postcondition.
@@ -907,6 +954,10 @@ impl PkgHandle {
             if let (Source::Script(sc), Wanted::Latest) = (&s.source, &w) {
                 let name = s.names.first().map(String::as_str).unwrap_or("");
                 script_err = sc.latest_problem(name);
+            }
+            if let Source::BinaryRelease(b) = &s.source {
+                let name = s.names.first().map(String::as_str).unwrap_or("");
+                script_err = b.want_problem(name, &w);
             }
             if matches!(s.source, Source::Rustup(_)) && matches!(w, Wanted::Pinned(_)) {
                 rustup_pin = true;

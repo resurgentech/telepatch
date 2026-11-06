@@ -758,6 +758,7 @@ fn describe(op: &OpNode) -> String {
             if matches!(
                 p.source,
                 crate::ops::pkg::Source::Script(_)
+                    | crate::ops::pkg::Source::BinaryRelease(_)
                     | crate::ops::pkg::Source::Cargo { .. }
                     | crate::ops::pkg::Source::Mise
                     | crate::ops::pkg::Source::Rustup(_)
@@ -1415,7 +1416,13 @@ impl Executor for HostExec {
             return Ok(());
         }
         let actions = self.and_not_starts(window);
-        if !crate::ops::fetch::items(window).is_empty() {
+        // A fetch or a binary release stages under the run's directory;
+        // removed when the host is done, even if its op never ran.
+        let binary_release = window.ops.iter().any(|o| {
+            matches!(&o.node.spec, OpSpec::Pkg(p)
+                if matches!(p.source, crate::ops::pkg::Source::BinaryRelease(_)))
+        });
+        if binary_release || !crate::ops::fetch::items(window).is_empty() {
             self.fetch_staged = true;
         }
 
@@ -2026,10 +2033,10 @@ mod tests {
             Some("will restart")
         );
         let mut w = restart_op(1, None);
-        w.node.allowed.push(crate::policy::Allowance {
-            policy: crate::policy::Policy::UnguardedRestart,
-            reason: "leaks memory".into(),
-        });
+        w.node.allowed.push(crate::policy::Allowance::new(
+            crate::policy::Policy::UnguardedRestart,
+            "leaks memory",
+        ));
         assert_eq!(
             action_line(&w, &[], &known, &s).as_deref(),
             Some("will restart, every run; allowed unguarded-restart: leaks memory")
