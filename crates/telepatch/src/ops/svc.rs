@@ -144,6 +144,7 @@ impl Deref for SvcHandle {
 
 impl SvcHandle {
     /// Want the unit enabled (`systemctl enable`).
+    #[track_caller]
     pub fn enabled(&self) -> &Self {
         self.0.edit(|op| {
             if let OpSpec::Svc(s) = &mut op.spec {
@@ -154,6 +155,7 @@ impl SvcHandle {
     }
 
     /// Want the unit started (`systemctl start`).
+    #[track_caller]
     pub fn started(&self) -> &Self {
         self.0.edit(|op| {
             if let OpSpec::Svc(s) = &mut op.spec {
@@ -166,6 +168,7 @@ impl SvcHandle {
 
 impl<V> Host<V> {
     /// A systemd unit: chain `.enabled()` and/or `.started()`. Root only.
+    #[track_caller]
     pub fn svc(&self, unit: &str) -> SvcHandle {
         let h = self.op(OpSpec::Svc(SvcSpec::new(unit)));
         if let Principal::User(u) = &self.run_as().principal {
@@ -184,10 +187,13 @@ pub fn nothing_wanted(trace: &Trace) -> Vec<TraceError> {
     trace
         .nodes
         .iter()
-        .filter_map(|n| match n {
+        .enumerate()
+        .filter_map(|(i, n)| match n {
             crate::trace::Node::Op(op) => match &op.spec {
                 OpSpec::Svc(s) if !s.enabled && !s.started => {
-                    Some(TraceError::new(format!("svc({}): nothing wanted", s.unit)))
+                    let mut e = TraceError::new(format!("svc({}): nothing wanted", s.unit));
+                    e.site = None;
+                    Some(trace.locate(crate::trace::NodeId(i), e))
                 }
                 _ => None,
             },

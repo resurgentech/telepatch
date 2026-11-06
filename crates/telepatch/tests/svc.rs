@@ -382,7 +382,7 @@ fn svc_that_wants_nothing_is_a_trace_error() {
     h.svc("docker");
     let errs = h.snapshot().errors;
     assert_eq!(errs.len(), 1, "{errs:?}");
-    assert_eq!(errs[0].to_string(), "svc(docker): nothing wanted");
+    assert_eq!(errs[0].message(), "svc(docker): nothing wanted");
     let ok = host();
     ok.svc("docker").started();
     ok.svc("cron").enabled();

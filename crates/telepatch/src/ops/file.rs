@@ -251,11 +251,13 @@ impl FileHandle {
     }
 
     /// Ensure this exact line is present, appending if missing.
+    #[track_caller]
     pub fn line(&self, line: &str) -> &Self {
         self.spec(|s| s.lines.push(LineOp::Line(line.to_string())))
     }
     /// Replace the last line matching `re` (an ERE, `grep -E`) with `line`,
     /// or append it when none matches.
+    #[track_caller]
     pub fn line_re(&self, re: &str, line: &str) -> &Self {
         self.spec(|s| {
             s.lines.push(LineOp::LineRe {
@@ -265,14 +267,17 @@ impl FileHandle {
         })
     }
     /// Ensure a directory.
+    #[track_caller]
     pub fn dir(&self) -> &Self {
         self.spec(|s| s.kind = FileKind::Dir)
     }
     /// Ensure the path does not exist (removes directories recursively).
+    #[track_caller]
     pub fn absent(&self) -> &Self {
         self.spec(|s| s.kind = FileKind::Absent)
     }
     /// Ensure exactly these bytes.
+    #[track_caller]
     pub fn content(&self, bytes: impl AsRef<[u8]>) -> &Self {
         let b = bytes.as_ref().to_vec();
         self.spec(|s| s.content = Some(b))
@@ -282,6 +287,7 @@ impl FileHandle {
     /// applies to `.content(..)` and line edits. Without `%s` it is a trace
     /// error. A non-zero exit fails the op with that rc and leaves the
     /// target untouched.
+    #[track_caller]
     pub fn validate(&self, cmd: &str) -> &Self {
         if !cmd.contains("%s") {
             self.0.record_error(TraceError::new(format!(
@@ -292,10 +298,12 @@ impl FileHandle {
         let c = cmd.to_string();
         self.spec(|s| s.validate = Some(c))
     }
+    #[track_caller]
     pub fn mode(&self, mode: u32) -> &Self {
         self.spec(|s| s.mode = Some(mode))
     }
     /// `"user"`, `"user:group"` or `":group"`.
+    #[track_caller]
     pub fn owner(&self, owner: &str) -> &Self {
         self.spec(|s| s.owner = Some(owner.to_string()))
     }
@@ -304,6 +312,7 @@ impl FileHandle {
 impl<V> Host<V> {
     /// Manage the file or directory at `path`. `~`/`~user` prefixes expand
     /// on the host, in the op's shell.
+    #[track_caller]
     pub fn file(&self, path: &str) -> FileHandle {
         FileHandle(self.op(OpSpec::File(FileSpec::new(path))))
     }
@@ -327,7 +336,12 @@ mod tests {
     fn validate_without_percent_s_is_a_trace_error() {
         let h = host();
         h.file("/etc/x").content("a").validate("visudo -c");
-        let errs: Vec<String> = h.snapshot().errors.iter().map(|e| e.0.clone()).collect();
+        let errs: Vec<String> = h
+            .snapshot()
+            .errors
+            .iter()
+            .map(|e| e.message.clone())
+            .collect();
         assert_eq!(errs.len(), 1, "{errs:?}");
         assert!(errs[0].contains("%s"), "{errs:?}");
         h.file("/etc/y").content("a").validate("visudo -cf %s");

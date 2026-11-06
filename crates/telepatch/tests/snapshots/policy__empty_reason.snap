@@ -1,0 +1,7 @@
+---
+source: crates/telepatch/tests/policy.rs
+assertion_line: 113
+expression: t
+---
+trace error: allow(Policy::UnitViaFile, ..): the reason is required
+  at <site>

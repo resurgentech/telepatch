@@ -49,6 +49,7 @@ impl Deref for GroupHandle {
 
 impl GroupHandle {
     /// Create the group as a system group (`groupadd -r`).
+    #[track_caller]
     pub fn system(&self) -> &Self {
         self.0.edit(|op| {
             if let OpSpec::Group(g) = &mut op.spec {
@@ -61,6 +62,7 @@ impl GroupHandle {
 
 impl<V> Host<V> {
     /// Ensure the group `name` exists. Root only.
+    #[track_caller]
     pub fn group(&self, name: &str) -> GroupHandle {
         let h = self.op(OpSpec::Group(GroupSpec::new(name)));
         if let Principal::User(u) = &self.run_as().principal {

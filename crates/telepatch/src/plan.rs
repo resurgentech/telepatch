@@ -41,6 +41,9 @@ fn op_line(out: &mut String, id: usize, op: &OpNode, os: &Os) {
         let _ = write!(out, " post [{}]", p.join(", "));
     }
     out.push('\n');
+    for a in &op.allowed {
+        let _ = writeln!(out, "      {a}");
+    }
     for line in op.spec.script(os).lines() {
         let _ = writeln!(out, "      | {line}");
     }

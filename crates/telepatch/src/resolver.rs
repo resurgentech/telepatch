@@ -157,6 +157,8 @@ mod tests {
             guard: None,
             post: Default::default(),
             allow_fail: false,
+            site: None,
+            allowed: Vec::new(),
         })
     }
 

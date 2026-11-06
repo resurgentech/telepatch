@@ -137,6 +137,7 @@ impl UserHandle {
 
     /// The login shell: set on creation and enforced on an existing
     /// account.
+    #[track_caller]
     pub fn shell(&self, path: &str) -> &Self {
         self.spec(|u| u.shell = Some(path.to_string()))
     }
@@ -144,6 +145,7 @@ impl UserHandle {
     /// Add the account to these groups if it is not in them. Never
     /// removes one. Each group is read, so a `group` op before this one
     /// orders first.
+    #[track_caller]
     pub fn groups_add<I, S>(&self, groups: I) -> &Self
     where
         I: IntoIterator<Item = S>,
@@ -168,6 +170,7 @@ impl UserHandle {
     /// A crypt(3) hash for the password, applied only when this op
     /// creates the account. Empty: not applied (the account stays
     /// locked). Never shown in the plan, report, log or events.
+    #[track_caller]
     pub fn password_hash(&self, hash: &str) -> &Self {
         if hash.contains(['\n', '\r', '\0']) {
             self.0.record_error(TraceError::new(
@@ -181,6 +184,7 @@ impl UserHandle {
 
 impl<V> Host<V> {
     /// Ensure the account `name` exists. Root only.
+    #[track_caller]
     pub fn user(&self, name: &str) -> UserHandle {
         let h = self.op(OpSpec::User(UserSpec::new(name)));
         if let Principal::User(u) = &self.run_as().principal {

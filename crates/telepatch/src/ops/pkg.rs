@@ -444,6 +444,7 @@ impl PkgHandle {
     /// Install the build dependencies of the named source packages instead
     /// (`apt-get build-dep`). Which packages that installs is unknown, so
     /// the op writes `*` and makes no `Installed` postcondition.
+    #[track_caller]
     pub fn build_dep(&self) -> &Self {
         let mut apt = true;
         self.spec(|s| {
@@ -468,6 +469,7 @@ impl PkgHandle {
 
     /// Run `apt-get update` before this op (normally set by the apt cache
     /// pass, [`apply_apt_update`]).
+    #[track_caller]
     pub fn update_cache(&self, on: bool) -> &Self {
         self.spec(|s| s.update_cache = on);
         self
@@ -475,18 +477,21 @@ impl PkgHandle {
 
     /// Want the newest release (pip: `install -U`). Not supported on
     /// distro packages.
+    #[track_caller]
     pub fn latest(&self) -> &Self {
         self.want(Wanted::Latest)
     }
 
     /// Want exactly version `v` (pip: `name==v`). Not supported on distro
     /// packages.
+    #[track_caller]
     pub fn pin(&self, v: impl Into<String>) -> &Self {
         self.want(Wanted::Pinned(v.into()))
     }
 
     /// Edit a rustup op's options, then add the postconditions of what was
     /// added. On any other source: a trace error naming `method`.
+    #[track_caller]
     fn rustup_opt(&self, method: &str, f: impl FnOnce(&mut RustupSpec)) -> &Self {
         let mut rustup = true;
         self.spec(|s| match &mut s.source {
@@ -509,6 +514,7 @@ impl PkgHandle {
     }
 
     /// Rustup: also have these targets installed (`rustup target add`).
+    #[track_caller]
     pub fn targets<I, S>(&self, targets: I) -> &Self
     where
         I: IntoIterator<Item = S>,
@@ -523,6 +529,7 @@ impl PkgHandle {
 
     /// Rustup: also have these components installed (`rustup component
     /// add`).
+    #[track_caller]
     pub fn components<I, S>(&self, components: I) -> &Self
     where
         I: IntoIterator<Item = S>,
@@ -536,6 +543,7 @@ impl PkgHandle {
     }
 
     /// Rustup: the install profile (default `default`).
+    #[track_caller]
     pub fn profile(&self, profile: impl Into<String>) -> &Self {
         let p = profile.into();
         if let Err(e) = check_names(std::slice::from_ref(&p)) {
@@ -546,6 +554,7 @@ impl PkgHandle {
 
     /// Rustup: make this toolchain the default (`rustup default`), when it
     /// is not already.
+    #[track_caller]
     pub fn set_default(&self) -> &Self {
         self.rustup_opt("set_default", |r| r.set_default = true)
     }
@@ -553,11 +562,13 @@ impl PkgHandle {
     /// Rustup: the shell command that installs rustup when it is absent;
     /// `--default-toolchain <tc> --profile <p>` is appended. Default:
     /// [`DEFAULT_INSTALLER`].
+    #[track_caller]
     pub fn installer(&self, cmd: impl Into<String>) -> &Self {
         let c = cmd.into();
         self.rustup_opt("installer", |r| r.installer = Some(c))
     }
 
+    #[track_caller]
     fn want(&self, w: Wanted) -> &Self {
         let mut distro = false;
         let mut script_err = None;
@@ -634,11 +645,13 @@ fn check_names(v: &[String]) -> Result<(), TraceError> {
 impl<V> Host<V> {
     /// Invalid input is recorded as a trace error; the node is still pushed
     /// (so the handle is valid) but the run fails before anything applies.
+    #[track_caller]
     fn pkg_op(&self, manager: Manager, v: Vec<String>) -> PkgHandle {
         self.pkg_spec_op(PkgSpec::new(manager, v))
     }
 
     /// Push a pkg op for any source.
+    #[track_caller]
     pub(crate) fn pkg_spec_op(&self, mut spec: PkgSpec) -> PkgHandle {
         if let Err(e) = check_names(&spec.names) {
             self.record_error(e);
@@ -672,6 +685,7 @@ impl<V> Host<V> {
     /// Ensure packages are installed with the host's manager: apt on
     /// Debian-family, dnf on RedHat-family (Fedora, EL, Amazon Linux 2023),
     /// pacman on Arch. An unknown family is recorded as a trace error.
+    #[track_caller]
     pub fn pkg<I, S>(&self, pkgs: I) -> PkgHandle
     where
         I: IntoIterator<Item = S>,
@@ -692,6 +706,7 @@ impl<V> Host<V> {
     }
 
     /// Like [`Host::pkg`] but with `yum`, for RedHat-family hosts without dnf.
+    #[track_caller]
     pub fn yum<I, S>(&self, pkgs: I) -> PkgHandle
     where
         I: IntoIterator<Item = S>,
@@ -705,6 +720,7 @@ impl<V> Host<V> {
     /// `pkg:script:<user>:<name>`; writes `*` unless narrowed with
     /// `.writes([..])`; posts `Installed` and `file:<bin> = Exists(true)`.
     /// Missing required parts are trace errors.
+    #[track_caller]
     pub fn script(&self, name: impl AsRef<str>, spec: ScriptSpec) -> PkgHandle {
         self.pkg_spec_op(PkgSpec::from_source(
             Source::Script(Box::new(spec)),
@@ -716,6 +732,7 @@ impl<V> Host<V> {
     /// (`pkg:cargo:<user>:<name>` keys); writes `*` unless narrowed with
     /// `.writes([..])`; posts `Installed` per name. `.pin(v)` takes one
     /// name; `.latest()` asks `cargo search` on the host.
+    #[track_caller]
     pub fn cargo<I, S>(&self, crates: I) -> PkgHandle
     where
         I: IntoIterator<Item = S>,
@@ -734,6 +751,7 @@ impl<V> Host<V> {
     /// `file:/etc/mise/config.toml = Exists(true)`. `.pin(v)` takes one
     /// name; `.latest()` asks `mise latest` on the host. Users reach the
     /// tools through `/usr/local/share/mise/shims` on their `PATH`.
+    #[track_caller]
     pub fn mise<I, S>(&self, tools: I) -> PkgHandle
     where
         I: IntoIterator<Item = S>,
@@ -749,6 +767,7 @@ impl<V> Host<V> {
     /// `...:<tc>/component/<c>`; writes `*` unless narrowed. `.latest()`
     /// asks `rustup check`; `.pin(..)` is a trace error (name a version
     /// toolchain instead).
+    #[track_caller]
     pub fn rustup(&self, toolchain: impl AsRef<str>) -> PkgHandle {
         self.pkg_spec_op(PkgSpec::from_source(
             Source::Rustup(Box::default()),
@@ -757,6 +776,7 @@ impl<V> Host<V> {
     }
 
     /// Python packages via pip (`pkg:pip:<name>` keys).
+    #[track_caller]
     pub fn pip<I, S>(&self, pkgs: I) -> PipHandle
     where
         I: IntoIterator<Item = S>,
@@ -789,7 +809,11 @@ mod tests {
     }
 
     fn errors(h: &Host<()>) -> Vec<String> {
-        h.snapshot().errors.iter().map(|e| e.0.clone()).collect()
+        h.snapshot()
+            .errors
+            .iter()
+            .map(|e| e.message.clone())
+            .collect()
     }
 
     #[test]

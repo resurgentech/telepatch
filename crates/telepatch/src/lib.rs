@@ -15,6 +15,7 @@ pub mod key;
 pub mod ops;
 pub mod optimize;
 pub mod plan;
+pub mod policy;
 pub mod pool;
 pub mod prepare;
 pub mod report;
@@ -28,6 +29,7 @@ pub mod transport;
 
 pub use host::{Host, OpHandle, Scope, TraceError};
 pub use key::{Key, Value};
+pub use policy::{Allowance, Policy};
 pub use role::{Playbook, PlaybookFuture, RoleGuard};
 pub use telepatch_macros::*;
-pub use trace::{Guard, Node, NodeId, OpNode, OpSpec, Principal, RunAs, Source, Trace};
+pub use trace::{Guard, Node, NodeId, OpNode, OpSpec, Principal, RunAs, Site, Source, Trace};

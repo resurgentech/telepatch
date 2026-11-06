@@ -463,6 +463,7 @@ impl HostExec {
             outcome,
             rc,
             changed,
+            allowed: w.node.allowed.clone(),
         });
     }
 
@@ -596,6 +597,8 @@ impl Executor for HostExec {
                 guard: None,
                 post: Default::default(),
                 allow_fail: false,
+                site: None,
+                allowed: Vec::new(),
             };
             let id = self.seq;
             let who = &q.run_as.principal;

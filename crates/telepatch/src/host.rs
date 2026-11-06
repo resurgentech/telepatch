@@ -7,23 +7,86 @@ use std::rc::Rc;
 
 use crate::facts::os::Os;
 use crate::key::{Key, Value};
+use crate::policy::{Allowance, Policy};
 use crate::resolver::Resolver;
 use crate::role::RoleGuard;
-use crate::trace::{Guard, Node, NodeId, OpNode, OpSpec, RunAs, Trace};
+use crate::trace::{Guard, Node, NodeId, OpNode, OpSpec, RunAs, Site, Trace};
 
 /// A playbook bug found while tracing (not a host failure).
+///
+/// Prints in the console form:
+///
+/// ```text
+/// trace error: <message>[ (policy: <name>)]
+///   in role <outer > inner>, <file>:<line>
+///   to permit: .allow(Policy::<Name>, "<reason>")
+/// ```
+///
+/// The second line is `  at <file>:<line>` outside any role and is left
+/// out when neither is known; the third is printed for a policy error
+/// only. A hard error (no `policy`) cannot be permitted.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TraceError(pub String);
+pub struct TraceError {
+    pub message: String,
+    /// The role chain the error was found in, outermost first.
+    pub roles: Vec<String>,
+    /// The caller's source location.
+    pub site: Option<Site>,
+    /// Set for a policy error: the policy an `.allow(..)` would permit.
+    pub policy: Option<Policy>,
+}
 
 impl TraceError {
+    /// A hard error at the caller's site. Recording it through
+    /// [`Host::record_error`] or an op handle replaces the site with that
+    /// call's and adds the role chain.
+    #[track_caller]
     pub fn new(msg: impl Into<String>) -> TraceError {
-        TraceError(msg.into())
+        TraceError {
+            message: msg.into(),
+            roles: Vec::new(),
+            site: Some(Site::caller()),
+            policy: None,
+        }
+    }
+
+    /// A policy error, placed later (see [`Trace::locate`]).
+    pub fn policy(policy: Policy, msg: impl Into<String>) -> TraceError {
+        TraceError {
+            message: msg.into(),
+            roles: Vec::new(),
+            site: None,
+            policy: Some(policy),
+        }
+    }
+
+    /// The message alone, without the location lines.
+    pub fn message(&self) -> &str {
+        &self.message
     }
 }
 
 impl fmt::Display for TraceError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
+        write!(f, "trace error: {}", self.message)?;
+        if let Some(p) = self.policy {
+            write!(f, " (policy: {p})")?;
+        }
+        let roles = self.roles.join(" > ");
+        match (roles.is_empty(), &self.site) {
+            (false, Some(s)) => write!(f, "\n  in role {roles}, {s}")?,
+            (false, None) => write!(f, "\n  in role {roles}")?,
+            (true, Some(s)) => write!(f, "\n  at {s}")?,
+            (true, None) => {}
+        }
+        if let Some(p) = self.policy {
+            write!(
+                f,
+                "\n  to permit: .allow(Policy::{}, \"<reason>\")",
+                p.variant()
+            )?;
+        }
+        Ok(())
     }
 }
 impl std::error::Error for TraceError {}
@@ -88,28 +151,38 @@ impl<V> Host<V> {
     /// A copy of the trace recorded so far.
     pub fn snapshot(&self) -> Trace {
         let mut t = self.trace.borrow().clone();
-        t.errors.extend(crate::ops::svc::nothing_wanted(&t));
+        let derived = derived_errors(&t);
+        t.errors.extend(derived);
         t
     }
 
     /// The first playbook bug found so far, recorded or derived from the
-    /// finished ops (an `svc` that wants nothing).
+    /// finished ops (an `svc` that wants nothing, a policy not allowed).
     pub(crate) fn first_error(&self) -> Option<TraceError> {
         let t = self.trace.borrow();
         t.errors
             .first()
             .cloned()
-            .or_else(|| crate::ops::svc::nothing_wanted(&t).into_iter().next())
+            .or_else(|| derived_errors(&t).into_iter().next())
     }
 
     /// Record a playbook bug found while tracing. The run fails with the
-    /// first recorded error before anything is applied.
-    pub fn record_error(&self, e: TraceError) {
-        self.trace.borrow_mut().errors.push(e);
+    /// first recorded error before anything is applied. The error takes
+    /// the caller's site and the roles open now.
+    #[track_caller]
+    pub fn record_error(&self, mut e: TraceError) {
+        let mut t = self.trace.borrow_mut();
+        e.site = Some(Site::caller());
+        if e.roles.is_empty() {
+            e.roles = t.open_roles();
+        }
+        t.errors.push(e);
     }
 
     /// Append an op node and return its handle. Op builders (`pkg`, `file`,
-    /// ...) in later steps are thin wrappers over this.
+    /// ...) are thin wrappers over this. The node records the caller's
+    /// site (`#[track_caller]` all the way from the role's call).
+    #[track_caller]
     pub fn op(&self, spec: OpSpec) -> OpHandle {
         let node = OpNode {
             writes: spec.default_writes(),
@@ -119,6 +192,8 @@ impl<V> Host<V> {
             reads: Default::default(),
             guard: None,
             allow_fail: false,
+            site: Some(Site::caller()),
+            allowed: Vec::new(),
         };
         let id = self.trace.borrow_mut().push(Node::Op(node));
         OpHandle {
@@ -128,6 +203,7 @@ impl<V> Host<V> {
     }
 
     /// Toy shell op (writes `*`); replaced by `sh!` later.
+    #[track_caller]
     pub fn raw(&self, script: impl Into<String>) -> OpHandle {
         self.op(OpSpec::Raw {
             script: script.into(),
@@ -175,9 +251,38 @@ pub struct OpHandle {
 }
 
 impl OpHandle {
-    /// Record a trace error (see [`Host::record_error`]).
-    pub(crate) fn record_error(&self, e: TraceError) {
-        self.trace.borrow_mut().errors.push(e);
+    /// Record a trace error (see [`Host::record_error`]): at the caller's
+    /// site, in the roles this op was traced in.
+    #[track_caller]
+    pub(crate) fn record_error(&self, mut e: TraceError) {
+        let mut t = self.trace.borrow_mut();
+        e.site = Some(Site::caller());
+        if e.roles.is_empty() {
+            e.roles = t.roles_at(self.id);
+        }
+        t.errors.push(e);
+    }
+
+    /// Permit this op to break `policy`, for `reason` (required: an empty
+    /// one is a hard trace error). The plan and the run report list it.
+    #[track_caller]
+    pub fn allow(&self, policy: Policy, reason: impl Into<String>) -> &Self {
+        let reason = reason.into();
+        if reason.trim().is_empty() {
+            self.record_error(TraceError::new(format!(
+                "allow(Policy::{}, ..): the reason is required",
+                policy.variant()
+            )));
+            return self;
+        }
+        if reason.contains(['\n', '\r']) {
+            self.record_error(TraceError::new(format!(
+                "allow(Policy::{}, ..): the reason must be one line",
+                policy.variant()
+            )));
+            return self;
+        }
+        self.edit(|op| op.allowed.push(Allowance { policy, reason }))
     }
 
     pub fn id(&self) -> NodeId {
@@ -206,29 +311,42 @@ impl OpHandle {
     }
 
     /// Replace the declared read set.
+    #[track_caller]
     pub fn reads(&self, keys: impl IntoIterator<Item = Key>) -> &Self {
         self.edit(|op| op.reads = keys.into_iter().collect())
     }
 
     /// Replace the declared write set (narrowing the default).
+    #[track_caller]
     pub fn writes(&self, keys: impl IntoIterator<Item = Key>) -> &Self {
         self.edit(|op| op.writes = keys.into_iter().collect())
     }
 
     /// A non-zero exit of this op does not fail the run.
+    #[track_caller]
     pub fn allow_fail(&self) -> &Self {
         self.edit(|op| op.allow_fail = true)
     }
 
     /// Run this op only when `guard` holds.
+    #[track_caller]
     pub fn when(&self, guard: Guard) -> &Self {
         self.edit(|op| op.guard = Some(guard))
     }
 
     /// Declare a postcondition: after this op, `key` has `value`.
+    #[track_caller]
     pub fn post(&self, key: Key, value: Value) -> &Self {
         self.edit(|op| {
             op.post.insert(key, value);
         })
     }
+}
+
+/// Errors derived from the finished ops rather than recorded: an `svc`
+/// that wants nothing, a policy an op trips and does not allow.
+fn derived_errors(t: &Trace) -> Vec<TraceError> {
+    let mut v = crate::ops::svc::nothing_wanted(t);
+    v.extend(crate::policy::violations(t));
+    v
 }

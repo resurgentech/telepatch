@@ -2,11 +2,12 @@
 //! are recorded, not returned: `testing::trace` and the engine fail with them.
 
 use std::rc::Rc;
+use std::sync::atomic::{AtomicU32, Ordering::Relaxed};
 
 use telepatch::engine::{Engine, EngineError};
 use telepatch::facts::os::Os;
 use telepatch::testing::{FakeExecutor, FixtureHost, block_on, trace};
-use telepatch::{Host, Playbook, PlaybookFuture};
+use telepatch::{Host, Playbook, PlaybookFuture, TraceError, role};
 
 fn fixture(name: &str) -> FixtureHost<()> {
     let p = format!(
@@ -119,4 +120,109 @@ fn testing_trace_fails_with_the_recorded_error() {
             .unwrap();
         assert!(text.contains(msg), "{name}: {text}");
     }
+}
+
+/// The error text with this file's `file:line` replaced by `<site>`, after
+/// checking it is exactly that line.
+fn located(e: &TraceError, line: u32) -> String {
+    let site = format!("{}:{line}", file!());
+    let s = e.to_string();
+    assert!(s.contains(&site), "expected {site} in:\n{s}");
+    s.replace(&site, "<site>")
+}
+
+fn debian() -> Host<()> {
+    let fx = fixture("debian12");
+    Host::new("h", fx.os.clone(), fx.vars.clone())
+}
+
+#[role]
+async fn inner(h: &Host<()>) -> Result<(), TraceError> {
+    INNER_PKG_LINE.store(line!() + 1, Relaxed);
+    h.pkg(["git", ""]);
+    Ok(())
+}
+static INNER_PKG_LINE: AtomicU32 = AtomicU32::new(0);
+
+#[role]
+async fn outer(h: &Host<()>) -> Result<(), TraceError> {
+    inner(h).await
+}
+
+#[test]
+fn a_hard_error_prints_role_chain_and_site_and_no_permit() {
+    let h = debian();
+    let _ = block_on(outer(&h));
+    let e = h.snapshot().errors;
+    assert_eq!(e.len(), 1, "{e:?}");
+    assert_eq!(e[0].roles, ["outer", "inner"]);
+    let t = located(&e[0], INNER_PKG_LINE.load(Relaxed));
+    assert!(!t.contains("to permit"), "{t}");
+    insta::assert_snapshot!(t, @r#"
+    trace error: invalid package name ""
+      in role outer > inner, <site>
+    "#);
+}
+
+#[test]
+fn the_site_is_the_callers_line_through_every_layer() {
+    let h = debian();
+    // A host builder through pkg -> pkg_op -> pkg_spec_op.
+    let l1 = line!() + 1;
+    h.pkg([""]);
+    // A handle builder after a line break in the chain.
+    let l2 = line!() + 4;
+    h.file("/etc/sudoers.d/tp")
+        .content("a")
+        .mode(0o440)
+        .validate("visudo -c");
+    // A handle builder through a private helper (want).
+    let l3 = line!() + 1;
+    h.pkg(["git"]).pin("1");
+    // A source method on a user scope (pkg_spec_op directly).
+    let l4 = line!() + 1;
+    h.as_user("bob").mise(["node"]);
+    // Recorded on the handle by the host builder (svc is root only).
+    let l5 = line!() + 1;
+    h.as_user("bob").svc("x").enabled();
+    // A repo builder through its private `fail`.
+    let l6 = line!() + 1;
+    h.repo("bad name");
+    // Derived once the op is complete (svc wants nothing): the op's site.
+    let l7 = line!() + 1;
+    h.svc("y");
+    let e = h.snapshot().errors;
+    let sites: Vec<String> = e
+        .iter()
+        .map(|e| e.site.map(|s| s.to_string()).unwrap_or_default())
+        .collect();
+    let want: Vec<String> = [l1, l2, l3, l4, l5, l6, l7]
+        .iter()
+        .map(|l| format!("{}:{l}", file!()))
+        .collect();
+    assert_eq!(sites, want, "{e:?}");
+    assert!(e.iter().all(|e| e.roles.is_empty()));
+    assert_eq!(
+        located(&e[0], l1),
+        "trace error: invalid package name \"\"\n  at <site>"
+    );
+}
+
+#[role]
+async fn returns_err(h: &Host<()>) -> Result<(), TraceError> {
+    let _ = h;
+    RETURNS_ERR_LINE.store(line!() + 1, Relaxed);
+    Err(TraceError::new("boom"))
+}
+static RETURNS_ERR_LINE: AtomicU32 = AtomicU32::new(0);
+
+#[test]
+fn a_returned_error_carries_its_construction_site() {
+    let h = debian();
+    let e = block_on(returns_err(&h)).unwrap_err();
+    assert_eq!(e.message, "boom");
+    assert_eq!(
+        located(&e, RETURNS_ERR_LINE.load(Relaxed)),
+        "trace error: boom\n  at <site>"
+    );
 }

@@ -268,6 +268,7 @@ fn line_ok(l: &str) -> bool {
 }
 
 impl RepoHandle {
+    #[track_caller]
     fn fail(&self, msg: String) -> &Self {
         let name = self.spec_name();
         self.0
@@ -298,6 +299,7 @@ impl RepoHandle {
 
     /// An apt repository: the deb822 source and its key. Debian family
     /// only.
+    #[track_caller]
     pub fn apt(&self, r: AptRepo) -> &Self {
         if self.1 != Family::Debian {
             return self.fail(format!(
@@ -322,6 +324,7 @@ impl RepoHandle {
 
     /// A vendor `.repo` file fetched to `/etc/yum.repos.d/<n>.repo` when
     /// absent. Red Hat family only.
+    #[track_caller]
     pub fn dnf_url(&self, url: &str) -> &Self {
         if self.1 != Family::RedHat {
             return self.fail(format!(
@@ -336,6 +339,7 @@ impl RepoHandle {
     }
 
     /// A `.repo` file written from data. Red Hat family only.
+    #[track_caller]
     pub fn dnf(&self, r: DnfRepo) -> &Self {
         if self.1 != Family::RedHat {
             return self.fail(format!(
@@ -352,6 +356,7 @@ impl RepoHandle {
 
 impl<V> Host<V> {
     /// Ensure the package repository `name` is configured. Root only.
+    #[track_caller]
     pub fn repo(&self, name: &str) -> RepoHandle {
         let h = self.op(OpSpec::Repo(RepoSpec::new(name)));
         let handle = RepoHandle(h, self.os.family.clone());

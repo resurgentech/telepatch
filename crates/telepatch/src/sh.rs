@@ -65,6 +65,7 @@ impl ShellSpec {
 }
 
 /// Used by the `sh!` expansion: append a shell op to `h`'s trace.
+#[track_caller]
 pub fn shell<V>(h: &Host<V>, spec: ShellSpec) -> OpHandle {
     h.op(OpSpec::Shell(spec))
 }

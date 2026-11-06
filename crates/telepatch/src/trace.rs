@@ -202,9 +202,43 @@ pub struct OpNode {
     pub post: BTreeMap<Key, Value>,
     /// A failure of this op does not abort the run (honoured by the executor).
     pub allow_fail: bool,
+    /// Where the op was called (`h.file(..)` in the role), for its trace
+    /// errors. `None` for nodes the engine makes itself.
+    pub site: Option<Site>,
+    /// Policies this op is permitted to break, with their reasons.
+    pub allowed: Vec<crate::policy::Allowance>,
 }
 
+/// A source location: the caller of an op builder (`#[track_caller]`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Site {
+    pub file: &'static str,
+    pub line: u32,
+}
+
+impl Site {
+    /// The caller of the `#[track_caller]` chain this is called in.
+    #[track_caller]
+    pub fn caller() -> Site {
+        let l = std::panic::Location::caller();
+        Site {
+            file: l.file(),
+            line: l.line(),
+        }
+    }
+}
+
+impl fmt::Display for Site {
+    /// `file:line`.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}:{}", self.file, self.line)
+    }
+}
+
+/// A trace node. `Op` is far the largest; nodes live in one `Vec` per
+/// host and are not moved around, so it is not boxed.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(clippy::large_enum_variant)]
 pub enum Node {
     Op(OpNode),
     FactRead {
@@ -227,10 +261,49 @@ pub struct Trace {
     pub errors: Vec<crate::host::TraceError>,
 }
 
+fn role_stack(nodes: &[Node]) -> Vec<String> {
+    let mut stack = Vec::new();
+    for n in nodes {
+        match n {
+            Node::RoleBegin(r) => stack.push(r.clone()),
+            Node::RoleEnd(_) => {
+                stack.pop();
+            }
+            _ => {}
+        }
+    }
+    stack
+}
+
 impl Trace {
     pub fn push(&mut self, node: Node) -> NodeId {
         self.nodes.push(node);
         NodeId(self.nodes.len() - 1)
+    }
+
+    /// The roles open at node `id` (outermost first), from the
+    /// `RoleBegin`/`RoleEnd` marks before it.
+    pub fn roles_at(&self, id: NodeId) -> Vec<String> {
+        role_stack(&self.nodes[..id.0.min(self.nodes.len())])
+    }
+
+    /// The roles open now: those a node pushed next would be traced in.
+    pub fn open_roles(&self) -> Vec<String> {
+        role_stack(&self.nodes)
+    }
+
+    /// `e` placed at op `id`: its site (unless it has one) and the roles
+    /// the op was traced in (unless it has them).
+    pub fn locate(&self, id: NodeId, mut e: crate::host::TraceError) -> crate::host::TraceError {
+        if e.site.is_none()
+            && let Some(Node::Op(op)) = self.nodes.get(id.0)
+        {
+            e.site = op.site;
+        }
+        if e.roles.is_empty() {
+            e.roles = self.roles_at(id);
+        }
+        e
     }
 
     /// FactReads that needed a round trip.

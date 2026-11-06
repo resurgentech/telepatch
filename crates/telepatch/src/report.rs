@@ -68,6 +68,8 @@ pub struct OpRecord {
     pub outcome: Outcome,
     pub rc: i32,
     pub changed: bool,
+    /// The policies the op was permitted to break, with their reasons.
+    pub allowed: Vec<crate::policy::Allowance>,
 }
 
 /// Packages a window's pkg ops will install, from the prepare queries.
@@ -250,8 +252,9 @@ impl Report {
         out
     }
 
-    /// The table first, then, per host that did not succeed, what went
-    /// wrong: the failed op's last output lines, skipped roles, the
+    /// The table first, then per host what prepare found and every
+    /// allowance (`host: #id desc: allowed <policy>: <reason>`), then, per
+    /// host that did not succeed, what went wrong: the failed op's last output lines, skipped roles, the
     /// blocking reason.
     pub fn render(&self) -> String {
         let mut out = self.table();
@@ -271,6 +274,11 @@ impl Report {
             }
             for c in &h.will_create {
                 let _ = writeln!(out, "\n{}: {}", h.name, c.line());
+            }
+            for o in &h.ops {
+                for a in &o.allowed {
+                    let _ = writeln!(out, "\n{}: #{} {}: {a}", h.name, o.id, o.desc);
+                }
             }
         }
         for h in &self.hosts {
@@ -320,6 +328,32 @@ mod tests {
             installed: installed.map(str::to_string),
             wanted: wanted.into(),
         }
+    }
+
+    #[test]
+    fn render_lists_every_allowance() {
+        use crate::policy::{Allowance, Policy};
+        let mut h = HostReport::new("ws1");
+        h.status = HostStatus::Changed;
+        h.ops.push(OpRecord {
+            id: 3,
+            members: vec![(3, "vendor_agent".into())],
+            desc: "file /etc/systemd/system/legacy.service".into(),
+            outcome: Outcome::Changed,
+            rc: 0,
+            changed: true,
+            allowed: vec![Allowance {
+                policy: Policy::UnitViaFile,
+                reason: "vendor ships this unit".into(),
+            }],
+        });
+        let r = Report { hosts: vec![h] }.render();
+        assert!(
+            r.contains(
+                "\nws1: #3 file /etc/systemd/system/legacy.service: allowed unit-via-file: vendor ships this unit\n"
+            ),
+            "{r}"
+        );
     }
 
     #[test]

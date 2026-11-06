@@ -239,6 +239,8 @@ mod tests {
                 guard: None,
                 post: BTreeMap::new(),
                 allow_fail: false,
+                site: None,
+                allowed: Vec::new(),
                 spec,
             },
             members: vec![Member {
