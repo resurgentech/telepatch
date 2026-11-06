@@ -983,6 +983,8 @@ fn a_host_that_halts_before_the_op_leaves_nothing_staged() {
 struct VC {
     v: V,
     curl: bool,
+    /// `h.pkg(["wget"])` in place of curl's op.
+    wget: bool,
 }
 
 fn pb_curl(h: Host<VC>) -> PlaybookFuture {
@@ -990,6 +992,9 @@ fn pb_curl(h: Host<VC>) -> PlaybookFuture {
         let vc = h.vars.clone();
         if vc.curl {
             h.pkg(["curl"]);
+        }
+        if vc.wget {
+            h.pkg(["wget"]);
         }
         let v = &vc.v;
         let o = h.pkg([v.name.as_str()]).binary_release(v.br.clone());
@@ -1013,7 +1018,7 @@ impl Env {
     /// `<d>/pmlog`). Returns the PATH: `<d>/pm:<d>/inst:<d>/bin:<farm>`.
     fn pm_path(&self) -> String {
         std::fs::rename(self.p("bin/curl"), self.p("curl.pkg")).unwrap();
-        std::fs::remove_file(self.p("bin/wget")).unwrap();
+        std::fs::rename(self.p("bin/wget"), self.p("wget.pkg")).unwrap();
         let pm = self.p("pm");
         let inst = self.p("inst");
         let farm = self.p("farm");
@@ -1025,7 +1030,7 @@ impl Env {
             r#"#!/bin/bash
 D={dd}
 me=${{0##*/}}
-inst() {{ for n; do if [ "$n" = curl ]; then cp "$D/curl.pkg" "$D/inst/curl"; echo "$me install curl" >> "$D/pmlog"; fi; done; }}
+inst() {{ for n; do case "$n" in curl|wget) cp "$D/$n.pkg" "$D/inst/$n"; echo "$me install $n" >> "$D/pmlog";; esac; done; }}
 has() {{ [ -e "$D/inst/$1" ]; }}
 last=${{@: -1}}
 case "$me" in
@@ -1130,6 +1135,7 @@ fn a_binary_release_after_the_pkg_op_that_installs_curl_runs_after_it() {
     let v = VC {
         v: e.go_served(Want::Latest),
         curl: true,
+        wget: false,
     };
     let (r, out, evs) = e.go_c(&v, &path);
     assert_eq!(status(&r), &HostStatus::Changed, "{out}\n{}", r.render());
@@ -1161,6 +1167,43 @@ fn a_binary_release_after_the_pkg_op_that_installs_curl_runs_after_it() {
     e.assert_clean();
 }
 
+/// The same through wget: the version, the checksum list and the release
+/// are all read with the wget the pkg op installs.
+#[test]
+fn a_binary_release_after_the_pkg_op_that_installs_wget_runs_after_it_through_wget() {
+    let e = Env::new();
+    let path = e.pm_path();
+    let v = VC {
+        v: e.go_served(Want::Latest),
+        curl: false,
+        wget: true,
+    };
+    let (r, out, evs) = e.go_c(&v, &path);
+    assert_eq!(status(&r), &HostStatus::Changed, "{out}\n{}", r.render());
+    let pm = e.pmlog();
+    assert!(
+        pm.lines().count() == 1 && pm.ends_with(" install wget\n"),
+        "wget installed once: {pm}"
+    );
+    assert_eq!(
+        e.log(),
+        "wget http://fake/VERSION\nwget http://fake/dl.json\nwget http://fake/go1.27.2.linux-amd64.tar.gz\n"
+    );
+    assert_eq!(
+        run_bin(&e.p("out/go/bin/go"), "version"),
+        "go version go1.27.2 linux/amd64"
+    );
+    let split = out
+        .find("== h1 [prepare] window 1: neither curl nor wget is on the host; split after #0 (pkg wget): #1 runs in window 2 ==")
+        .unwrap_or_else(|| panic!("no split line:\n{out}"));
+    let prep = out
+        .find("== h1 [prepare] pkg[binary_release] go: not installed, 1.27.2 wanted; fetched, sha256 ok ==")
+        .unwrap_or_else(|| panic!("no prepare line:\n{out}"));
+    assert!(split < prep, "{out}");
+    assert_eq!(windows(&evs), [(1, vec![0]), (2, vec![1])], "{evs:#?}");
+    e.assert_clean();
+}
+
 #[test]
 fn a_binary_release_with_curl_on_the_host_is_not_split() {
     let e = Env::new();
@@ -1169,6 +1212,7 @@ fn a_binary_release_with_curl_on_the_host_is_not_split() {
     let v = VC {
         v: e.go_served(Want::Latest),
         curl: true,
+        wget: false,
     };
     let (r, out, evs) = e.go_c(&v, &path);
     assert_eq!(status(&r), &HostStatus::Changed, "{out}\n{}", r.render());
@@ -1186,6 +1230,7 @@ fn a_binary_release_with_no_downloader_and_none_installed_blocks_naming_them() {
         let v = VC {
             v: e.go_served(want.clone()),
             curl: false,
+            wget: false,
         };
         let (r, out, _) = e.go_c(&v, &path);
         let HostStatus::Blocked(why) = status(&r) else {

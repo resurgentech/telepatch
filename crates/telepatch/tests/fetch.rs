@@ -1058,6 +1058,8 @@ struct C {
     sum: String,
     target: String,
     curl: bool,
+    /// `h.pkg(["wget"])` in place of curl's op.
+    wget: bool,
     early: Option<String>,
 }
 
@@ -1070,6 +1072,9 @@ fn pb_curl(h: Host<C>) -> PlaybookFuture {
         }
         if v.curl {
             h.pkg(["curl"]);
+        }
+        if v.wget {
+            h.pkg(["wget"]);
         }
         h.file(&v.target).from(&f);
         Ok(())
@@ -1084,7 +1089,7 @@ impl Env {
     /// on the PATH. Each install is logged to `<d>/pmlog`. Returns the
     /// PATH: `<d>/pm:<d>/inst:<farm without curl, wget>`.
     fn pm_path(&self) -> String {
-        self.fakes(&["curl"]);
+        self.fakes(&["curl", "wget"]);
         let pm = self.p("pm");
         let inst = self.p("inst");
         std::fs::create_dir_all(&pm).unwrap();
@@ -1094,7 +1099,7 @@ impl Env {
             r#"#!/bin/bash
 D={dd}
 me=${{0##*/}}
-inst() {{ for n; do if [ "$n" = curl ]; then cp "$D/bin/curl" "$D/inst/curl"; echo "$me install curl" >> "$D/pmlog"; fi; done; }}
+inst() {{ for n; do case "$n" in curl|wget) cp "$D/bin/$n" "$D/inst/$n"; echo "$me install $n" >> "$D/pmlog";; esac; done; }}
 has() {{ [ -e "$D/inst/$1" ]; }}
 last=${{@: -1}}
 case "$me" in
@@ -1166,6 +1171,7 @@ esac
             sum: sha256(FILE.as_bytes()),
             target: self.p("out/a.txt").display().to_string(),
             curl,
+            wget: false,
             early: None,
         }
     }
@@ -1242,6 +1248,40 @@ fn a_fetch_after_the_pkg_op_that_installs_curl_runs_after_it() {
         "{}",
         r.render()
     );
+    e.assert_clean();
+}
+
+#[test]
+fn a_fetch_after_the_pkg_op_that_installs_wget_runs_after_it_through_wget() {
+    let e = Env::new();
+    let path = e.pm_path();
+    let mut v = e.c(false);
+    v.wget = true;
+    let (r, out, evs) = e.go_c(&v, &path);
+    assert_eq!(status(&r), &HostStatus::Changed, "{out}\n{}", r.render());
+    let pm = e.pmlog();
+    assert!(
+        pm.lines().count() == 1 && pm.ends_with(" install wget\n"),
+        "wget installed once: {pm}"
+    );
+    assert_eq!(
+        e.log(),
+        "wget http://fake/a.txt\n",
+        "the installed wget downloads"
+    );
+    assert_eq!(std::fs::read_to_string(&v.target).unwrap(), FILE);
+    let line = "== h1 [prepare] window 1: neither curl nor wget is on the host; split after #0 (pkg wget): #1 runs in window 2 ==";
+    let split = out
+        .find(line)
+        .unwrap_or_else(|| panic!("no split line:\n{out}"));
+    let fetch = out
+        .find("== h1 [prepare] fetch http://fake/a.txt: fetched, sha256 ok ==")
+        .unwrap_or_else(|| panic!("no fetch line:\n{out}"));
+    assert!(split < fetch, "{out}");
+    assert_eq!(windows(&evs), [(1, vec![0]), (2, vec![1])], "{evs:#?}");
+    let s: Vec<&serde_json::Value> = evs.iter().filter(|e| e["ev"] == "window_split").collect();
+    assert_eq!(s.len(), 1, "{evs:#?}");
+    assert_eq!(s[0]["tool"], "wget");
     e.assert_clean();
 }
 
