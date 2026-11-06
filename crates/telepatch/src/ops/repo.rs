@@ -249,6 +249,8 @@ impl Deref for RepoHandle {
     }
 }
 
+crate::host::op_builders!(RepoHandle);
+
 fn name_ok(n: &str) -> bool {
     let mut c = n.chars();
     c.next().is_some_and(|f| f.is_ascii_alphanumeric())
@@ -269,11 +271,11 @@ fn line_ok(l: &str) -> bool {
 
 impl RepoHandle {
     #[track_caller]
-    fn fail(&self, msg: String) -> &Self {
+    fn fail(&self, msg: String) -> Self {
         let name = self.spec_name();
         self.0
             .record_error(TraceError::new(format!("repo({name}): {msg}")));
-        self
+        self.clone()
     }
 
     fn spec_name(&self) -> String {
@@ -286,7 +288,7 @@ impl RepoHandle {
         name
     }
 
-    fn set(&self, k: RepoKind) -> &Self {
+    fn set(&self, k: RepoKind) -> Self {
         self.0.edit(|op| {
             if let OpSpec::Repo(r) = &mut op.spec {
                 r.kind = k;
@@ -294,13 +296,13 @@ impl RepoHandle {
             op.writes = op.spec.default_writes();
             op.post = op.spec.default_post();
         });
-        self
+        self.clone()
     }
 
     /// An apt repository: the deb822 source and its key. Debian family
     /// only.
     #[track_caller]
-    pub fn apt(&self, r: AptRepo) -> &Self {
+    pub fn apt(&self, r: AptRepo) -> Self {
         if self.1 != Family::Debian {
             return self.fail(format!(
                 ".apt() needs a Debian-family host (this host is {:?}); pick per h.os",
@@ -325,7 +327,7 @@ impl RepoHandle {
     /// A vendor `.repo` file fetched to `/etc/yum.repos.d/<n>.repo` when
     /// absent. Red Hat family only.
     #[track_caller]
-    pub fn dnf_url(&self, url: &str) -> &Self {
+    pub fn dnf_url(&self, url: &str) -> Self {
         if self.1 != Family::RedHat {
             return self.fail(format!(
                 ".dnf_url() needs a Red Hat-family host (this host is {:?}); pick per h.os",
@@ -340,7 +342,7 @@ impl RepoHandle {
 
     /// A `.repo` file written from data. Red Hat family only.
     #[track_caller]
-    pub fn dnf(&self, r: DnfRepo) -> &Self {
+    pub fn dnf(&self, r: DnfRepo) -> Self {
         if self.1 != Family::RedHat {
             return self.fail(format!(
                 ".dnf() needs a Red Hat-family host (this host is {:?}); pick per h.os",

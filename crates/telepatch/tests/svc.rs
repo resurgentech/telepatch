@@ -163,6 +163,14 @@ fn log(d: &Path) -> String {
     std::fs::read_to_string(d.join("log")).unwrap_or_default()
 }
 
+/// `res` from a start that ran (the trailer's `started`).
+fn started(res: SvcResult) -> SvcResult {
+    SvcResult {
+        started: true,
+        ..res
+    }
+}
+
 fn r(rc: i32, changed: bool, skipped: bool) -> SvcResult {
     SvcResult {
         rc,
@@ -247,7 +255,7 @@ fn started_inactive_starts_then_active_changes_nothing() {
     let h = host();
     let id = h.svc("docker").started().id();
     let (_, res) = run_script(&wrapped(&h, id), d.path(), &bin, true);
-    assert_eq!(res, r(0, true, false));
+    assert_eq!(res, started(r(0, true, false)));
     assert_eq!(
         log(d.path()),
         "systemctl show -p UnitFileState,ActiveState -- docker\nsystemctl is-active --quiet -- docker\nsystemctl show -p NeedDaemonReload --value -- docker\nsystemctl start -- docker\n"
@@ -264,11 +272,23 @@ fn enabled_and_started_do_both_then_rerun_is_quiet() {
     let h = host();
     let id = h.svc("docker").enabled().started().id();
     let (_, res) = run_script(&wrapped(&h, id), d.path(), &bin, true);
-    assert_eq!(res, r(0, true, false));
+    assert_eq!(res, started(r(0, true, false)));
     assert!(log(d.path()).contains("enable -- docker"));
     assert!(log(d.path()).contains("start -- docker"));
     let (_, res) = run_script(&wrapped(&h, id), d.path(), &bin, true);
     assert_eq!(res, r(0, false, false));
+}
+
+#[test]
+fn enabling_a_running_unit_is_changed_but_not_started() {
+    let d = tempfile::tempdir().unwrap();
+    let bin = stubs(d.path());
+    set(d.path(), "active", "");
+    let h = host();
+    let id = h.svc("docker").enabled().started().id();
+    let (_, res) = run_script(&wrapped(&h, id), d.path(), &bin, true);
+    assert_eq!(res, r(0, true, false), "enabled, already active");
+    assert!(!log(d.path()).contains("start -- docker"));
 }
 
 #[test]
@@ -279,7 +299,7 @@ fn daemon_reload_runs_before_start_when_systemd_says_so() {
     let h = host();
     let id = h.svc("docker").started().id();
     let (_, res) = run_script(&wrapped(&h, id), d.path(), &bin, true);
-    assert_eq!(res, r(0, true, false));
+    assert_eq!(res, started(r(0, true, false)));
     let l = log(d.path());
     let reload = l.find("daemon-reload").expect(&l);
     let start = l.find("start -- docker").expect(&l);
@@ -1307,6 +1327,86 @@ fn executor_restart_of_a_unit_the_run_starts_is_skipped() {
     let (r2, out2) = go(&pb, d.path(), &bin, true);
     assert_eq!(r2.exit_code(), 0, "{}\n{out2}", r2.render());
     assert_eq!(restarts(d.path()), 1, "{}", log(d.path()));
+}
+
+/// A file changes; `enabled().started()` then `restart_on(&file)`.
+fn pb_enable_start_then_restart() -> Playbook<PathBuf> {
+    fn run_(h: Host<PathBuf>) -> PlaybookFuture {
+        Box::pin(async move {
+            let daemon = h.file(&conf(&h, "daemon.json")).content("{}\n");
+            h.svc("docker").enabled().started();
+            h.svc("docker").restart_on(&daemon);
+            Ok(())
+        })
+    }
+    Playbook {
+        name: "svc",
+        run: run_,
+    }
+}
+
+fn changed_column(r: &Report) -> String {
+    let table = r.render();
+    let row = table.lines().find(|l| l.starts_with("h1")).expect(&table);
+    row.split_whitespace().nth(3).unwrap().to_string()
+}
+
+#[test]
+fn executor_a_start_that_only_enabled_a_running_unit_does_not_drop_the_restart() {
+    // active and disabled: the start op enables (changed) but starts nothing
+    let d = tempfile::tempdir().unwrap();
+    let bin = stubs(d.path());
+    set(d.path(), "active", "");
+    let pb = pb_enable_start_then_restart();
+    let (r1, out1) = go(&pb, d.path(), &bin, true);
+    assert_eq!(r1.exit_code(), 0, "{}\n{out1}", r1.render());
+    let l = log(d.path());
+    assert!(l.contains("systemctl enable -- docker\n"), "{l}");
+    assert!(!l.contains("systemctl start "), "{l}");
+    assert_eq!(restarts(d.path()), 1, "the config changed: {l}\n{out1}");
+    let restart = r1.hosts[0]
+        .ops
+        .iter()
+        .find(|o| o.desc.contains("restart"))
+        .expect("the restart op");
+    assert_eq!(restart.outcome, telepatch::report::Outcome::Changed);
+    let (r2, out2) = go(&pb, d.path(), &bin, true);
+    assert_eq!(
+        r2.hosts[0].status,
+        HostStatus::Ok,
+        "{}\n{out2}",
+        r2.render()
+    );
+    assert_eq!(changed_column(&r2), "0", "{}", r2.render());
+    assert_eq!(restarts(d.path()), 1, "{}", log(d.path()));
+}
+
+#[test]
+fn executor_a_start_that_started_the_unit_drops_the_restart() {
+    // inactive before: the start runs the new config; no restart
+    let d = tempfile::tempdir().unwrap();
+    let bin = stubs(d.path());
+    let pb = pb_enable_start_then_restart();
+    let (r1, out1) = go(&pb, d.path(), &bin, true);
+    assert_eq!(r1.exit_code(), 0, "{}\n{out1}", r1.render());
+    let l = log(d.path());
+    assert!(l.contains("systemctl start -- docker\n"), "{l}");
+    assert_eq!(restarts(d.path()), 0, "{l}");
+    let restart = r1.hosts[0]
+        .ops
+        .iter()
+        .find(|o| o.desc.contains("restart"))
+        .expect("the restart op");
+    assert_eq!(restart.outcome, telepatch::report::Outcome::Skipped);
+    let (r2, out2) = go(&pb, d.path(), &bin, true);
+    assert_eq!(
+        r2.hosts[0].status,
+        HostStatus::Ok,
+        "{}\n{out2}",
+        r2.render()
+    );
+    assert_eq!(changed_column(&r2), "0", "{}", r2.render());
+    assert_eq!(restarts(d.path()), 0, "{}", log(d.path()));
 }
 
 #[test]

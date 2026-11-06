@@ -432,6 +432,8 @@ impl Deref for PkgHandle {
     }
 }
 
+crate::host::op_builders!(PkgHandle);
+
 impl PkgHandle {
     fn spec(&self, f: impl FnOnce(&mut PkgSpec)) {
         self.0.edit(|op| {
@@ -445,7 +447,7 @@ impl PkgHandle {
     /// (`apt-get build-dep`). Which packages that installs is unknown, so
     /// the op writes `*` and makes no `Installed` postcondition.
     #[track_caller]
-    pub fn build_dep(&self) -> &Self {
+    pub fn build_dep(&self) -> Self {
         let mut apt = true;
         self.spec(|s| {
             if s.source == Source::Distro(Manager::Apt) {
@@ -458,41 +460,41 @@ impl PkgHandle {
             self.0.record_error(TraceError::new(
                 "build_dep() is only available on apt hosts",
             ));
-            return self;
+            return self.clone();
         }
         self.0.edit(|op| {
             op.writes = BTreeSet::from([Key::Any]);
             op.post.clear();
         });
-        self
+        self.clone()
     }
 
     /// Run `apt-get update` before this op (normally set by the apt cache
     /// pass, [`apply_apt_update`]).
     #[track_caller]
-    pub fn update_cache(&self, on: bool) -> &Self {
+    pub fn update_cache(&self, on: bool) -> Self {
         self.spec(|s| s.update_cache = on);
-        self
+        self.clone()
     }
 
     /// Want the newest release (pip: `install -U`). Not supported on
     /// distro packages.
     #[track_caller]
-    pub fn latest(&self) -> &Self {
+    pub fn latest(&self) -> Self {
         self.want(Wanted::Latest)
     }
 
     /// Want exactly version `v` (pip: `name==v`). Not supported on distro
     /// packages.
     #[track_caller]
-    pub fn pin(&self, v: impl Into<String>) -> &Self {
+    pub fn pin(&self, v: impl Into<String>) -> Self {
         self.want(Wanted::Pinned(v.into()))
     }
 
     /// Edit a rustup op's options, then add the postconditions of what was
     /// added. On any other source: a trace error naming `method`.
     #[track_caller]
-    fn rustup_opt(&self, method: &str, f: impl FnOnce(&mut RustupSpec)) -> &Self {
+    fn rustup_opt(&self, method: &str, f: impl FnOnce(&mut RustupSpec)) -> Self {
         let mut rustup = true;
         self.spec(|s| match &mut s.source {
             Source::Rustup(r) => f(r),
@@ -502,7 +504,7 @@ impl PkgHandle {
             self.0.record_error(TraceError::new(format!(
                 "{method}() is only available on rustup ops"
             )));
-            return self;
+            return self.clone();
         }
         self.0.edit(|op| {
             let OpSpec::Pkg(p) = &op.spec else { return };
@@ -510,12 +512,12 @@ impl PkgHandle {
                 op.post.entry(k).or_insert(v);
             }
         });
-        self
+        self.clone()
     }
 
     /// Rustup: also have these targets installed (`rustup target add`).
     #[track_caller]
-    pub fn targets<I, S>(&self, targets: I) -> &Self
+    pub fn targets<I, S>(&self, targets: I) -> Self
     where
         I: IntoIterator<Item = S>,
         S: AsRef<str>,
@@ -530,7 +532,7 @@ impl PkgHandle {
     /// Rustup: also have these components installed (`rustup component
     /// add`).
     #[track_caller]
-    pub fn components<I, S>(&self, components: I) -> &Self
+    pub fn components<I, S>(&self, components: I) -> Self
     where
         I: IntoIterator<Item = S>,
         S: AsRef<str>,
@@ -544,7 +546,7 @@ impl PkgHandle {
 
     /// Rustup: the install profile (default `default`).
     #[track_caller]
-    pub fn profile(&self, profile: impl Into<String>) -> &Self {
+    pub fn profile(&self, profile: impl Into<String>) -> Self {
         let p = profile.into();
         if let Err(e) = check_names(std::slice::from_ref(&p)) {
             self.0.record_error(e);
@@ -555,7 +557,7 @@ impl PkgHandle {
     /// Rustup: make this toolchain the default (`rustup default`), when it
     /// is not already.
     #[track_caller]
-    pub fn set_default(&self) -> &Self {
+    pub fn set_default(&self) -> Self {
         self.rustup_opt("set_default", |r| r.set_default = true)
     }
 
@@ -563,13 +565,13 @@ impl PkgHandle {
     /// `--default-toolchain <tc> --profile <p>` is appended. Default:
     /// [`DEFAULT_INSTALLER`].
     #[track_caller]
-    pub fn installer(&self, cmd: impl Into<String>) -> &Self {
+    pub fn installer(&self, cmd: impl Into<String>) -> Self {
         let c = cmd.into();
         self.rustup_opt("installer", |r| r.installer = Some(c))
     }
 
     #[track_caller]
-    fn want(&self, w: Wanted) -> &Self {
+    fn want(&self, w: Wanted) -> Self {
         let mut distro = false;
         let mut script_err = None;
         let mut cargo_pin_many = false;
@@ -617,7 +619,7 @@ impl PkgHandle {
         if let Some(e) = script_err {
             self.0.record_error(TraceError::new(e));
         }
-        self
+        self.clone()
     }
 }
 

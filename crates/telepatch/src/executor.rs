@@ -66,12 +66,18 @@
 //! # Restart and reload
 //!
 //! A `svc` `.restart()` / `.reload()` of a unit that an op earlier in the
-//! run wants `.started()` (any window, merged or not) is sent with that
-//! op's `changed` and-not-ed into its guard: `g & !changed(#start)`. The
-//! start already runs the new configuration. The start is then a guard
-//! source like any other (a variable in the same run, a constant after).
-//! Prepare prints one line per action, from its own guard with the ops
-//! named: `svc docker.service: will restart if pkg
+//! run wants `.started()` (any window, merged or not) is sent with "that
+//! op started the unit" and-not-ed into its guard; the report prints it as
+//! `g & !started(#start)`. A start op started the unit when the unit was
+//! not active and its `systemctl start` succeeded (the trailer's
+//! `started`, [`crate::trailer::SvcResult`]); the start then already runs
+//! the new configuration. A start op that only enabled or unmasked a unit
+//! that was running is `changed` but did not start it, so the restart
+//! still runs. The start is a guard source like any other: its trailer
+//! writes `started` as a second line, the parent shell sets
+//! `__tp_st_<n>` beside `__tp_c_<n>` (a variable in the same run), and a
+//! reported start is a constant. Prepare prints one line per action, from
+//! its own guard with the ops named: `svc docker.service: will restart if pkg
 //! nvidia-container-toolkit changes`; `will restart, every run` for an
 //! allowed unguarded one; `will restart` when every source is reported and
 //! the guard holds; nothing when it is already false.
@@ -80,16 +86,30 @@
 //!
 //! A `unit` op (`h.unit`) is always sent as a guard source, so its
 //! `changed` reaches the parent shell; when it changed, the root shell's
-//! window flag `__tp_dr` is set to `1` (beside `__tp_halt`). Once a host's
-//! run has sent a unit op, every later `svc` op is rendered with
+//! window flag `__tp_dr` is set to `1` (beside `__tp_halt`). Every `svc` op
+//! after a unit op in the same window is rendered with
 //! [`crate::ops::svc::SvcSpec::render_exec_reload`]: with the flag set and
 //! systemd running it runs `systemctl daemon-reload` first, and after the
 //! op ran (not when its guard skipped it) the parent shell clears the flag.
 //! So any number of changed units cost one reload, before the next `svc`
-//! op, in this window or a later one (the shell, and its flag, persist);
-//! no unit changed, or no running systemd, no reload. Hosts whose run
-//! writes no unit get the `svc` scripts unchanged; there the per-op
-//! `NeedDaemonReload` check is all there is.
+//! op in the window (unit, unit, svc: one reload, before the svc op).
+//!
+//! The flag never outlives its window. When a unit changed and no `svc` op
+//! ran after it in the window (none follows, or its guard skipped it), the
+//! executor ends the window with the flush: one more op on the root shell,
+//! in the halt gate, that runs `systemctl daemon-reload` when the flag is
+//! set and systemd runs, then clears the flag. It is streamed as `== host
+//! [role] systemd daemon-reload, end of window N ==`, kept in the report
+//! ([`crate::report::DaemonReload`], a line `window N: systemd
+//! daemon-reload (..)`) and announced by prepare (`systemd daemon-reload:
+//! at the end of the window, after unit x.service`, when prepare finds such
+//! a unit will change on a booted host). A failed flush fails the host like
+//! a failed op: its rc, systemctl's message as the tail, the unit's role.
+//! A unit changed in one window with its `svc` op in a later one is
+//! reloaded by the first window's flush. No unit changed, or no running
+//! systemd, no reload. `svc` ops before any unit op in their window get the
+//! scripts unchanged; there the per-op `NeedDaemonReload` check is all
+//! there is.
 //!
 //! # Stream
 //!
@@ -329,16 +349,19 @@ pub struct HostExec {
     subjects: HashMap<NodeId, String>,
     /// The `svc` ops seen so far that want `.started()`: unit key, op id.
     starts: Vec<(String, NodeId)>,
-    /// A `unit` op has been rendered for this host: later `svc` ops carry
-    /// the daemon-reload of a changed unit ("Units and daemon-reload").
-    units: bool,
+    /// Per restart or reload (by op id): the earlier start ops of its unit.
+    /// It is dropped when one of them started the unit ("Restart and
+    /// reload").
+    suppress: HashMap<NodeId, Vec<NodeId>>,
 }
 
 /// What a guard can know about a reported op.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 struct Known {
     ok: bool,
     changed: bool,
+    /// A `svc` op that started its unit (the trailer's `started`).
+    started: bool,
 }
 
 /// Does a member of `w` change only when one of its own names was
@@ -384,11 +407,84 @@ fn guard_test(g: &Guard, known: &HashMap<NodeId, Known>, in_run: &BTreeSet<NodeI
     }
 }
 
-/// `__tp_c_<m>=<c>; __tp_ok_<m>=<ok>` for every member of `w`.
+/// The shell test "one of `starts` started its unit": a constant for a
+/// reported start, `__tp_st_<n>` for one earlier in this run, `false`
+/// otherwise.
+fn started_test(
+    starts: &[NodeId],
+    known: &HashMap<NodeId, Known>,
+    in_run: &BTreeSet<NodeId>,
+) -> String {
+    let atoms: Vec<String> = starts
+        .iter()
+        .map(|n| match known.get(n) {
+            Some(k) if k.started => "true".to_string(),
+            Some(_) => "false".to_string(),
+            None if in_run.contains(n) => format!("[ \"${{__tp_st_{}-0}}\" = 1 ]", n.0),
+            None => "false".to_string(),
+        })
+        .collect();
+    format!("{{ {}; }}", atoms.join(" || "))
+}
+
+/// The test `w` is sent with: its own guard, and-not "an earlier start
+/// started the unit" for a restart or reload with `starts`; `None` when
+/// it has neither.
+fn sent_test(
+    w: &WindowOp,
+    starts: &[NodeId],
+    known: &HashMap<NodeId, Known>,
+    in_run: &BTreeSet<NodeId>,
+) -> Option<String> {
+    let own = w.node.guard.as_ref().map(|g| guard_test(g, known, in_run));
+    if starts.is_empty() {
+        return own;
+    }
+    let st = started_test(starts, known, in_run);
+    Some(match own {
+        Some(g) => format!("{{ {g}; }} && ! {st}"),
+        None => format!("! {st}"),
+    })
+}
+
+/// `w`'s guard as the report prints it: its own, then `& !started(#n)`
+/// for each earlier start of its unit (`!(started(#a) | started(#b))`).
+fn when_text(w: &WindowOp, starts: &[NodeId]) -> Option<String> {
+    let st = match starts {
+        [] => None,
+        [n] => Some(format!("!started({n})")),
+        many => Some(format!(
+            "!({})",
+            many.iter()
+                .map(|n| format!("started({n})"))
+                .collect::<Vec<_>>()
+                .join(" | ")
+        )),
+    };
+    let own = w.node.guard.as_ref().map(|g| match g {
+        Guard::Or(..) if st.is_some() => format!("({g})"),
+        _ => g.to_string(),
+    });
+    match (own, st) {
+        (Some(g), Some(s)) => Some(format!("{g} & {s}")),
+        (g, s) => g.or(s),
+    }
+}
+
+/// `__tp_c_<m>=<c>; __tp_ok_<m>=<ok>` for every member of `w` (and
+/// `__tp_st_<m>=0` for a `svc` op).
 fn assign(w: &WindowOp, c: u8, ok: u8) -> String {
+    let svc = matches!(w.node.spec, OpSpec::Svc(_));
     w.members
         .iter()
-        .map(|m| format!("__tp_c_{0}={c}; __tp_ok_{0}={ok}\n", m.id.0))
+        .map(|m| {
+            let st = if svc {
+                format!("; __tp_st_{}=0", m.id.0)
+            } else {
+                String::new()
+            };
+            format!("__tp_c_{0}={c}; __tp_ok_{0}={ok}{st}\n", m.id.0)
+        })
         .collect()
 }
 
@@ -406,6 +502,13 @@ fn source_vars(w: &WindowOp) -> String {
     for m in &w.members {
         let id = m.id.0;
         let _ = std::fmt::Write::write_fmt(&mut o, format_args!("  __tp_ok_{id}=1\n"));
+        if matches!(w.node.spec, OpSpec::Svc(_)) {
+            // a svc op's second line is `started`
+            let _ = std::fmt::Write::write_fmt(
+                &mut o,
+                format_args!("  [ \"${{__tp_inst[0]-}}\" != true ] || __tp_st_{id}=1\n"),
+            );
+        }
         if !member_rule(w) {
             let _ = std::fmt::Write::write_fmt(
                 &mut o,
@@ -438,6 +541,40 @@ const UNIT_FLAG: &str = "if [ \"$__tp_rc\" -eq 0 ] && [ \"$__tp_x\" = true ]; th
 
 /// After a `svc` op that carries the daemon-reload: the flag is spent.
 const UNIT_FLAG_CLEAR: &str = "__tp_dr=0\n";
+
+/// "Booted": the test the svc scripts use for a running systemd, and a
+/// `systemctl` to run.
+const BOOTED: &str =
+    "[ -d \"${TP_SVC_RUNDIR:-/run/systemd/system}\" ] && command -v systemctl >/dev/null 2>&1";
+
+/// The flush at a window's end: with the flag still set and systemd
+/// running, one `systemctl daemon-reload` (rc and output are the op's);
+/// otherwise skipped.
+fn flush_body() -> String {
+    format!(
+        "if [ \"${{__tp_dr-0}}\" = 1 ] && {BOOTED}; then\n  systemctl daemon-reload\n  rc=$?\n  if [ \"$rc\" -eq 0 ]; then changed=1; fi\nelse\n  skipped=1\nfi\n"
+    )
+}
+
+/// What the stream, the failure and the event call the flush.
+fn flush_desc(window: usize) -> String {
+    format!("systemd daemon-reload, end of window {window}")
+}
+
+/// The window's `unit` ops after its last `svc` op (all of them when it
+/// has none): a change of one of these leaves the flag set at the end.
+fn units_after_last_svc(window: &Window) -> Vec<&WindowOp> {
+    let last_svc = window
+        .ops
+        .iter()
+        .rposition(|w| matches!(w.node.spec, OpSpec::Svc(_)));
+    window
+        .ops
+        .iter()
+        .skip(last_svc.map_or(0, |i| i + 1))
+        .filter(|w| matches!(w.node.spec, OpSpec::Unit(_)))
+        .collect()
+}
 
 /// `w`'s script as sent: inside the halt gate; inside its guard's test
 /// when it has one; as a guard source (`source`: a guard later in the run
@@ -564,13 +701,14 @@ fn decide(g: &Guard, known: &HashMap<NodeId, Known>) -> Option<bool> {
     }
 }
 
-/// The prepare detail of a `svc` restart or reload `w` (its guard as sent
-/// in `w.node.guard`; `base` is the guard the role wrote), with its
-/// allowances; `None` for an op that is no action or whose guard is
-/// already false.
+/// The prepare detail of a `svc` restart or reload `w` (`w.node.guard` is
+/// the guard the role wrote; `starts` the earlier start ops of its unit),
+/// with its allowances; `None` for an op that is no action or that is
+/// already decided not to run (its guard is false, or a start already
+/// started the unit).
 fn action_line(
     w: &WindowOp,
-    base: Option<&Guard>,
+    starts: &[NodeId],
     known: &HashMap<NodeId, Known>,
     subjects: &HashMap<NodeId, String>,
 ) -> Option<String> {
@@ -578,8 +716,12 @@ fn action_line(
         return None;
     };
     let verb = s.action()?.name();
-    let sent = w.node.guard.as_ref().map(|g| decide(g, known));
-    if sent == Some(Some(false)) {
+    let base = w.node.guard.as_ref();
+    if base.map(|g| decide(g, known)) == Some(Some(false))
+        || starts
+            .iter()
+            .any(|n| known.get(n).is_some_and(|k| k.started))
+    {
         return None;
     }
     let mut line = match base {
@@ -678,9 +820,9 @@ fn roles_of(w: &WindowOp) -> Vec<String> {
     v
 }
 
-/// A trailer's `(rc, changed, skipped, installed)`; `installed` for a
-/// `pkg` result only.
-type Parsed = (i32, bool, bool, Option<Vec<String>>);
+/// A trailer's `(rc, changed, skipped, installed, started)`; `installed`
+/// for a `pkg` result only, `started` true for a `svc` start that ran.
+type Parsed = (i32, bool, bool, Option<Vec<String>>, bool);
 
 fn parse_result(kind: OpKind, t: &Trailer) -> Result<Parsed, String> {
     use crate::trailer::{
@@ -689,25 +831,25 @@ fn parse_result(kind: OpKind, t: &Trailer) -> Result<Parsed, String> {
     let r = match kind {
         OpKind::Pkg => t
             .typed::<PkgResult>()
-            .map(|r| (r.rc, r.changed, false, Some(r.installed))),
+            .map(|r| (r.rc, r.changed, false, Some(r.installed), false)),
         OpKind::File => t
             .typed::<FileResult>()
-            .map(|r| (r.rc, r.changed, false, None)),
+            .map(|r| (r.rc, r.changed, false, None, false)),
         OpKind::Group => t
             .typed::<GroupResult>()
-            .map(|r| (r.rc, r.changed, false, None)),
+            .map(|r| (r.rc, r.changed, false, None, false)),
         OpKind::User => t
             .typed::<UserResult>()
-            .map(|r| (r.rc, r.changed, false, None)),
+            .map(|r| (r.rc, r.changed, false, None, false)),
         OpKind::Repo => t
             .typed::<RepoResult>()
-            .map(|r| (r.rc, r.changed, false, None)),
+            .map(|r| (r.rc, r.changed, false, None, false)),
         OpKind::Svc => t
             .typed::<SvcResult>()
-            .map(|r| (r.rc, r.changed, r.skipped, None)),
+            .map(|r| (r.rc, r.changed, r.skipped, None, r.started)),
         OpKind::Sh => t
             .typed::<ShellResult>()
-            .map(|r| (r.rc, r.changed, r.skipped, None)),
+            .map(|r| (r.rc, r.changed, r.skipped, None, false)),
     };
     r.map_err(|e| format!("unreadable result {:?}: {e}", t.json))
 }
@@ -732,18 +874,20 @@ impl HostExec {
             known: HashMap::new(),
             subjects: HashMap::new(),
             starts: Vec::new(),
-            units: false,
+            suppress: HashMap::new(),
         }
     }
 
-    /// `window` as sent: each `svc` restart or reload of a unit an earlier
-    /// op of the run started gets that op's `changed` and-not-ed into its
-    /// guard. Also the prepare lines of the window's actions. Records the
+    /// Each `svc` restart or reload of a unit that an earlier op of the
+    /// run wants `.started()` is sent with "that op started the unit"
+    /// and-not-ed into its guard (`self.suppress`, read by [`sent_test`]
+    /// and [`when_text`]): not that op's `changed`, which is also true when
+    /// it only enabled or unmasked a running unit. Also the prepare lines
+    /// of the window's actions, from the role's own guard. Records the
     /// window's ops (their subjects; the starts) for later windows.
-    fn and_not_starts(&mut self, window: &Window) -> (Window, Vec<crate::report::WillCreate>) {
-        let mut out = window.clone();
+    fn and_not_starts(&mut self, window: &Window) -> Vec<crate::report::WillCreate> {
         let mut lines = Vec::new();
-        for w in &mut out.ops {
+        for w in &window.ops {
             for m in &w.members {
                 self.subjects.insert(m.id, subject(w, m));
             }
@@ -752,20 +896,13 @@ impl HostExec {
             };
             let key = s.key_name();
             if s.action().is_some() {
-                let base = w.node.guard.clone();
-                let started = self
+                let starts: Vec<NodeId> = self
                     .starts
                     .iter()
                     .filter(|(k, _)| *k == key)
-                    .map(|(_, id)| Guard::Changed(*id))
-                    .reduce(|a, b| a | b);
-                if let Some(st) = started {
-                    w.node.guard = Some(match base.clone() {
-                        Some(g) => g & !st,
-                        None => !st,
-                    });
-                }
-                if let Some(detail) = action_line(w, base.as_ref(), &self.known, &self.subjects) {
+                    .map(|(_, id)| *id)
+                    .collect();
+                if let Some(detail) = action_line(w, &starts, &self.known, &self.subjects) {
                     lines.push(crate::report::WillCreate {
                         window: window.number,
                         kind: "svc".to_string(),
@@ -773,12 +910,155 @@ impl HostExec {
                         detail: Some(detail),
                     });
                 }
+                if !starts.is_empty() {
+                    self.suppress.insert(w.id, starts);
+                }
             }
             if s.started {
                 self.starts.push((key, w.id));
             }
         }
-        (out, lines)
+        lines
+    }
+
+    /// The earlier start ops a restart or reload `w` is and-not-ed with.
+    fn starts_of(&self, w: &WindowOp) -> &[NodeId] {
+        self.suppress.get(&w.id).map_or(&[], Vec::as_slice)
+    }
+
+    /// The prepare line of the window's flush: when prepare says a unit
+    /// after the window's last `svc` op will change and systemd runs (one
+    /// probe, only then). Gathered, never asserted: a guard-skipped svc op
+    /// after a changed unit also leaves a flush, with no line here.
+    async fn flush_line(
+        &mut self,
+        window: &Window,
+        found: &[crate::report::WillCreate],
+    ) -> Option<crate::report::WillCreate> {
+        let names: Vec<String> = units_after_last_svc(window)
+            .into_iter()
+            .filter_map(|w| match &w.node.spec {
+                OpSpec::Unit(u) => Some(u.rel()),
+                _ => None,
+            })
+            .filter(|n| found.iter().any(|c| c.kind == "unit" && c.name == *n))
+            .collect();
+        if names.is_empty() {
+            return None;
+        }
+        self.seq += 1;
+        let probe = format!("if {BOOTED}; then echo booted; fi");
+        let (_, out) = prepare::probe(&mut self.shells.root, self.seq, &probe)
+            .await
+            .ok()?;
+        if out.trim() != "booted" {
+            return None;
+        }
+        Some(crate::report::WillCreate {
+            window: window.number,
+            kind: "systemd".to_string(),
+            name: "daemon-reload".to_string(),
+            detail: Some(format!(
+                "at the end of the window, after unit {}",
+                names.join(", ")
+            )),
+        })
+    }
+
+    /// End the window's unit flag: when a unit changed and no `svc` op ran
+    /// after it (it would have reloaded and cleared the flag), send one
+    /// `systemctl daemon-reload` to the root shell, in the halt gate; the
+    /// shell runs it only with the flag set and systemd running, then
+    /// clears the flag. A reload that ran is streamed and reported
+    /// ([`crate::report::DaemonReload`]); a failed one fails the host with
+    /// its rc and output, like a failed op.
+    async fn flush(&mut self, window: &Window) {
+        let outcome = |id: NodeId, rep: &HostReport| {
+            rep.ops
+                .iter()
+                .rev()
+                .find(|o| o.id == id.0)
+                .map(|o| o.outcome)
+        };
+        let mut pending: Vec<&WindowOp> = Vec::new();
+        for w in &window.ops {
+            match (&w.node.spec, outcome(w.id, &self.report)) {
+                (OpSpec::Unit(_), Some(Outcome::Changed)) => pending.push(w),
+                (
+                    OpSpec::Svc(_),
+                    Some(Outcome::Changed | Outcome::Unchanged | Outcome::AllowedFail),
+                ) => pending.clear(),
+                _ => {}
+            }
+        }
+        if pending.is_empty() {
+            return;
+        }
+        self.seq += 1;
+        let id = self.seq;
+        let nonce = self.shells.root.nonce().to_string();
+        let script = format!(
+            "if [ -z \"${{__tp_halt-}}\" ]; then\n{}[ $? -eq 0 ] || __tp_halt=1\n__tp_dr=0\nelse\n{}fi\n",
+            wrap(OpKind::Sh, &flush_body(), id, &nonce),
+            wrap(OpKind::Sh, "rc=0\nskipped=1\n", id, &nonce)
+        );
+        let desc = flush_desc(window.number);
+        let mut roles: Vec<String> = Vec::new();
+        for w in &pending {
+            for r in roles_of(w) {
+                if !roles.contains(&r) {
+                    roles.push(r);
+                }
+            }
+        }
+        let roles = roles.join(", ");
+        let got = match self.shells.root.send(id, &script).await {
+            Ok(()) => self.shells.root.wait(id).await.map_err(|e| e.to_string()),
+            Err(e) => Err(e.to_string()),
+        };
+        let (rc, output) = match got {
+            Ok(o) => match o.trailer.typed::<crate::trailer::ShellResult>() {
+                Ok(r) if r.rc == 0 && r.skipped => return,
+                Ok(r) => (r.rc, String::from_utf8_lossy(&o.output).into_owned()),
+                Err(e) => (-1, format!("unreadable result {:?}: {e}", o.trailer.json)),
+            },
+            Err(e) => (-1, e),
+        };
+        self.sink
+            .line(&format!("== {} [{roles}] {desc} ==", self.name));
+        for l in output.lines() {
+            self.sink.line(&format!("{} | {l}", self.name));
+        }
+        self.sink.line(
+            if rc == 0 {
+                "-> changed".to_string()
+            } else {
+                format!("-> FAILED rc={rc}")
+            }
+            .as_str(),
+        );
+        self.sink
+            .event(json!({"ev":"daemon_reload","host":self.name,
+            "window":window.number,"rc":rc}));
+        self.report
+            .daemon_reloads
+            .push(crate::report::DaemonReload {
+                window: window.number,
+                rc,
+            });
+        if rc != 0 {
+            self.halted = true;
+            if self.verdict.is_none() {
+                let last = pending[pending.len() - 1];
+                self.verdict = Some(HostStatus::Failed {
+                    role: roles,
+                    op_id: last.id.0,
+                    op: desc,
+                    rc,
+                    tail: last_lines(output.as_bytes(), TAIL_LINES),
+                });
+            }
+        }
     }
 
     fn block(&mut self, why: String) {
@@ -842,7 +1122,7 @@ impl HostExec {
         changed: bool,
         note: &str,
     ) {
-        let when = w.node.guard.as_ref().map(|g| g.to_string());
+        let when = when_text(w, self.starts_of(w));
         let label = match outcome {
             Outcome::Changed => "changed".to_string(),
             Outcome::Unchanged if note.is_empty() => "ok".to_string(),
@@ -895,6 +1175,7 @@ impl HostExec {
                 Known {
                     ok,
                     changed: ran && c,
+                    started: false,
                 },
             );
         }
@@ -1101,8 +1382,7 @@ impl Executor for HostExec {
             }
             return Ok(());
         }
-        let (window, actions) = self.and_not_starts(window);
-        let window = &window;
+        let actions = self.and_not_starts(window);
 
         // Prepare: nothing is sent to be applied until all of it passes.
         let prepared = prepare::prepare_window(
@@ -1116,6 +1396,9 @@ impl Executor for HostExec {
         match prepared {
             Ok(mut will) => {
                 will.will_create.extend(actions);
+                if let Some(l) = self.flush_line(window, &will.will_create).await {
+                    will.will_create.push(l);
+                }
                 for w in will.will_install {
                     self.sink.line(&format!(
                         "== {} [prepare] window {} will install ({}): {} ==",
@@ -1171,8 +1454,15 @@ impl Executor for HostExec {
         for &(s, e) in &runs {
             let read: BTreeSet<NodeId> = window.ops[s..e]
                 .iter()
-                .filter_map(|w| w.node.guard.as_ref())
-                .flat_map(|g| g.sources())
+                .flat_map(|w| {
+                    let own = w
+                        .node
+                        .guard
+                        .as_ref()
+                        .map(|g| g.sources())
+                        .unwrap_or_default();
+                    own.into_iter().chain(self.starts_of(w).iter().copied())
+                })
                 .collect();
             for (i, w) in window.ops.iter().enumerate().take(e).skip(s) {
                 // A unit op's `changed` sets the window flag.
@@ -1184,15 +1474,19 @@ impl Executor for HostExec {
         // Render each op for its principal's shell (open now).
         let mut scripts = Vec::new();
         let mut afters = Vec::new();
+        // A `unit` op came earlier in this window: later `svc` ops carry
+        // the daemon-reload of a changed unit. The flag never outlives the
+        // window (the flush at its end), so earlier windows do not count.
+        let mut units = false;
         for (i, w) in window.ops.iter().enumerate() {
-            let daemon_reload = self.units && matches!(w.node.spec, OpSpec::Svc(_));
+            let daemon_reload = units && matches!(w.node.spec, OpSpec::Svc(_));
             afters.push(match &w.node.spec {
                 OpSpec::Unit(_) => UNIT_FLAG,
                 OpSpec::Svc(_) if daemon_reload => UNIT_FLAG_CLEAR,
                 _ => "",
             });
             if matches!(w.node.spec, OpSpec::Unit(_)) {
-                self.units = true;
+                units = true;
             }
             let who = &w.node.run_as.principal;
             let Some(sh) = self.shell_for(who) else {
@@ -1259,11 +1553,7 @@ impl Executor for HostExec {
             let mut gated = Vec::new();
             for i in start..end {
                 let w = &window.ops[i];
-                let test = w
-                    .node
-                    .guard
-                    .as_ref()
-                    .map(|g| guard_test(g, &self.known, &in_run));
+                let test = sent_test(w, self.starts_of(w), &self.known, &in_run);
                 gated.push(gate(
                     w,
                     &scripts[i],
@@ -1307,10 +1597,10 @@ impl Executor for HostExec {
                             continue;
                         }
                         match parse_result(w.node.spec.op_kind(), &trailer) {
-                            Ok((0, _, _, _)) if crate::trailer::is_guard_skip(&trailer) => {
+                            Ok((0, _, _, _, _)) if crate::trailer::is_guard_skip(&trailer) => {
                                 self.finish_op(w, &descs[i], Outcome::Skipped, 0, false, "");
                             }
-                            Ok((0, changed, skipped, installed)) => {
+                            Ok((0, changed, skipped, installed, started)) => {
                                 let o = if changed {
                                     Outcome::Changed
                                 } else {
@@ -1321,11 +1611,18 @@ impl Executor for HostExec {
                                 if installed.is_some() {
                                     self.remember(w, o, changed, installed.as_deref());
                                 }
+                                if started {
+                                    for m in &w.members {
+                                        if let Some(k) = self.known.get_mut(&m.id) {
+                                            k.started = true;
+                                        }
+                                    }
+                                }
                             }
-                            Ok((rc, _, _, _)) if w.node.allow_fail => {
+                            Ok((rc, _, _, _, _)) if w.node.allow_fail => {
                                 self.finish_op(w, &descs[i], Outcome::AllowedFail, rc, false, "");
                             }
-                            Ok((rc, _, _, _)) => {
+                            Ok((rc, _, _, _, _)) => {
                                 failed_seen = true;
                                 let tail = last_lines(&live[i].tail, TAIL_LINES);
                                 self.finish_op(w, &descs[i], Outcome::Failed, rc, false, "");
@@ -1387,6 +1684,9 @@ impl Executor for HostExec {
                 self.finish_op(w, &descs[i], Outcome::Failed, -1, false, "");
                 self.fail(w, &descs[i], -1, why);
             }
+        }
+        if !failed_seen && !self.halted {
+            self.flush(window).await;
         }
         Ok(())
     }
@@ -1550,6 +1850,7 @@ mod tests {
             Known {
                 ok: true,
                 changed: false,
+                started: false,
             },
         );
         known.insert(
@@ -1557,6 +1858,7 @@ mod tests {
             Known {
                 ok: true,
                 changed: true,
+                started: false,
             },
         );
         let (a, b, c) = (NodeId(0), NodeId(1), NodeId(2));
@@ -1604,13 +1906,58 @@ mod tests {
     }
 
     #[test]
+    fn a_restart_is_dropped_only_by_a_start_that_started_the_unit() {
+        let s = subjects(&[(0, "file /etc/x"), (1, "svc docker.service")]);
+        let g = Some(Guard::Changed(NodeId(0)));
+        let w = restart_op(2, g);
+        let starts = [NodeId(1)];
+        let mut known = HashMap::new();
+        known.insert(
+            NodeId(1),
+            Known {
+                ok: true,
+                changed: true,
+                started: false,
+            },
+        );
+        assert_eq!(
+            action_line(&w, &starts, &known, &s).as_deref(),
+            Some("will restart if file /etc/x changes"),
+            "enabled a running unit: changed, not started"
+        );
+        known.get_mut(&NodeId(1)).unwrap().started = true;
+        assert_eq!(action_line(&w, &starts, &known, &s), None);
+        assert_eq!(
+            when_text(&w, &starts).as_deref(),
+            Some("changed(#0) & !started(#1)")
+        );
+        let either = restart_op(
+            3,
+            Some(Guard::Changed(NodeId(0)) | Guard::ExitOk(NodeId(1))),
+        );
+        assert_eq!(
+            when_text(&either, &[NodeId(1), NodeId(2)]).as_deref(),
+            Some("(changed(#0) | exit_ok(#1)) & !(started(#1) | started(#2))")
+        );
+        assert_eq!(
+            when_text(&restart_op(4, None), &[NodeId(1)]).as_deref(),
+            Some("!started(#1)")
+        );
+        let in_run = BTreeSet::from([NodeId(1)]);
+        assert_eq!(
+            sent_test(&w, &starts, &HashMap::new(), &in_run).as_deref(),
+            Some("{ false; } && ! { [ \"${__tp_st_1-0}\" = 1 ]; }")
+        );
+    }
+
+    #[test]
     fn the_prepare_line_of_a_restart() {
         let s = subjects(&[(0, "pkg nvidia-container-toolkit")]);
         let mut known = HashMap::new();
         let g = Some(Guard::Changed(NodeId(0)));
         let w = restart_op(1, g.clone());
         assert_eq!(
-            action_line(&w, g.as_ref(), &known, &s).as_deref(),
+            action_line(&w, &[], &known, &s).as_deref(),
             Some("will restart if pkg nvidia-container-toolkit changes")
         );
         known.insert(
@@ -1618,22 +1965,20 @@ mod tests {
             Known {
                 ok: true,
                 changed: false,
+                started: false,
             },
         );
-        assert_eq!(
-            action_line(&w, g.as_ref(), &known, &s),
-            None,
-            "decided: settled"
-        );
+        assert_eq!(action_line(&w, &[], &known, &s), None, "decided: settled");
         known.insert(
             NodeId(0),
             Known {
                 ok: true,
                 changed: true,
+                started: false,
             },
         );
         assert_eq!(
-            action_line(&w, g.as_ref(), &known, &s).as_deref(),
+            action_line(&w, &[], &known, &s).as_deref(),
             Some("will restart")
         );
         let mut w = restart_op(1, None);
@@ -1642,7 +1987,7 @@ mod tests {
             reason: "leaks memory".into(),
         });
         assert_eq!(
-            action_line(&w, None, &known, &s).as_deref(),
+            action_line(&w, &[], &known, &s).as_deref(),
             Some("will restart, every run; allowed unguarded-restart: leaks memory")
         );
     }

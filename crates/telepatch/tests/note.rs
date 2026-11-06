@@ -230,3 +230,38 @@ fn text_strips_tags_and_entities() {
         "h.pip(<x> & \"a\""
     );
 }
+
+/// Builders return an owned handle, so the note's examples bind a chain
+/// in one statement, and the note says so where it describes handles.
+#[test]
+fn the_examples_bind_a_chain_and_handles_are_owned() {
+    let html = note_html();
+    let (outside, _) = split_removed(&html);
+    let t = text(&outside);
+    for bound in [
+        "let daemon = h.file(\"/etc/docker/daemon.json\").content(",
+        "let unit = h\n    .unit(\"minikube.service\")\n    .content(",
+        "let toolkit = h.pkg(",
+    ] {
+        assert!(t.contains(bound), "the note has no example {bound:?}");
+    }
+    // the two-statement form a `&Self` builder forced is gone
+    for split in [
+        "let daemon = h.file(\"/etc/docker/daemon.json\");",
+        "let unit = h.unit(\"minikube.service\");",
+    ] {
+        assert!(!t.contains(split), "the note still binds first: {split:?}");
+    }
+    let r = element_with_id(&html, "trace").expect("a section with id=\"trace\"");
+    let trace = text(&html[r]);
+    for needle in [
+        "Every builder on every handle returns the handle, owned",
+        "s.reload(); s.when(g);",
+        "Fetched",
+    ] {
+        assert!(
+            trace.contains(needle),
+            "the trace section does not say {needle:?}"
+        );
+    }
+}

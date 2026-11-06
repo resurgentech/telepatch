@@ -244,7 +244,13 @@ impl<V> Deref for Scope<V> {
     }
 }
 
-/// The handle an op call returns; builder methods edit the node in place.
+/// The handle an op call returns; builder methods edit the node in place
+/// and return the handle, owned (a clone: an `Rc` of the trace and the
+/// node id), so a chain binds as written
+/// (`let daemon = h.file(p).content(c);`) and a call on a bound handle as
+/// a statement (`s.when(g);`) edits the same node. Every typed handle
+/// (`FileHandle`, `SvcHandle`, ...) follows the same rule, and also takes
+/// these shared methods returning its own type ([`op_builders`]).
 #[derive(Clone)]
 pub struct OpHandle {
     trace: Rc<RefCell<Trace>>,
@@ -267,23 +273,24 @@ impl OpHandle {
     /// Permit this op to break `policy`, for `reason` (required: an empty
     /// one is a hard trace error). The plan and the run report list it.
     #[track_caller]
-    pub fn allow(&self, policy: Policy, reason: impl Into<String>) -> &Self {
+    pub fn allow(&self, policy: Policy, reason: impl Into<String>) -> OpHandle {
         let reason = reason.into();
         if reason.trim().is_empty() {
             self.record_error(TraceError::new(format!(
                 "allow(Policy::{}, ..): the reason is required",
                 policy.variant()
             )));
-            return self;
+            return self.clone();
         }
         if reason.contains(['\n', '\r']) {
             self.record_error(TraceError::new(format!(
                 "allow(Policy::{}, ..): the reason must be one line",
                 policy.variant()
             )));
-            return self;
+            return self.clone();
         }
         self.edit(|op| op.allowed.push(Allowance { policy, reason }))
+            .clone()
     }
 
     pub fn id(&self) -> NodeId {
@@ -313,20 +320,22 @@ impl OpHandle {
 
     /// Replace the declared read set.
     #[track_caller]
-    pub fn reads(&self, keys: impl IntoIterator<Item = Key>) -> &Self {
+    pub fn reads(&self, keys: impl IntoIterator<Item = Key>) -> OpHandle {
         self.edit(|op| op.reads = keys.into_iter().collect())
+            .clone()
     }
 
     /// Replace the declared write set (narrowing the default).
     #[track_caller]
-    pub fn writes(&self, keys: impl IntoIterator<Item = Key>) -> &Self {
+    pub fn writes(&self, keys: impl IntoIterator<Item = Key>) -> OpHandle {
         self.edit(|op| op.writes = keys.into_iter().collect())
+            .clone()
     }
 
     /// A non-zero exit of this op does not fail the run.
     #[track_caller]
-    pub fn allow_fail(&self) -> &Self {
-        self.edit(|op| op.allow_fail = true)
+    pub fn allow_fail(&self) -> OpHandle {
+        self.edit(|op| op.allow_fail = true).clone()
     }
 
     /// Run this op only when `guard` holds: any composition of earlier
@@ -334,8 +343,8 @@ impl OpHandle {
     /// skips the op (reported `skipped`, with the guard). A second call
     /// replaces the guard.
     #[track_caller]
-    pub fn when(&self, guard: Guard) -> &Self {
-        self.edit(|op| op.guard = Some(guard))
+    pub fn when(&self, guard: Guard) -> OpHandle {
+        self.edit(|op| op.guard = Some(guard)).clone()
     }
 
     /// True when this op changed something (see [`Guard`] for failed and
@@ -354,18 +363,74 @@ impl OpHandle {
     /// ops. Until then its effects are not visible to fact reads (its
     /// postconditions answer nothing, and it is no implicit barrier).
     #[track_caller]
-    pub fn at_end(&self) -> &Self {
-        self.edit(|op| op.at_end = true)
+    pub fn at_end(&self) -> OpHandle {
+        self.edit(|op| op.at_end = true).clone()
     }
 
     /// Declare a postcondition: after this op, `key` has `value`.
     #[track_caller]
-    pub fn post(&self, key: Key, value: Value) -> &Self {
+    pub fn post(&self, key: Key, value: Value) -> OpHandle {
         self.edit(|op| {
             op.post.insert(key, value);
         })
+        .clone()
     }
 }
+
+/// The handle methods every op takes (`.allow`, `.reads`, `.writes`,
+/// `.allow_fail`, `.when`, `.at_end`, `.post`), on a typed handle that
+/// wraps an [`OpHandle`] as its field `0`: each edits the node as the
+/// `OpHandle` method does and returns the typed handle, owned, so a chain
+/// keeps its type (`h.svc(u).restart().when(g)` is a `SvcHandle`).
+macro_rules! op_builders {
+    ($t:ty) => {
+        impl $t {
+            /// See [`OpHandle::allow`].
+            #[track_caller]
+            pub fn allow(&self, policy: $crate::policy::Policy, reason: impl Into<String>) -> Self {
+                self.0.allow(policy, reason);
+                self.clone()
+            }
+            /// See [`OpHandle::reads`].
+            #[track_caller]
+            pub fn reads(&self, keys: impl IntoIterator<Item = $crate::key::Key>) -> Self {
+                self.0.reads(keys);
+                self.clone()
+            }
+            /// See [`OpHandle::writes`].
+            #[track_caller]
+            pub fn writes(&self, keys: impl IntoIterator<Item = $crate::key::Key>) -> Self {
+                self.0.writes(keys);
+                self.clone()
+            }
+            /// See [`OpHandle::allow_fail`].
+            #[track_caller]
+            pub fn allow_fail(&self) -> Self {
+                self.0.allow_fail();
+                self.clone()
+            }
+            /// See [`OpHandle::when`].
+            #[track_caller]
+            pub fn when(&self, guard: $crate::trace::Guard) -> Self {
+                self.0.when(guard);
+                self.clone()
+            }
+            /// See [`OpHandle::at_end`].
+            #[track_caller]
+            pub fn at_end(&self) -> Self {
+                self.0.at_end();
+                self.clone()
+            }
+            /// See [`OpHandle::post`].
+            #[track_caller]
+            pub fn post(&self, key: $crate::key::Key, value: $crate::key::Value) -> Self {
+                self.0.post(key, value);
+                self.clone()
+            }
+        }
+    };
+}
+pub(crate) use op_builders;
 
 /// Errors derived from the finished ops rather than recorded: an `svc`
 /// or `unit` that wants nothing, a policy an op trips and does not allow.

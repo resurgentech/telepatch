@@ -11,6 +11,9 @@
 //!   the unit; there is no running systemd, so no `daemon-reload` is tried
 //!   (offline it would fail the run: "System has not been booted");
 //! * run 2 changes nothing and prepare says nothing;
+//! * a drop-in changed after the window's last svc op (the end-of-window
+//!   flush case) is written with no reload and no flush line: the host is
+//!   not booted, so the flush is skipped and the run does not fail;
 //! * a unit with an unknown key fails `systemd-analyze verify`: the op
 //!   fails and the file is not written.
 
@@ -44,6 +47,18 @@ fn pb_unit(h: Host<()>) -> PlaybookFuture {
         Ok(())
     })
 }
+
+/// The drop-in changes after the window's last svc op: nothing reloads it
+/// but the end-of-window flush.
+fn pb_drop_in_last(h: Host<()>) -> PlaybookFuture {
+    Box::pin(async move {
+        h.svc("tp-live").enabled();
+        h.unit("tp-live.service").drop_in("override", DROP_IN_2);
+        Ok(())
+    })
+}
+
+const DROP_IN_2: &str = "[Service]\nEnvironment=TP_LIVE=2\n";
 
 fn pb_bad(h: Host<()>) -> PlaybookFuture {
     Box::pin(async move {
@@ -132,6 +147,26 @@ fn unit_and_drop_in(image: &str) {
     for o in &r2.hosts[0].ops {
         assert!(!o.changed, "run 2 changed {}: {}", o.id, o.desc);
     }
+
+    // a drop-in changed with no svc op after it: offline, no flush
+    for n in 1..=2 {
+        let (r, out) = go(&ctr, "drop-in-last", pb_drop_in_last);
+        assert_eq!(r.exit_code(), 0, "drop-in last, run {n}:\n{out}");
+        assert!(!out.contains("daemon-reload"), "not booted: {out}");
+        assert!(!out.contains("has not been booted"), "{out}");
+        assert!(r.hosts[0].daemon_reloads.is_empty(), "{}", r.render());
+        let want = if n == 1 {
+            HostStatus::Changed
+        } else {
+            HostStatus::Ok
+        };
+        assert_eq!(r.hosts[0].status, want, "run {n}: {}", r.render());
+    }
+    let (_, body) = exec(
+        &ctr,
+        "cat /etc/systemd/system/tp-live.service.d/override.conf",
+    );
+    assert_eq!(body, DROP_IN_2.trim());
 
     // a unit systemd-analyze refuses is not written
     let (r3, out3) = go(&ctr, "bad", pb_bad);

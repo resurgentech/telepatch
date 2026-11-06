@@ -11,7 +11,8 @@ __tp_emit() {
   case "$skipped" in 1) __tp_s=true;; *) __tp_s=false;; esac
   __tp_i=
   for __tp_x in "${installed[@]}"; do __tp_i="$__tp_i${__tp_i:+,}\"$(__tp_esc "$__tp_x")\""; done
-  printf '\n__tp_t0n 0 {"rc":%s,"changed":%s,"skipped":%s,"was_enabled":%s,"was_active":%s,"was_masked":%s}\n' "$rc" "$__tp_c" "$__tp_s" "${tp_was_e:-null}" "${tp_was_a:-null}" "${tp_was_m:-null}"
+  case "${tp_started-}" in 1) __tp_st=true;; *) __tp_st=false;; esac
+  printf '\n__tp_t0n 0 {"rc":%s,"changed":%s,"skipped":%s,"was_enabled":%s,"was_active":%s,"was_masked":%s,"started":%s}\n' "$rc" "$__tp_c" "$__tp_s" "${tp_was_e:-null}" "${tp_was_a:-null}" "${tp_was_m:-null}" "$__tp_st"
 }
 trap '__tp_emit $?' EXIT
 rc=0; changed=0; skipped=0; installed=()
@@ -66,7 +67,8 @@ __tp_emit() {
   case "$skipped" in 1) __tp_s=true;; *) __tp_s=false;; esac
   __tp_i=
   for __tp_x in "${installed[@]}"; do __tp_i="$__tp_i${__tp_i:+,}\"$(__tp_esc "$__tp_x")\""; done
-  printf '\n__tp_t0n 1 {"rc":%s,"changed":%s,"skipped":%s,"was_enabled":%s,"was_active":%s,"was_masked":%s}\n' "$rc" "$__tp_c" "$__tp_s" "${tp_was_e:-null}" "${tp_was_a:-null}" "${tp_was_m:-null}"
+  case "${tp_started-}" in 1) __tp_st=true;; *) __tp_st=false;; esac
+  printf '\n__tp_t0n 1 {"rc":%s,"changed":%s,"skipped":%s,"was_enabled":%s,"was_active":%s,"was_masked":%s,"started":%s}\n' "$rc" "$__tp_c" "$__tp_s" "${tp_was_e:-null}" "${tp_was_a:-null}" "${tp_was_m:-null}" "$__tp_st"
 }
 trap '__tp_emit $?' EXIT
 rc=0; changed=0; skipped=0; installed=()
@@ -122,7 +124,8 @@ __tp_emit() {
   case "$skipped" in 1) __tp_s=true;; *) __tp_s=false;; esac
   __tp_i=
   for __tp_x in "${installed[@]}"; do __tp_i="$__tp_i${__tp_i:+,}\"$(__tp_esc "$__tp_x")\""; done
-  printf '\n__tp_t0n 2 {"rc":%s,"changed":%s,"skipped":%s,"was_enabled":%s,"was_active":%s,"was_masked":%s}\n' "$rc" "$__tp_c" "$__tp_s" "${tp_was_e:-null}" "${tp_was_a:-null}" "${tp_was_m:-null}"
+  case "${tp_started-}" in 1) __tp_st=true;; *) __tp_st=false;; esac
+  printf '\n__tp_t0n 2 {"rc":%s,"changed":%s,"skipped":%s,"was_enabled":%s,"was_active":%s,"was_masked":%s,"started":%s}\n' "$rc" "$__tp_c" "$__tp_s" "${tp_was_e:-null}" "${tp_was_a:-null}" "${tp_was_m:-null}" "$__tp_st"
 }
 trap '__tp_emit $?' EXIT
 rc=0; changed=0; skipped=0; installed=()
@@ -161,7 +164,7 @@ else
         if [ "$rc" -eq 0 ]; then
           systemctl start -- "$tp_u"
           rc=$?
-          if [ "$rc" -eq 0 ]; then changed=1; fi
+          if [ "$rc" -eq 0 ]; then changed=1; tp_started=1; fi
         fi
       fi
     else

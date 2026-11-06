@@ -125,20 +125,22 @@ impl Deref for UserHandle {
     }
 }
 
+crate::host::op_builders!(UserHandle);
+
 impl UserHandle {
-    fn spec(&self, f: impl FnOnce(&mut UserSpec)) -> &Self {
+    fn spec(&self, f: impl FnOnce(&mut UserSpec)) -> Self {
         self.0.edit(|op| {
             if let OpSpec::User(u) = &mut op.spec {
                 f(u);
             }
         });
-        self
+        self.clone()
     }
 
     /// The login shell: set on creation and enforced on an existing
     /// account.
     #[track_caller]
-    pub fn shell(&self, path: &str) -> &Self {
+    pub fn shell(&self, path: &str) -> Self {
         self.spec(|u| u.shell = Some(path.to_string()))
     }
 
@@ -146,7 +148,7 @@ impl UserHandle {
     /// removes one. Each group is read, so a `group` op before this one
     /// orders first.
     #[track_caller]
-    pub fn groups_add<I, S>(&self, groups: I) -> &Self
+    pub fn groups_add<I, S>(&self, groups: I) -> Self
     where
         I: IntoIterator<Item = S>,
         S: AsRef<str>,
@@ -164,19 +166,19 @@ impl UserHandle {
                 op.reads.insert(Key::group(g));
             }
         });
-        self
+        self.clone()
     }
 
     /// A crypt(3) hash for the password, applied only when this op
     /// creates the account. Empty: not applied (the account stays
     /// locked). Never shown in the plan, report, log or events.
     #[track_caller]
-    pub fn password_hash(&self, hash: &str) -> &Self {
+    pub fn password_hash(&self, hash: &str) -> Self {
         if hash.contains(['\n', '\r', '\0']) {
             self.0.record_error(TraceError::new(
                 "user: password_hash must be a single line".to_string(),
             ));
-            return self;
+            return self.clone();
         }
         self.spec(|u| u.password_hash = Some(hash.to_string()))
     }

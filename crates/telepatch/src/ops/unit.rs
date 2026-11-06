@@ -29,8 +29,10 @@
 //! `.absent()`). It is not `h.file`, so `UnitViaFile` does not apply.
 //!
 //! A changed unit sets the root shell's `__tp_dr` (the window flag); the
-//! next `svc` op on a booted host runs one `systemctl daemon-reload` first
-//! and clears it ([`crate::executor`], "Units and daemon-reload").
+//! next `svc` op in the window, on a booted host, runs one `systemctl
+//! daemon-reload` first and clears it; with no svc op after it, the
+//! window ends with that reload (the flush). The flag never outlives the
+//! window ([`crate::executor`], "Units and daemon-reload").
 //!
 //! `TP_UNIT_DIR` overrides `/etc/systemd/system` in the script (tests); the
 //! keys and the plan always say `/etc/systemd/system`.
@@ -267,8 +269,10 @@ impl Deref for UnitHandle {
     }
 }
 
+crate::host::op_builders!(UnitHandle);
+
 impl UnitHandle {
-    fn spec(&self, f: impl FnOnce(&mut UnitSpec)) -> &Self {
+    fn spec(&self, f: impl FnOnce(&mut UnitSpec)) -> Self {
         self.0.edit(|op| {
             if let OpSpec::Unit(s) = &mut op.spec {
                 f(s);
@@ -276,13 +280,13 @@ impl UnitHandle {
                 op.post = s.default_post();
             }
         });
-        self
+        self.clone()
     }
 
     /// Ensure the unit file holds exactly this: bytes now, a template
     /// value after T89.
     #[track_caller]
-    pub fn content(&self, content: impl Into<Content>) -> &Self {
+    pub fn content(&self, content: impl Into<Content>) -> Self {
         let c = content.into();
         self.spec(|s| s.content = Some(c))
     }
@@ -291,12 +295,12 @@ impl UnitHandle {
     /// `name` has it) holding exactly `text`. The op is the drop-in, not
     /// the unit file.
     #[track_caller]
-    pub fn drop_in(&self, name: &str, text: impl Into<Content>) -> &Self {
+    pub fn drop_in(&self, name: &str, text: impl Into<Content>) -> Self {
         if !segment_ok(name) {
             self.0.record_error(TraceError::new(format!(
                 "unit drop_in({name:?}): not a drop-in name"
             )));
-            return self;
+            return self.clone();
         }
         let conf = if name.ends_with(".conf") {
             name.to_string()
@@ -312,13 +316,13 @@ impl UnitHandle {
 
     /// Ensure the file (the unit's, or the drop-in's) does not exist.
     #[track_caller]
-    pub fn absent(&self) -> &Self {
+    pub fn absent(&self) -> Self {
         self.spec(|s| s.absent = true)
     }
 
     /// The file's mode (a created file is 0644 otherwise).
     #[track_caller]
-    pub fn mode(&self, mode: u32) -> &Self {
+    pub fn mode(&self, mode: u32) -> Self {
         self.spec(|s| s.mode = Some(mode))
     }
 }

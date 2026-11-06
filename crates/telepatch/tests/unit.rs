@@ -508,8 +508,11 @@ case "$1" in
       *UnitFileState*) exit 1;;
       *) echo no;;
     esac;;
-  daemon-reload) ;;
+  daemon-reload)
+    if [ -e "$D/reloadfail" ]; then echo "Failed to reload daemon: Access denied" >&2; exit 1; fi;;
   start|restart) touch "$D/active.$u";;
+  stop) rm -f "$D/active.$u";;
+  disable) echo disabled > "$D/state.$u";;
   *) exit 64;;
 esac"#
         ),
@@ -768,7 +771,7 @@ fn executor_a_unit_in_an_earlier_window_reloads_before_a_later_svc_op() {
             h.unit("a.service")
                 .content("[Service]\nExecStart=/bin/true\n");
             // a blocking read ends the window
-            let _ = h.exists("/nonexistent-tp-path").await;
+            let _ = h.bin_exists("tp-no-such-bin-zz").await;
             h.svc("a").enabled();
             Ok(())
         })
@@ -828,4 +831,202 @@ fn executor_prepare_says_not_verified_without_systemd_analyze() {
         out2.contains("unit a.service: will change; no systemd-analyze: not verified"),
         "{out2}"
     );
+}
+
+// --- the flush: a changed unit with no svc op after it in its window ---
+
+const FLUSH: &str = "systemd daemon-reload, end of window ";
+
+fn reloads(calls: &[String]) -> usize {
+    calls
+        .iter()
+        .filter(|c| *c == "systemctl daemon-reload")
+        .count()
+}
+
+fn pb_stop_then_remove() -> Playbook<()> {
+    fn run_(h: Host<()>) -> PlaybookFuture {
+        Box::pin(async move {
+            h.svc("a").disabled().stopped();
+            h.unit("a.service").absent();
+            Ok(())
+        })
+    }
+    Playbook {
+        name: "remove",
+        run: run_,
+    }
+}
+
+#[test]
+fn executor_a_removed_unit_with_no_svc_op_after_it_reloads_once_after_the_removal() {
+    let d = tempfile::tempdir().unwrap();
+    let bin = stubs(d.path());
+    std::fs::create_dir_all(unit_dir(d.path())).unwrap();
+    std::fs::write(
+        unit_dir(d.path()).join("a.service"),
+        "[Service]\nExecStart=/bin/true\n",
+    )
+    .unwrap();
+    std::fs::write(d.path().join("state.a"), "enabled\n").unwrap();
+    std::fs::write(d.path().join("active.a"), "").unwrap();
+    let pb = pb_stop_then_remove();
+    let (r1, out1) = go(&pb, d.path(), &bin, true);
+    assert_eq!(
+        r1.hosts[0].status,
+        HostStatus::Changed,
+        "{}\n{out1}",
+        r1.render()
+    );
+    assert!(!unit_dir(d.path()).join("a.service").exists());
+    let calls: Vec<String> = systemctl_calls(d.path())
+        .into_iter()
+        .filter(|c| {
+            c.starts_with("systemctl stop ")
+                || c.starts_with("systemctl disable ")
+                || c == "systemctl daemon-reload"
+        })
+        .collect();
+    assert_eq!(
+        calls,
+        [
+            "systemctl stop -- a",
+            "systemctl disable -- a",
+            "systemctl daemon-reload"
+        ],
+        "one reload, after the removal\n{out1}"
+    );
+    // the prepare line, the stream line, the report line
+    assert!(
+        out1.contains(
+            "== h1 [prepare] systemd daemon-reload: at the end of the window, after unit a.service =="
+        ),
+        "{out1}"
+    );
+    let flush = out1.find(FLUSH).expect(&out1);
+    let unit_op = out1.find("unit a.service absent ==").expect(&out1);
+    assert!(unit_op < flush, "{out1}");
+    let rendered = r1.render();
+    assert!(
+        rendered
+            .contains("h1: window 1: systemd daemon-reload (a unit changed; no svc op after it)"),
+        "{rendered}"
+    );
+
+    // run 2: nothing changes, nothing reloads
+    let (r2, out2) = go(&pb, d.path(), &bin, true);
+    assert_eq!(
+        r2.hosts[0].status,
+        HostStatus::Ok,
+        "{}\n{out2}",
+        r2.render()
+    );
+    assert_eq!(reloads(&systemctl_calls(d.path())), 0, "{out2}");
+    assert!(!out2.contains("daemon-reload"), "{out2}");
+    let table = r2.render();
+    let row = table.lines().find(|l| l.starts_with("h1")).expect(&table);
+    assert_eq!(row.split_whitespace().nth(3), Some("0"), "{table}");
+}
+
+#[test]
+fn executor_a_unit_changed_in_one_window_reloads_at_its_end_not_in_the_next() {
+    fn run_(h: Host<()>) -> PlaybookFuture {
+        Box::pin(async move {
+            h.unit("a.service")
+                .content("[Service]\nExecStart=/bin/true\n");
+            // a blocking read ends the window
+            let _ = h.bin_exists("tp-no-such-bin-zz").await;
+            h.svc("a").enabled();
+            Ok(())
+        })
+    }
+    let pb = Playbook {
+        name: "windows",
+        run: run_,
+    };
+    let d = tempfile::tempdir().unwrap();
+    let bin = stubs(d.path());
+    let (r1, out1) = go(&pb, d.path(), &bin, true);
+    assert_eq!(r1.exit_code(), 0, "{}\n{out1}", r1.render());
+    let calls = systemctl_calls(d.path());
+    assert_eq!(reloads(&calls), 1, "{calls:#?}");
+    let flush = out1.find(FLUSH).expect(&out1);
+    let svc_op = out1.find("svc a ==").expect(&out1);
+    assert!(flush < svc_op, "the reload ends window 1: {out1}");
+    assert!(
+        r1.render().contains("h1: window 1: systemd daemon-reload"),
+        "{}",
+        r1.render()
+    );
+}
+
+#[test]
+fn executor_two_units_then_a_svc_op_reload_once_before_it_and_do_not_flush() {
+    let d = tempfile::tempdir().unwrap();
+    let bin = stubs(d.path());
+    let (r1, out1) = go(&pb_two_units(), d.path(), &bin, true);
+    assert_eq!(r1.exit_code(), 0, "{}\n{out1}", r1.render());
+    assert_eq!(reloads(&systemctl_calls(d.path())), 1);
+    assert!(!out1.contains(FLUSH), "{out1}");
+    assert!(!out1.contains("[prepare] systemd daemon-reload"), "{out1}");
+    assert!(!r1.render().contains("daemon-reload"), "{}", r1.render());
+}
+
+#[test]
+fn executor_a_failed_flush_fails_the_host_with_systemctls_message() {
+    fn run_(h: Host<()>) -> PlaybookFuture {
+        Box::pin(async move {
+            h.unit("a.service")
+                .content("[Service]\nExecStart=/bin/true\n");
+            Ok(())
+        })
+    }
+    let pb = Playbook {
+        name: "fail",
+        run: run_,
+    };
+    let d = tempfile::tempdir().unwrap();
+    let bin = stubs(d.path());
+    std::fs::write(d.path().join("reloadfail"), "").unwrap();
+    let (r1, out1) = go(&pb, d.path(), &bin, true);
+    let rendered = r1.render();
+    match &r1.hosts[0].status {
+        HostStatus::Failed { op, rc, tail, .. } => {
+            assert!(op.starts_with(FLUSH), "{op}");
+            assert_eq!(*rc, 1);
+            assert!(
+                tail.contains("Failed to reload daemon: Access denied"),
+                "{tail}"
+            );
+        }
+        s => panic!("{s:?}\n{rendered}\n{out1}"),
+    }
+    assert_eq!(r1.exit_code(), 1);
+    assert!(
+        rendered.contains("  | Failed to reload daemon: Access denied"),
+        "{rendered}"
+    );
+    assert!(out1.contains("-> FAILED rc=1"), "{out1}");
+}
+
+#[test]
+fn executor_not_booted_a_changed_unit_alone_does_not_reload() {
+    fn run_(h: Host<()>) -> PlaybookFuture {
+        Box::pin(async move {
+            h.unit("a.service")
+                .content("[Service]\nExecStart=/bin/true\n");
+            Ok(())
+        })
+    }
+    let pb = Playbook {
+        name: "offline",
+        run: run_,
+    };
+    let d = tempfile::tempdir().unwrap();
+    let bin = stubs(d.path());
+    let (r1, out1) = go(&pb, d.path(), &bin, false);
+    assert_eq!(r1.exit_code(), 0, "{}\n{out1}", r1.render());
+    assert_eq!(reloads(&systemctl_calls(d.path())), 0);
+    assert!(!out1.contains("daemon-reload"), "{out1}");
+    assert!(!r1.render().contains("daemon-reload"), "{}", r1.render());
 }

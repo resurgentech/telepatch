@@ -118,6 +118,14 @@ pub struct SvcResult {
     pub was_active: Option<bool>,
     #[serde(default)]
     pub was_masked: Option<bool>,
+    /// This op started the unit: it wants `.started()`, the unit was not
+    /// active, and its `systemctl start` succeeded. False for an op that
+    /// only enabled or unmasked a running unit (`changed` is true there),
+    /// for an action, and for a skipped op. A restart or reload of the
+    /// unit later in the run is dropped only when this is true
+    /// ([`crate::executor`]).
+    #[serde(default)]
+    pub started: bool,
 }
 
 impl OpResult for PkgResult {
@@ -210,8 +218,8 @@ pub fn render_op(op: &OpNode, id: usize, nonce: &str, os: &Os) -> String {
 pub struct RenderOpts {
     /// A guard later in the run reads this op: see [`render_source_for`].
     pub source: bool,
-    /// The run writes units (`h.unit`): a `svc` op first runs the one
-    /// `daemon-reload` a changed unit asks for
+    /// A `unit` op came earlier in this window: a `svc` op first runs the
+    /// one `daemon-reload` a changed unit asks for
     /// ([`crate::ops::svc::SvcSpec::render_exec_reload`]). Other ops
     /// ignore it.
     pub daemon_reload: bool,
@@ -239,6 +247,11 @@ pub fn wrap(kind: OpKind, body: &str, id: usize, nonce: &str) -> String {
 /// shell can set the variables a guard reads (the subshell cannot).
 const RECORD: &str =
     "  [ -z \"${__tp_f-}\" ] || printf '%s\\n' \"$__tp_c\" \"${installed[@]}\" > \"$__tp_f\"\n";
+
+/// [`RECORD`] for a `svc` op: `changed`, then `started` (`true`/`false`),
+/// one per line (a svc op installs nothing).
+const RECORD_SVC: &str =
+    "  [ -z \"${__tp_f-}\" ] || printf '%s\\n' \"$__tp_c\" \"$__tp_st\" > \"$__tp_f\"\n";
 
 /// The trailer an op prints instead of running when its guard is false:
 /// rc 0, unchanged, and `"when":false`, which the executor reads as
@@ -276,7 +289,7 @@ fn wrap_with(kind: OpKind, body: &str, id: usize, nonce: &str, record: bool) -> 
         OpKind::Group | OpKind::User => r#"{"rc":%s,"changed":%s,"created":%s}"#,
         OpKind::Sh => r#"{"rc":%s,"changed":%s,"skipped":%s}"#,
         OpKind::Svc => {
-            r#"{"rc":%s,"changed":%s,"skipped":%s,"was_enabled":%s,"was_active":%s,"was_masked":%s}"#
+            r#"{"rc":%s,"changed":%s,"skipped":%s,"was_enabled":%s,"was_active":%s,"was_masked":%s,"started":%s}"#
         }
     };
     let args = match kind {
@@ -285,7 +298,7 @@ fn wrap_with(kind: OpKind, body: &str, id: usize, nonce: &str, record: bool) -> 
         OpKind::Group | OpKind::User => r#""$rc" "$__tp_c" "$__tp_k""#,
         OpKind::Sh => r#""$rc" "$__tp_c" "$__tp_s""#,
         OpKind::Svc => {
-            r#""$rc" "$__tp_c" "$__tp_s" "${tp_was_e:-null}" "${tp_was_a:-null}" "${tp_was_m:-null}""#
+            r#""$rc" "$__tp_c" "$__tp_s" "${tp_was_e:-null}" "${tp_was_a:-null}" "${tp_was_m:-null}" "$__tp_st""#
         }
     };
     let mut o = String::from("(\n");
@@ -294,8 +307,16 @@ fn wrap_with(kind: OpKind, body: &str, id: usize, nonce: &str, record: bool) -> 
         // Only a group or user op sets `created`; other kinds keep their bytes.
         o.push_str("  case \"$created\" in 1) __tp_k=true;; *) __tp_k=false;; esac\n");
     }
+    if kind == OpKind::Svc {
+        // Only a svc op sets `tp_started` (a start that ran).
+        o.push_str("  case \"${tp_started-}\" in 1) __tp_st=true;; *) __tp_st=false;; esac\n");
+    }
     if record {
-        o.push_str(RECORD);
+        o.push_str(if kind == OpKind::Svc {
+            RECORD_SVC
+        } else {
+            RECORD
+        });
     }
     let _ = writeln!(o, "  printf '\\n__tp_{nonce} {id} {}\\n' {args}", json);
     o.push_str("}\ntrap '__tp_emit $?' EXIT\nrc=0; changed=0; skipped=0; installed=()\n");

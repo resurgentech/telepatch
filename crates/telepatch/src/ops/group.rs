@@ -47,16 +47,18 @@ impl Deref for GroupHandle {
     }
 }
 
+crate::host::op_builders!(GroupHandle);
+
 impl GroupHandle {
     /// Create the group as a system group (`groupadd -r`).
     #[track_caller]
-    pub fn system(&self) -> &Self {
+    pub fn system(&self) -> Self {
         self.0.edit(|op| {
             if let OpSpec::Group(g) = &mut op.spec {
                 g.system = true;
             }
         });
-        self
+        self.clone()
     }
 }
 

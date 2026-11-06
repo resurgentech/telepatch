@@ -42,9 +42,10 @@
 //! state (the package may arrive earlier in the same window).
 //!
 //! A unit written by `h.unit` that changed forces one `systemctl
-//! daemon-reload` before the next `svc` op on a booted host
-//! ([`SvcSpec::render_exec_reload`]); the `NeedDaemonReload` check above
-//! stays for units the run did not write.
+//! daemon-reload` on a booted host, before the next `svc` op in its window
+//! ([`SvcSpec::render_exec_reload`]) or, with none, at the window's end
+//! (the executor's flush); the `NeedDaemonReload` check above stays for
+//! units the run did not write.
 //!
 //! # Restart and reload
 //!
@@ -58,8 +59,10 @@
 //! systemd says `NeedDaemonReload=yes`. Not booted, or no `systemctl`: the
 //! action is skipped. Equal guarded actions of one unit merge with their
 //! guards or-joined ([`crate::optimize`]); a restart or reload of a unit an
-//! earlier op of the run started is skipped (the executor and-nots that
-//! op's `changed` into the guard, [`crate::executor`]).
+//! earlier op of the run started is skipped: the op wants `.started()`,
+//! the unit was not active and it started it (the trailer's `started`; the
+//! executor and-nots it into the guard, [`crate::executor`]). An earlier
+//! op that only enabled a running unit does not skip it.
 
 use std::ops::Deref;
 
@@ -191,11 +194,12 @@ impl SvcSpec {
         self.script(true, false)
     }
 
-    /// [`SvcSpec::render_exec`] for a host where the run writes units
-    /// (`h.unit`): first, when the root shell's window flag `__tp_dr` is
-    /// `1` (a unit changed) and systemd is running, one `systemctl
-    /// daemon-reload`; a failed reload fails the op with its rc. The
-    /// executor clears the flag after the op ran.
+    /// [`SvcSpec::render_exec`] for a `svc` op after a `unit` op in its
+    /// window: first, when the root shell's window flag `__tp_dr` is `1` (a
+    /// unit changed) and systemd is running, one `systemctl daemon-reload`;
+    /// a failed reload fails the op with its rc. The executor clears the
+    /// flag after the op ran, and flushes it at the window's end when no
+    /// svc op ran after the change.
     pub fn render_exec_reload(&self) -> String {
         self.script(true, true)
     }
@@ -305,7 +309,15 @@ impl SvcSpec {
                 "        if [ \"$rc\" -eq 0 ]; then\n",
                 "          systemctl start -- \"$tp_u\"\n",
                 "          rc=$?\n",
-                "          if [ \"$rc\" -eq 0 ]; then changed=1; fi\n",
+            ));
+            // As sent, a start that ran also says so (`tp_started`, the
+            // trailer's `started`); the plan shows the plain script.
+            s.push_str(if capture {
+                "          if [ \"$rc\" -eq 0 ]; then changed=1; tp_started=1; fi\n"
+            } else {
+                "          if [ \"$rc\" -eq 0 ]; then changed=1; fi\n"
+            });
+            s.push_str(concat!(
                 "        fi\n",
                 "      fi\n",
                 "    else\n",
@@ -342,61 +354,63 @@ impl Deref for SvcHandle {
     }
 }
 
+crate::host::op_builders!(SvcHandle);
+
 impl SvcHandle {
     /// Want the unit enabled (`systemctl enable`).
     #[track_caller]
-    pub fn enabled(&self) -> &Self {
+    pub fn enabled(&self) -> Self {
         self.0.edit(|op| {
             if let OpSpec::Svc(s) = &mut op.spec {
                 s.enabled = true;
             }
         });
-        self
+        self.clone()
     }
 
     /// Want the unit disabled (`systemctl disable`): an enabled unit is
     /// disabled; a masked, static or missing one is left as it is.
     #[track_caller]
-    pub fn disabled(&self) -> &Self {
+    pub fn disabled(&self) -> Self {
         self.0.edit(|op| {
             if let OpSpec::Svc(s) = &mut op.spec {
                 s.disabled = true;
             }
         });
-        self
+        self.clone()
     }
 
     /// Want the unit masked (`systemctl mask`).
     #[track_caller]
-    pub fn masked(&self) -> &Self {
+    pub fn masked(&self) -> Self {
         self.0.edit(|op| {
             if let OpSpec::Svc(s) = &mut op.spec {
                 s.masked = true;
             }
         });
-        self
+        self.clone()
     }
 
     /// Want the unit stopped (`systemctl stop`).
     #[track_caller]
-    pub fn stopped(&self) -> &Self {
+    pub fn stopped(&self) -> Self {
         self.0.edit(|op| {
             if let OpSpec::Svc(s) = &mut op.spec {
                 s.stopped = true;
             }
         });
-        self
+        self.clone()
     }
 
     /// Want the unit started (`systemctl start`).
     #[track_caller]
-    pub fn started(&self) -> &Self {
+    pub fn started(&self) -> Self {
         self.0.edit(|op| {
             if let OpSpec::Svc(s) = &mut op.spec {
                 s.started = true;
             }
         });
-        self
+        self.clone()
     }
 
     /// Restart the unit (`systemctl restart`, which also starts an
@@ -404,34 +418,34 @@ impl SvcHandle {
     /// [`SvcHandle::restart_on`]; unguarded is the policy error
     /// `UnguardedRestart`. On an op of its own.
     #[track_caller]
-    pub fn restart(&self) -> &Self {
+    pub fn restart(&self) -> Self {
         self.0.edit(|op| {
             if let OpSpec::Svc(s) = &mut op.spec {
                 s.restart = true;
             }
         });
-        self
+        self.clone()
     }
 
     /// Reload the unit (`systemctl reload`; an inactive unit is started).
     /// An action, guarded as [`SvcHandle::restart`].
     #[track_caller]
-    pub fn reload(&self) -> &Self {
+    pub fn reload(&self) -> Self {
         self.0.edit(|op| {
             if let OpSpec::Svc(s) = &mut op.spec {
                 s.reload = true;
             }
         });
-        self
+        self.clone()
     }
 
     /// `.restart().when(op.changed())`, for any op handle. Like `.when`,
     /// it replaces a guard set before.
     #[track_caller]
-    pub fn restart_on(&self, op: &OpHandle) -> &Self {
+    pub fn restart_on(&self, op: &OpHandle) -> Self {
         self.restart();
         self.0.when(op.changed());
-        self
+        self.clone()
     }
 }
 

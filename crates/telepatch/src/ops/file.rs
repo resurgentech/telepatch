@@ -239,26 +239,28 @@ impl Deref for FileHandle {
     }
 }
 
+crate::host::op_builders!(FileHandle);
+
 impl FileHandle {
-    fn spec(&self, f: impl FnOnce(&mut FileSpec)) -> &Self {
+    fn spec(&self, f: impl FnOnce(&mut FileSpec)) -> Self {
         self.0.edit(|op| {
             if let OpSpec::File(s) = &mut op.spec {
                 f(s);
             }
         });
         self.0.refresh_effects();
-        self
+        self.clone()
     }
 
     /// Ensure this exact line is present, appending if missing.
     #[track_caller]
-    pub fn line(&self, line: &str) -> &Self {
+    pub fn line(&self, line: &str) -> Self {
         self.spec(|s| s.lines.push(LineOp::Line(line.to_string())))
     }
     /// Replace the last line matching `re` (an ERE, `grep -E`) with `line`,
     /// or append it when none matches.
     #[track_caller]
-    pub fn line_re(&self, re: &str, line: &str) -> &Self {
+    pub fn line_re(&self, re: &str, line: &str) -> Self {
         self.spec(|s| {
             s.lines.push(LineOp::LineRe {
                 re: re.to_string(),
@@ -268,17 +270,17 @@ impl FileHandle {
     }
     /// Ensure a directory.
     #[track_caller]
-    pub fn dir(&self) -> &Self {
+    pub fn dir(&self) -> Self {
         self.spec(|s| s.kind = FileKind::Dir)
     }
     /// Ensure the path does not exist (removes directories recursively).
     #[track_caller]
-    pub fn absent(&self) -> &Self {
+    pub fn absent(&self) -> Self {
         self.spec(|s| s.kind = FileKind::Absent)
     }
     /// Ensure exactly these bytes.
     #[track_caller]
-    pub fn content(&self, bytes: impl AsRef<[u8]>) -> &Self {
+    pub fn content(&self, bytes: impl AsRef<[u8]>) -> Self {
         let b = bytes.as_ref().to_vec();
         self.spec(|s| s.content = Some(b))
     }
@@ -288,23 +290,23 @@ impl FileHandle {
     /// error. A non-zero exit fails the op with that rc and leaves the
     /// target untouched.
     #[track_caller]
-    pub fn validate(&self, cmd: &str) -> &Self {
+    pub fn validate(&self, cmd: &str) -> Self {
         if !cmd.contains("%s") {
             self.0.record_error(TraceError::new(format!(
                 "file validate command has no %s: {cmd}"
             )));
-            return self;
+            return self.clone();
         }
         let c = cmd.to_string();
         self.spec(|s| s.validate = Some(c))
     }
     #[track_caller]
-    pub fn mode(&self, mode: u32) -> &Self {
+    pub fn mode(&self, mode: u32) -> Self {
         self.spec(|s| s.mode = Some(mode))
     }
     /// `"user"`, `"user:group"` or `":group"`.
     #[track_caller]
-    pub fn owner(&self, owner: &str) -> &Self {
+    pub fn owner(&self, owner: &str) -> Self {
         self.spec(|s| s.owner = Some(owner.to_string()))
     }
 }

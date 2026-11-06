@@ -508,7 +508,7 @@ fn a_restart_after_a_start_in_an_earlier_window_is_skipped() {
         .find(|o| o.desc.contains("restart"))
         .expect("restart op");
     assert_eq!(op.outcome, Outcome::Skipped, "{out1}");
-    assert_eq!(op.when.as_deref(), Some("changed(#2) & !changed(#0)"));
+    assert_eq!(op.when.as_deref(), Some("changed(#2) & !started(#0)"));
     // The start settled; a config change now restarts.
     std::fs::write(d.path().join("app.conf"), "old\n").unwrap();
     let (r2, out2) = go(&pb, vec![svc_spec(d.path())]);
@@ -853,4 +853,102 @@ fn guards_cross_principals() {
     assert_eq!(outcome(&r2, "MARK_USER_ON_ROOT"), Outcome::Skipped);
     assert_eq!(outcome(&r2, "MARK_USER_ON_USER"), Outcome::Skipped);
     assert_eq!(outcome(&r2, "MARK_ROOT_ON_USER"), Outcome::Skipped);
+}
+
+// ---- owned handles: the decided API's bindings ----------------------------
+
+/// The op node `id` of `h`'s trace.
+fn node(h: &Host<()>, id: NodeId) -> telepatch::OpNode {
+    match &h.snapshot().nodes[id.0] {
+        telepatch::Node::Op(op) => op.clone(),
+        n => panic!("not an op: {n:?}"),
+    }
+}
+
+#[test]
+fn builders_return_an_owned_handle_so_a_chain_binds() {
+    use telepatch::ops::repo::AptRepo;
+    use telepatch::{OpSpec, Policy};
+    let h = Host::new(
+        "h",
+        telepatch::facts::os::Os::fixture("debian12").unwrap(),
+        Rc::new(()),
+    );
+    // the decided API's shapes, bound as written
+    let daemon = h.file("/etc/docker/daemon.json").content("{}\n");
+    let unit = h
+        .unit("x.service")
+        .content("[Service]\nExecStart=/bin/true\n")
+        .mode(0o644);
+    let restart = h.svc("docker").restart_on(&daemon);
+    let tools = h.pkg(["jq"]).update_cache(true);
+    let bot = h.user("bot").shell("/bin/bash").groups_add(["docker"]);
+    let grp = h.group("docker").system();
+    let repo = h.repo("docker").apt(AptRepo {
+        uris: vec!["https://download.docker.com/linux/debian".into()],
+        suites: vec!["bookworm".into()],
+        components: vec!["stable".into()],
+        key_url: "https://download.docker.com/linux/debian/gpg".into(),
+    });
+    // the shared handle methods keep the handle's type
+    let late = h
+        .svc("late")
+        .restart()
+        .when(unit.changed())
+        .allow(Policy::UnguardedRestart, "why not")
+        .at_end();
+    let _typed: &telepatch::ops::svc::SvcHandle = &late;
+
+    match node(&h, daemon.id()).spec {
+        OpSpec::File(f) => assert_eq!(f.content.as_deref(), Some(&b"{}\n"[..])),
+        s => panic!("{s:?}"),
+    }
+    match node(&h, unit.id()).spec {
+        OpSpec::Unit(u) => assert_eq!(u.mode, Some(0o644)),
+        s => panic!("{s:?}"),
+    }
+    let r = node(&h, restart.id());
+    assert_eq!(r.guard, Some(daemon.changed()));
+    match node(&h, tools.id()).spec {
+        OpSpec::Pkg(p) => assert!(p.update_cache),
+        s => panic!("{s:?}"),
+    }
+    match node(&h, bot.id()).spec {
+        OpSpec::User(u) => assert_eq!(u.shell.as_deref(), Some("/bin/bash")),
+        s => panic!("{s:?}"),
+    }
+    match node(&h, grp.id()).spec {
+        OpSpec::Group(g) => assert!(g.system),
+        s => panic!("{s:?}"),
+    }
+    match node(&h, repo.id()).spec {
+        OpSpec::Repo(r) => assert!(matches!(r.kind, telepatch::ops::repo::RepoKind::Apt(_))),
+        s => panic!("{s:?}"),
+    }
+    let l = node(&h, late.id());
+    assert!(l.at_end);
+    assert_eq!(l.guard, Some(unit.changed()));
+    assert_eq!(l.allowed.len(), 1);
+
+    // a builder called on a bound handle as a statement edits the same node
+    let s = h.svc("sshd");
+    s.reload();
+    s.when(daemon.changed());
+    let n = node(&h, s.id());
+    match &n.spec {
+        OpSpec::Svc(v) => assert!(v.reload),
+        x => panic!("{x:?}"),
+    }
+    assert_eq!(n.guard, Some(daemon.changed()));
+    let f = h.file("/etc/y");
+    f.content("y");
+    f.mode(0o600);
+    match node(&h, f.id()).spec {
+        OpSpec::File(v) => {
+            assert_eq!(v.mode, Some(0o600));
+            assert_eq!(v.content.as_deref(), Some(&b"y"[..]));
+        }
+        x => panic!("{x:?}"),
+    }
+    assert!(h.snapshot().errors.is_empty(), "{:?}", h.snapshot().errors);
 }

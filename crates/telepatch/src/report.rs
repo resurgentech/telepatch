@@ -171,6 +171,31 @@ impl WillCreate {
     }
 }
 
+/// The `systemctl daemon-reload` run at the end of a window, after a
+/// unit changed (`h.unit`) with no `svc` op after it in the window (the
+/// flush; see [`crate::executor`]). Not an op: it is not counted in the
+/// table. A failed one fails the host ([`HostStatus::Failed`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DaemonReload {
+    pub window: usize,
+    pub rc: i32,
+}
+
+impl DaemonReload {
+    /// `window 1: systemd daemon-reload (a unit changed; no svc op after
+    /// it)`, with `: FAILED rc=N` when it failed.
+    pub fn line(&self) -> String {
+        let mut l = format!(
+            "window {}: systemd daemon-reload (a unit changed; no svc op after it)",
+            self.window
+        );
+        if self.rc != 0 {
+            let _ = write!(l, ": FAILED rc={}", self.rc);
+        }
+        l
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HostReport {
     pub name: String,
@@ -185,6 +210,8 @@ pub struct HostReport {
     /// Every `sh!` in the ops the executor received, each site once. Printed
     /// as a warning; never changes the status.
     pub sh_sites: Vec<crate::trace::Site>,
+    /// Each end-of-window `daemon-reload` that ran, in order.
+    pub daemon_reloads: Vec<DaemonReload>,
 }
 
 impl HostReport {
@@ -198,6 +225,7 @@ impl HostReport {
             will_change: Vec::new(),
             will_create: Vec::new(),
             sh_sites: Vec::new(),
+            daemon_reloads: Vec::new(),
         }
     }
 
@@ -289,6 +317,9 @@ impl Report {
             }
             for c in &h.will_create {
                 let _ = writeln!(out, "\n{}: {}", h.name, c.line());
+            }
+            for d in &h.daemon_reloads {
+                let _ = writeln!(out, "\n{}: {}", h.name, d.line());
             }
             for o in &h.ops {
                 for a in &o.allowed {
