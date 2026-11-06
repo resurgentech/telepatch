@@ -84,6 +84,16 @@ test-live-svc:
     bash ../tp_basic/scripts/lib/docker-guard.sh
     cargo test -p telepatch --test live -- --ignored --nocapture svc_
 
+# Live: the unit primitive on ubuntu:24.04 and rockylinux/rockylinux:10 in
+# plain containers with no init: systemd installed by a pkg op, then a unit
+# and a drop-in written and checked by systemd-analyze verify, the unit
+# enabled offline (no daemon-reload without a running systemd); second run
+# must change nothing; a unit verify refuses is not written. Needs docker
+# and the network (apt/dnf).
+test-live-unit:
+    bash ../tp_basic/scripts/lib/docker-guard.sh
+    cargo test -p telepatch --test live -- --ignored --nocapture unit_
+
 # Run a docker recipe of this justfile against the daemon of a fresh 1 GiB
 # tp-* VM, deleted afterwards (../tp_basic/scripts/docker-vm.sh). Every docker
 # recipe refuses to run outside it (exit 2). `just docker-vm test-live-os`

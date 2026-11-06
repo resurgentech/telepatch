@@ -76,6 +76,21 @@
 //! allowed unguarded one; `will restart` when every source is reported and
 //! the guard holds; nothing when it is already false.
 //!
+//! # Units and daemon-reload
+//!
+//! A `unit` op (`h.unit`) is always sent as a guard source, so its
+//! `changed` reaches the parent shell; when it changed, the root shell's
+//! window flag `__tp_dr` is set to `1` (beside `__tp_halt`). Once a host's
+//! run has sent a unit op, every later `svc` op is rendered with
+//! [`crate::ops::svc::SvcSpec::render_exec_reload`]: with the flag set and
+//! systemd running it runs `systemctl daemon-reload` first, and after the
+//! op ran (not when its guard skipped it) the parent shell clears the flag.
+//! So any number of changed units cost one reload, before the next `svc`
+//! op, in this window or a later one (the shell, and its flag, persist);
+//! no unit changed, or no running systemd, no reload. Hosts whose run
+//! writes no unit get the `svc` scripts unchanged; there the per-op
+//! `NeedDaemonReload` check is all there is.
+//!
 //! # Stream
 //!
 //! Each op prints `== host [role] #id desc ==`, its output lines prefixed
@@ -314,6 +329,9 @@ pub struct HostExec {
     subjects: HashMap<NodeId, String>,
     /// The `svc` ops seen so far that want `.started()`: unit key, op id.
     starts: Vec<(String, NodeId)>,
+    /// A `unit` op has been rendered for this host: later `svc` ops carry
+    /// the daemon-reload of a changed unit ("Units and daemon-reload").
+    units: bool,
 }
 
 /// What a guard can know about a reported op.
@@ -415,10 +433,24 @@ fn source_vars(w: &WindowOp) -> String {
     o
 }
 
+/// After a `unit` op sent as a source: a change sets the window flag.
+const UNIT_FLAG: &str = "if [ \"$__tp_rc\" -eq 0 ] && [ \"$__tp_x\" = true ]; then __tp_dr=1; fi\n";
+
+/// After a `svc` op that carries the daemon-reload: the flag is spent.
+const UNIT_FLAG_CLEAR: &str = "__tp_dr=0\n";
+
 /// `w`'s script as sent: inside the halt gate; inside its guard's test
 /// when it has one; as a guard source (`source`: a guard later in the run
-/// reads it) with the result variables set after it.
-fn gate(w: &WindowOp, script: &str, nonce: &str, test: Option<&str>, source: bool) -> String {
+/// reads it) with the result variables set after it; then `after`, in the
+/// parent shell, only when the op ran.
+fn gate(
+    w: &WindowOp,
+    script: &str,
+    nonce: &str,
+    test: Option<&str>,
+    source: bool,
+    after: &str,
+) -> String {
     let id = w.id.0;
     let kind = w.node.spec.op_kind();
     let run = if source {
@@ -439,6 +471,7 @@ fn gate(w: &WindowOp, script: &str, nonce: &str, test: Option<&str>, source: boo
         };
         format!("{script}{set}")
     };
+    let run = format!("{run}{after}");
     let not_run = if source {
         assign(w, 0, 0)
     } else {
@@ -479,6 +512,7 @@ fn subject(w: &WindowOp, m: &crate::engine::Member) -> String {
         }
         OpSpec::File(f) => format!("file {}", f.path),
         OpSpec::Svc(s) => format!("svc {}", s.key_name()),
+        OpSpec::Unit(u) => format!("unit {}", u.rel()),
         _ => describe(&w.node),
     }
 }
@@ -607,6 +641,14 @@ fn describe(op: &OpNode) -> String {
             Some(a) => format!("svc {} {}", s.unit, a.name()),
             None => format!("svc {}", s.unit),
         },
+        OpSpec::Unit(u) => {
+            let what = match (&u.drop_in, u.absent) {
+                (_, true) => "absent",
+                (Some(_), false) => "drop-in",
+                (None, false) => "content",
+            };
+            format!("unit {} {what}", u.rel())
+        }
         OpSpec::File(f) => {
             use crate::ops::file::FileKind;
             let what = match f.kind {
@@ -690,6 +732,7 @@ impl HostExec {
             known: HashMap::new(),
             subjects: HashMap::new(),
             starts: Vec::new(),
+            units: false,
         }
     }
 
@@ -1132,25 +1175,43 @@ impl Executor for HostExec {
                 .flat_map(|g| g.sources())
                 .collect();
             for (i, w) in window.ops.iter().enumerate().take(e).skip(s) {
-                source[i] = w.members.iter().any(|m| read.contains(&m.id));
+                // A unit op's `changed` sets the window flag.
+                source[i] = w.members.iter().any(|m| read.contains(&m.id))
+                    || matches!(w.node.spec, OpSpec::Unit(_));
             }
         }
 
         // Render each op for its principal's shell (open now).
         let mut scripts = Vec::new();
+        let mut afters = Vec::new();
         for (i, w) in window.ops.iter().enumerate() {
+            let daemon_reload = self.units && matches!(w.node.spec, OpSpec::Svc(_));
+            afters.push(match &w.node.spec {
+                OpSpec::Unit(_) => UNIT_FLAG,
+                OpSpec::Svc(_) if daemon_reload => UNIT_FLAG_CLEAR,
+                _ => "",
+            });
+            if matches!(w.node.spec, OpSpec::Unit(_)) {
+                self.units = true;
+            }
             let who = &w.node.run_as.principal;
             let Some(sh) = self.shell_for(who) else {
                 let why = format!("op #{}: no shell open for {who:?}", w.id.0);
                 self.block(why.clone());
                 return Err(why);
             };
-            let render = if source[i] {
-                crate::trailer::render_source_for
-            } else {
-                crate::trailer::render_for
+            let opts = crate::trailer::RenderOpts {
+                source: source[i],
+                daemon_reload,
             };
-            match render(&w.node, w.id.0, sh.nonce(), &host.os, sh.user()) {
+            match crate::trailer::render_with(
+                &w.node,
+                w.id.0,
+                sh.nonce(),
+                &host.os,
+                sh.user(),
+                opts,
+            ) {
                 Ok(s) => scripts.push(s),
                 Err(e) => {
                     let why = format!("op #{}: {e}", w.id.0);
@@ -1203,7 +1264,14 @@ impl Executor for HostExec {
                     .guard
                     .as_ref()
                     .map(|g| guard_test(g, &self.known, &in_run));
-                gated.push(gate(w, &scripts[i], &nonce, test.as_deref(), source[i]));
+                gated.push(gate(
+                    w,
+                    &scripts[i],
+                    &nonce,
+                    test.as_deref(),
+                    source[i],
+                    afters[i],
+                ));
                 in_run.extend(w.members.iter().map(|m| m.id));
             }
             let Some(sh) = self.shell_for(&who) else {

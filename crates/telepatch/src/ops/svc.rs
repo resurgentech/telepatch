@@ -41,6 +41,11 @@
 //! unit. The decision is made by the script at run time from the host's real
 //! state (the package may arrive earlier in the same window).
 //!
+//! A unit written by `h.unit` that changed forces one `systemctl
+//! daemon-reload` before the next `svc` op on a booted host
+//! ([`SvcSpec::render_exec_reload`]); the `NeedDaemonReload` check above
+//! stays for units the run did not write.
+//!
 //! # Restart and reload
 //!
 //! `.restart()` and `.reload()` are actions, on an op of their own (with a
@@ -94,6 +99,15 @@ const CAPTURE: &str = concat!(
     "  case \"$tp_ue\" in enabled|enabled-runtime|static|alias) tp_was_e=true;; ?*) tp_was_e=false;; esac\n",
     "  case \"$tp_ue\" in masked|masked-runtime) tp_was_m=true;; ?*) tp_was_m=false;; esac\n",
     "  case \"$tp_as\" in active) tp_was_a=true;; ?*) tp_was_a=false;; esac\n",
+);
+
+/// Run in the script's `else` (systemctl exists), first, on a host where
+/// the run writes units: the one `daemon-reload` a changed unit asks for
+/// (`__tp_dr`, set in the parent shell; see [`crate::executor`]).
+const RELOAD: &str = concat!(
+    "  if [ \"${__tp_dr-0}\" = 1 ] && [ -d \"$tp_run\" ]; then\n",
+    "    systemctl daemon-reload || exit $?\n",
+    "  fi\n",
 );
 
 /// A guarded action on a unit: `.restart()` or `.reload()`.
@@ -167,21 +181,33 @@ impl SvcSpec {
 
     /// The op's script as the plan shows it.
     pub fn render(&self) -> String {
-        self.script(false)
+        self.script(false, false)
     }
 
     /// The script as sent to the host: [`SvcSpec::render`] plus the capture
     /// of the unit's state before anything changes (the trailer's
     /// `was_enabled`, `was_active` and `was_masked`: the inverse data).
     pub fn render_exec(&self) -> String {
-        self.script(true)
+        self.script(true, false)
     }
 
-    fn script(&self, capture: bool) -> String {
+    /// [`SvcSpec::render_exec`] for a host where the run writes units
+    /// (`h.unit`): first, when the root shell's window flag `__tp_dr` is
+    /// `1` (a unit changed) and systemd is running, one `systemctl
+    /// daemon-reload`; a failed reload fails the op with its rc. The
+    /// executor clears the flag after the op ran.
+    pub fn render_exec_reload(&self) -> String {
+        self.script(true, true)
+    }
+
+    fn script(&self, capture: bool, reload: bool) -> String {
         let mut s = format!(
             "tp_u={}\ntp_run=\"${{TP_SVC_RUNDIR:-/run/systemd/system}}\"\ntp_skip=0\nif ! command -v systemctl >/dev/null 2>&1; then\n  skipped=1\nelse\n",
             quote(&self.unit)
         );
+        if reload {
+            s.push_str(RELOAD);
+        }
         if capture {
             s.push_str(CAPTURE);
         }

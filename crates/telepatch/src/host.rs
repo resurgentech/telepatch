@@ -368,9 +368,10 @@ impl OpHandle {
 }
 
 /// Errors derived from the finished ops rather than recorded: an `svc`
-/// that wants nothing, a policy an op trips and does not allow.
+/// or `unit` that wants nothing, a policy an op trips and does not allow.
 fn derived_errors(t: &Trace) -> Vec<TraceError> {
     let mut v = crate::ops::svc::nothing_wanted(t);
+    v.extend(crate::ops::unit::errors(t));
     v.extend(crate::policy::violations(t));
     v.extend(crate::trace::guard_errors(t));
     v

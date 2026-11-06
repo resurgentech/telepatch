@@ -3,6 +3,7 @@
 //! except the guard checks, which reach no daemon;
 //! run with `just test-live-os`, `just test-live-pkg`, `just test-live-mise`,
 //! `just test-live-user`, `just test-live-repo`, `just test-live-svc`,
+//! `just test-live-unit`,
 //! `just test-live-ssh`.
 
 mod container;
@@ -13,6 +14,7 @@ mod repo;
 mod ssh_exec;
 mod sshd;
 mod svc;
+mod unit;
 mod user;
 
 use std::path::Path;

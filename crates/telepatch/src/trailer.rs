@@ -202,16 +202,29 @@ __tp_emit() {
 /// The full script for one op: body wrapped in the trailer subshell.
 /// `id` is the op's trace index; `nonce` is random per run.
 pub fn render_op(op: &OpNode, id: usize, nonce: &str, os: &Os) -> String {
-    render_op_with(op, id, nonce, os, false)
+    render_op_with(op, id, nonce, os, RenderOpts::default())
 }
 
-fn render_op_with(op: &OpNode, id: usize, nonce: &str, os: &Os, record: bool) -> String {
+/// How [`render_with`] renders an op beyond its spec.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RenderOpts {
+    /// A guard later in the run reads this op: see [`render_source_for`].
+    pub source: bool,
+    /// The run writes units (`h.unit`): a `svc` op first runs the one
+    /// `daemon-reload` a changed unit asks for
+    /// ([`crate::ops::svc::SvcSpec::render_exec_reload`]). Other ops
+    /// ignore it.
+    pub daemon_reload: bool,
+}
+
+fn render_op_with(op: &OpNode, id: usize, nonce: &str, os: &Os, opts: RenderOpts) -> String {
     let body = match &op.spec {
         crate::trace::OpSpec::Raw { script } => crate::ops::shell::raw_body(script),
+        crate::trace::OpSpec::Svc(s) if opts.daemon_reload => s.render_exec_reload(),
         crate::trace::OpSpec::Svc(s) => s.render_exec(),
         spec => spec.exec_script(os),
     };
-    wrap_with(op.spec.op_kind(), &body, id, nonce, record)
+    wrap_with(op.spec.op_kind(), &body, id, nonce, opts.source)
 }
 
 /// Wrap `body` (which sets `rc` / `changed` / ...) in the trailer subshell
@@ -334,7 +347,7 @@ pub fn render_for(
     os: &Os,
     shell_user: &str,
 ) -> Result<String, RenderError> {
-    render_for_with(op, id, nonce, os, shell_user, false)
+    render_with(op, id, nonce, os, shell_user, RenderOpts::default())
 }
 
 /// [`render_for`] for an op a guard in the same run reads: its trailer
@@ -347,18 +360,31 @@ pub fn render_source_for(
     os: &Os,
     shell_user: &str,
 ) -> Result<String, RenderError> {
-    render_for_with(op, id, nonce, os, shell_user, true)
+    render_with(
+        op,
+        id,
+        nonce,
+        os,
+        shell_user,
+        RenderOpts {
+            source: true,
+            daemon_reload: false,
+        },
+    )
 }
 
-fn render_for_with(
+/// [`render_for`] with [`RenderOpts`]. A login op gets `__tp_f` (a source)
+/// and `__tp_dr` (the unit flag) through its `env -i`.
+pub fn render_with(
     op: &OpNode,
     id: usize,
     nonce: &str,
     os: &Os,
     shell_user: &str,
-    record: bool,
+    opts: RenderOpts,
 ) -> Result<String, RenderError> {
-    let plain = render_op_with(op, id, nonce, os, record);
+    let record = opts.source;
+    let plain = render_op_with(op, id, nonce, os, opts);
     if !op.run_as.login {
         return Ok(plain);
     }
@@ -380,7 +406,13 @@ fn render_for_with(
         nonce,
         record,
     );
-    let pass = if record { "__tp_f=\"${__tp_f-}\" " } else { "" };
+    let mut pass = String::new();
+    if record {
+        pass.push_str("__tp_f=\"${__tp_f-}\" ");
+    }
+    if opts.daemon_reload && matches!(op.spec, crate::trace::OpSpec::Svc(_)) {
+        pass.push_str("__tp_dr=\"${__tp_dr-}\" ");
+    }
     Ok(format!(
         "(\n__tp_pw=$(getent passwd {q}) || __tp_pw=\n\
          if [ -z \"$__tp_pw\" ]; then\n{failed}else\n\

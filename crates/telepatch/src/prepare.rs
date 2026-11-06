@@ -284,10 +284,42 @@ pub fn svc_after_installers(window: &Window) -> bool {
             // A restart or reload is not probed (not a want).
             OpSpec::Svc(s) if s.action().is_some() => {}
             OpSpec::Svc(_) => return false,
-            OpSpec::Pkg(_) | OpSpec::Shell(_) | OpSpec::Raw { .. } | OpSpec::File(_) => {
+            // A unit op writes the unit a later svc op names.
+            OpSpec::Pkg(_)
+            | OpSpec::Shell(_)
+            | OpSpec::Raw { .. }
+            | OpSpec::File(_)
+            | OpSpec::Unit(_) => {
                 return true;
             }
             OpSpec::Group(_) | OpSpec::User(_) | OpSpec::Repo(_) => {}
+        }
+    }
+    false
+}
+
+/// The window's `unit` ops, in window order.
+pub fn unit_specs(window: &Window) -> Vec<&crate::ops::unit::UnitSpec> {
+    window
+        .ops
+        .iter()
+        .filter_map(|op| match &op.node.spec {
+            OpSpec::Unit(u) => Some(u),
+            _ => None,
+        })
+        .collect()
+}
+
+/// True when an op that can install software comes before the window's
+/// first `unit` op: a missing `systemd-analyze` may exist by run time.
+pub fn unit_after_installers(window: &Window) -> bool {
+    for op in &window.ops {
+        match &op.node.spec {
+            OpSpec::Unit(_) => return false,
+            OpSpec::Pkg(_) | OpSpec::Shell(_) | OpSpec::Raw { .. } | OpSpec::File(_) => {
+                return true;
+            }
+            _ => {}
         }
     }
     false
@@ -474,6 +506,22 @@ pub async fn prepare_window<S: ShellSet>(
         root.send(id, &w).await.map_err(|e| e.to_string())?;
         svc_id = Some(id);
     }
+    // Unit files, one probe for the window, on the root shell (a unit op
+    // is root only). Gathered, never asserted.
+    let mut unit_id = None;
+    let unit_list = unit_specs(window);
+    if !unit_list.is_empty() {
+        let id = next();
+        let root = shell_of(shells, &Principal::Root)?;
+        let w = wrap(
+            OpKind::Sh,
+            &crate::ops::shell::raw_body(&crate::ops::unit::probe(&unit_list)),
+            id,
+            root.nonce(),
+        );
+        root.send(id, &w).await.map_err(|e| e.to_string())?;
+        unit_id = Some(id);
+    }
     // Non-distro probes, each in its op's RunAs and principal's shell (as
     // `read_facts` does).
     let mut src_ids: Vec<(&PkgSpec, &Principal, Option<usize>)> = Vec::new();
@@ -571,6 +619,21 @@ pub async fn prepare_window<S: ShellSet>(
                     kind: "repo".to_string(),
                     name,
                     detail: Some("will add".to_string()),
+                });
+            }
+        }
+    }
+    if let Some(id) = unit_id {
+        // Gather only: a failed probe reports nothing.
+        let root = shell_of(shells, &Principal::Root)?;
+        if let Ok((_, out)) = collect(root, id).await {
+            let earlier = unit_after_installers(window);
+            for (name, detail) in crate::ops::unit::findings(&unit_list, &out, earlier) {
+                will.will_create.push(WillCreate {
+                    window: window.number,
+                    kind: "unit".to_string(),
+                    name,
+                    detail: Some(detail),
                 });
             }
         }

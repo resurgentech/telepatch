@@ -86,6 +86,8 @@ pub enum OpSpec {
     Repo(crate::ops::repo::RepoSpec),
     /// A systemd unit enabled and/or started (`h.svc`).
     Svc(crate::ops::svc::SvcSpec),
+    /// A unit file or drop-in under `/etc/systemd/system` (`h.unit`).
+    Unit(crate::ops::unit::UnitSpec),
 }
 
 impl OpSpec {
@@ -99,6 +101,7 @@ impl OpSpec {
             OpSpec::User(_) => "user",
             OpSpec::Repo(_) => "repo",
             OpSpec::Svc(_) => "svc",
+            OpSpec::Unit(_) => "unit",
         }
     }
 
@@ -113,6 +116,8 @@ impl OpSpec {
             OpSpec::User(_) => OpKind::User,
             OpSpec::Repo(_) => OpKind::Repo,
             OpSpec::Svc(_) => OpKind::Svc,
+            // A unit is a file: its result is `rc` and `changed`.
+            OpSpec::Unit(_) => OpKind::File,
         }
     }
 
@@ -137,6 +142,7 @@ impl OpSpec {
             OpSpec::Group(g) => g.render(),
             OpSpec::Repo(r) => r.render(),
             OpSpec::Svc(s) => s.render(),
+            OpSpec::Unit(u) => u.render(),
         }
     }
 
@@ -150,6 +156,7 @@ impl OpSpec {
             OpSpec::User(u) => BTreeSet::from([Key::user(&u.name)]),
             OpSpec::Repo(r) => r.default_writes(),
             OpSpec::Svc(s) => BTreeSet::from([Key::svc(s.key_name())]),
+            OpSpec::Unit(u) => u.default_writes(),
         }
     }
 
@@ -167,6 +174,7 @@ impl OpSpec {
             OpSpec::User(u) => BTreeMap::from([(Key::user(&u.name), Value::Exists(true))]),
             OpSpec::Repo(r) => r.default_post(),
             OpSpec::Svc(s) => BTreeMap::from([(Key::svc(s.key_name()), Value::Exists(true))]),
+            OpSpec::Unit(u) => u.default_post(),
         }
     }
 }
