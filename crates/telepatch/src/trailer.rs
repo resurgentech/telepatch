@@ -434,6 +434,9 @@ pub fn render_with(
     if opts.daemon_reload && matches!(op.spec, crate::trace::OpSpec::Svc(_)) {
         pass.push_str("__tp_dr=\"${__tp_dr-}\" ");
     }
+    if plain.contains("$__tp_run") {
+        pass.push_str("__tp_run=\"${__tp_run-}\" ");
+    }
     Ok(format!(
         "(\n__tp_pw=$(getent passwd {q}) || __tp_pw=\n\
          if [ -z \"$__tp_pw\" ]; then\n{failed}else\n\

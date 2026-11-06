@@ -586,3 +586,48 @@ mod sectioned {
         }
     }
 }
+
+/// No snapshot body carries a `<hex>-<pid>` run id (`<nanos hex>-<pid>`):
+/// a per-process value in a plan fails the second process, and this finds
+/// it in every snapshot, not only the ones that run twice.
+#[test]
+fn no_snapshot_carries_a_run_id() {
+    fn walk(d: &std::path::Path, out: &mut Vec<PathBuf>) {
+        for e in std::fs::read_dir(d).unwrap() {
+            let p = e.unwrap().path();
+            if p.is_dir() {
+                walk(&p, out);
+            } else if p.extension().is_some_and(|x| x == "snap") {
+                out.push(p);
+            }
+        }
+    }
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests");
+    let mut snaps = Vec::new();
+    walk(&root.join("snapshots"), &mut snaps);
+    walk(&root.join("adversarial/snapshots"), &mut snaps);
+    assert!(snaps.len() > 50, "found only {} snapshots", snaps.len());
+    // 11+ hex digits, a dash, a pid, bounded by non-word characters.
+    let is_hex = |c: char| c.is_ascii_hexdigit();
+    let mut hits = Vec::new();
+    for p in &snaps {
+        let text = std::fs::read_to_string(p).unwrap();
+        // The body is after the second `---` of the header.
+        let body = text.splitn(3, "---").nth(2).unwrap_or(&text);
+        for tok in body.split(|c: char| !(c.is_ascii_alphanumeric() || c == '-')) {
+            if let Some((h, pid)) = tok.split_once('-')
+                && h.len() >= 11
+                && h.chars().all(is_hex)
+                && !pid.is_empty()
+                && pid.chars().all(|c| c.is_ascii_digit())
+            {
+                hits.push(format!("{}: {tok}", p.display()));
+            }
+        }
+    }
+    assert!(
+        hits.is_empty(),
+        "run ids in snapshots:\n{}",
+        hits.join("\n")
+    );
+}

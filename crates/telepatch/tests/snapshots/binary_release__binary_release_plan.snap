@@ -1,0 +1,118 @@
+---
+source: crates/telepatch/tests/binary_release.rs
+expression: plan
+---
+host debian12 (os: Debian/Debian 12)
+blocking reads: 0
+
+window 1 (final)
+role (none)
+  #0 pkg[binary_release] as shell:root reads [] writes [*] post [pkg:binary_release:root:go=Installed, file:/usr/local/go/bin/go=Exists(true)]
+      | rc=0; changed=0; installed=()
+      | tp_name='go'
+      | tp_cd="${TP_FETCH_CACHE:-/var/cache/telepatch/sha256}"
+      | tp_sd="${TP_FETCH_STAGE:-/var/tmp/telepatch}"
+      | tp_run="$tp_sd"/"$__tp_run"
+      | tp_dec="$tp_run/br-$(printf %s "$tp_name" | sha256sum | cut -c1-32)"
+      | tp_tok() { grep -oE '[0-9]+(\.[0-9A-Za-z+~-]+)*' | head -n1; }
+      | if [ -f "$tp_dec" ]; then
+      | read -r tp_s tp_want tp_f < "$tp_dec"
+      | rm -f -- "$tp_dec"
+      | if [ ! -f "$tp_f" ]; then echo "telepatch: binary_release $tp_name: $tp_f is missing (prepare did not fetch it)" >&2; rc=1; fi
+      | tp_p='/usr/local/go'
+      | if [ "$rc" -eq 0 ]; then mkdir -p -- "$(dirname -- "$tp_p")" || rc=$?; fi
+      | tp_magic() {
+      |   local h
+      |   h=$(head -c 6 "$1" | od -An -tx1 | tr -d ' \n')
+      |   case "$h" in
+      |     1f8b*) echo gz;;
+      |     fd377a585a00) echo xz;;
+      |     28b52ffd*) echo zst;;
+      |     504b0304*|504b0506*) echo zip;;
+      |     *) if [ "$(dd if="$1" bs=1 skip=257 count=5 2>/dev/null)" = ustar ]; then echo tar; else echo unknown; fi;;
+      |   esac
+      | }
+      | tp_n=
+      | if [ "$rc" -eq 0 ]; then
+      |   tp_k=$(tp_magic "$tp_f")
+      |   tp_mk="$tp_s strip=1"
+      |   if [ -e "$tp_p" ] && [ ! -d "$tp_p" ]; then
+      |     echo "telepatch: $tp_p exists and is not a directory" >&2; rc=1
+      |   elif [ -d "$tp_p" ] && [ "$(cat "$tp_p/.telepatch-fetch" 2>/dev/null)" = "$tp_mk" ]; then
+      |     :
+      |   else
+      |     tp_n=$(mktemp -d "$tp_p.tpXXXXXX") || rc=$?
+      |     if [ "$rc" -eq 0 ]; then
+      |       case "$tp_k" in
+      |         zip)
+      |           tp_z="$tp_n.raw"
+      |           mkdir "$tp_z" || rc=$?
+      |           if [ "$rc" -eq 0 ]; then
+      |             if command -v unzip >/dev/null 2>&1; then unzip -q -o "$tp_f" -d "$tp_z" || rc=$?; else bsdtar -xf "$tp_f" -C "$tp_z" || rc=$?; fi
+      |           fi
+      |           if [ "$rc" -eq 0 ]; then
+      |             find "$tp_z" -mindepth 1 -maxdepth 1 -type d -print0 | while IFS= read -r -d '' tp_d; do cp -a "$tp_d"/. "$tp_n"/ || exit 1; done
+      |             rc=${PIPESTATUS[1]}
+      |           fi
+      |           rm -rf "$tp_z";;
+      |         gz|xz|zst|tar) tar -xf "$tp_f" -C "$tp_n" --strip-components=1 --no-same-owner || rc=$?;;
+      |         *) echo "telepatch: $tp_f is not a tar or zip archive" >&2; rc=1;;
+      |       esac
+      |     fi
+      |     if [ "$rc" -eq 0 ]; then printf '%s\n' "$tp_mk" > "$tp_n/.telepatch-fetch" || rc=$?; fi
+      |     if [ "$rc" -eq 0 ]; then
+      |       if [ -d "$tp_p" ]; then chmod --reference="$tp_p" "$tp_n" || rc=$?; else chmod 755 "$tp_n" || rc=$?; fi
+      |     fi
+      |     if [ "$rc" -eq 0 ] && [ -d "$tp_p" ]; then chown --reference="$tp_p" "$tp_n" 2>/dev/null; fi
+      |     if [ "$rc" -eq 0 ]; then
+      |       if [ -d "$tp_p" ]; then
+      |         tp_o="$tp_n.old"
+      |         if mv -- "$tp_p" "$tp_o" && mv -- "$tp_n" "$tp_p"; then
+      |           rm -rf -- "$tp_o"; changed=1
+      |         else
+      |           rc=$?
+      |           if [ ! -e "$tp_p" ]; then mv -- "$tp_o" "$tp_p"; fi
+      |         fi
+      |       elif mv -- "$tp_n" "$tp_p"; then
+      |         changed=1
+      |       else
+      |         rc=$?
+      |       fi
+      |     fi
+      |     if [ -n "$tp_n" ]; then rm -rf -- "$tp_n" "$tp_n.raw"; fi
+      |   fi
+      | fi
+      | case "$tp_f" in "$tp_run"/*) rm -f -- "$tp_f";; esac
+      | rmdir -- "$tp_run" 2>/dev/null
+      | if [ "$rc" -eq 0 ] && [ ! -x '/usr/local/go/bin/go' ]; then echo "telepatch: binary_release $tp_name: "'/usr/local/go/bin/go'" is not an executable after the install" >&2; rc=1; fi
+      | if [ "$rc" -eq 0 ] && [ "$tp_want" != - ]; then
+      |   tp_bd=$(dirname -- '/usr/local/go/bin/go')
+      |   tp_v=$( ( PATH="$tp_bd:$PATH"
+      | go version
+      | ) 2>/dev/null </dev/null | tp_tok)
+      |   if [ "$tp_v" != "$tp_want" ]; then echo "telepatch: binary_release $tp_name: installed ${tp_v:-unknown}, wanted $tp_want" >&2; rc=1; fi
+      | fi
+      | if [ "$changed" = 1 ]; then installed=("$tp_name"); fi
+      | fi
+  #1 file as shell:root reads [] writes [file:/opt/tool/tool.bin] post [file:/opt/tool/tool.bin=Exists(true)]
+      allowed unverified: the test server publishes no sums
+      | rc=0; changed=0
+      | tp_p='/opt/tool/tool.bin'
+      | tp_cd="${TP_FETCH_CACHE:-/var/cache/telepatch/sha256}"
+      | tp_sd="${TP_FETCH_STAGE:-/var/tmp/telepatch}"
+      | tp_f="$tp_sd"/"$__tp_run"/"u-$(printf %s 'https://example.invalid/tool.tar.gz' | sha256sum | cut -c1-32)"
+      | if [ ! -f "$tp_f" ]; then echo "telepatch: fetched file $tp_f is missing (prepare did not fetch it)" >&2; rc=1; fi
+      | if [ "$rc" -eq 0 ]; then tp_s=$(sha256sum "$tp_f" | cut -d' ' -f1); fi
+      | if [ "$rc" -eq 0 ] && [ -d "$tp_p" ]; then echo "telepatch: $tp_p is a directory" >&2; rc=1; fi
+      | if [ "$rc" -eq 0 ] && ! { [ -f "$tp_p" ] && [ "$(sha256sum < "$tp_p" | cut -d' ' -f1)" = "$tp_s" ]; }; then
+      |   tp_t=$(mktemp "$tp_p.tpXXXXXX") || rc=$?
+      |   if [ "$rc" -eq 0 ]; then
+      |     cp -- "$tp_f" "$tp_t" || rc=$?
+      |     if [ "$rc" -eq 0 ]; then
+      |       if [ -e "$tp_p" ]; then chmod --reference="$tp_p" "$tp_t" || rc=$?; else chmod 644 "$tp_t" || rc=$?; fi
+      |     fi
+      |     if [ "$rc" -eq 0 ] && [ -e "$tp_p" ]; then chown --reference="$tp_p" "$tp_t" 2>/dev/null; fi
+      |     if [ "$rc" -eq 0 ]; then mv -f "$tp_t" "$tp_p"; rc=$?; fi
+      |     if [ "$rc" -eq 0 ]; then changed=1; else rm -f "$tp_t"; fi
+      |   fi
+      | fi

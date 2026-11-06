@@ -1413,3 +1413,24 @@ fn the_engine_runs_the_head_then_the_rest_and_a_declined_window_notes_nothing() 
         "{whole}"
     );
 }
+
+fn pb_fetch_plan(h: Host<()>) -> PlaybookFuture {
+    Box::pin(async move {
+        let f = h.fetch("https://example.invalid/tool.bin");
+        h.file("/opt/tool/tool.bin")
+            .from(&f)
+            .allow(Policy::Unverified, "the test server publishes no sums");
+        Ok(())
+    })
+}
+
+/// A no-sum `.from` fetch renders its staging path from `$__tp_run`, so the
+/// plan is the same in every process.
+#[test]
+fn fetch_plan() {
+    let pb = Playbook::new("fetch_plan", pb_fetch_plan);
+    let plan = telepatch::testing::plan_for("debian12", &pb, ());
+    assert!(plan.contains("$__tp_run"), "{plan}");
+
+    insta::assert_snapshot!("fetch_plan", plan);
+}

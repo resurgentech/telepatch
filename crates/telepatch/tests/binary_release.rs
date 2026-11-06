@@ -1236,3 +1236,43 @@ fn a_binary_release_with_no_downloader_and_none_installed_blocks_naming_them() {
         e.assert_clean();
     }
 }
+
+// --- the plan is byte-stable ---
+
+fn pb_plan(h: Host<()>) -> PlaybookFuture {
+    Box::pin(async move {
+        h.pkg(["go"]).binary_release(go_spec()).latest();
+        let f = h.fetch("https://example.invalid/tool.tar.gz");
+        h.file("/opt/tool/tool.bin")
+            .from(&f)
+            .allow(Policy::Unverified, "the test server publishes no sums");
+        Ok(())
+    })
+}
+
+/// The plan of a binary release and a no-sum fetch carries no per-process
+/// value: the snapshot is written once and compared in every later process.
+#[test]
+fn binary_release_plan() {
+    let pb = Playbook::new("br_plan", pb_plan);
+    let plan = telepatch::testing::plan_for("debian12", &pb, ());
+    assert!(plan.contains("$__tp_run"), "{plan}");
+
+    insta::assert_snapshot!("binary_release_plan", plan);
+}
+
+/// A login op that names `$__tp_run` gets it through its `env -i`; one that
+/// does not is rendered as before.
+#[test]
+fn a_login_op_passes_the_run_variable_through_env_i() {
+    let h = host();
+    h.as_user("root").raw("echo \"$__tp_run\"");
+    h.as_user("root").raw("echo plain");
+    let nodes = h.snapshot().nodes;
+    let Node::Op(a) = &nodes[0] else { panic!() };
+    let Node::Op(b) = &nodes[1] else { panic!() };
+    let a = telepatch::trailer::render_for(a, 1, "n0nce", &h.os, "root").unwrap();
+    let b = telepatch::trailer::render_for(b, 2, "n0nce", &h.os, "root").unwrap();
+    assert!(a.contains("env -i __tp_run=\"${__tp_run-}\" HOME="), "{a}");
+    assert!(!b.contains("__tp_run"), "{b}");
+}

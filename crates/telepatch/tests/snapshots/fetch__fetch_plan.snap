@@ -1,0 +1,31 @@
+---
+source: crates/telepatch/tests/fetch.rs
+expression: plan
+---
+host debian12 (os: Debian/Debian 12)
+blocking reads: 0
+
+window 1 (final)
+role (none)
+  #0 file as shell:root reads [] writes [file:/opt/tool/tool.bin] post [file:/opt/tool/tool.bin=Exists(true)]
+      allowed unverified: the test server publishes no sums
+      | rc=0; changed=0
+      | tp_p='/opt/tool/tool.bin'
+      | tp_cd="${TP_FETCH_CACHE:-/var/cache/telepatch/sha256}"
+      | tp_sd="${TP_FETCH_STAGE:-/var/tmp/telepatch}"
+      | tp_f="$tp_sd"/"$__tp_run"/"u-$(printf %s 'https://example.invalid/tool.bin' | sha256sum | cut -c1-32)"
+      | if [ ! -f "$tp_f" ]; then echo "telepatch: fetched file $tp_f is missing (prepare did not fetch it)" >&2; rc=1; fi
+      | if [ "$rc" -eq 0 ]; then tp_s=$(sha256sum "$tp_f" | cut -d' ' -f1); fi
+      | if [ "$rc" -eq 0 ] && [ -d "$tp_p" ]; then echo "telepatch: $tp_p is a directory" >&2; rc=1; fi
+      | if [ "$rc" -eq 0 ] && ! { [ -f "$tp_p" ] && [ "$(sha256sum < "$tp_p" | cut -d' ' -f1)" = "$tp_s" ]; }; then
+      |   tp_t=$(mktemp "$tp_p.tpXXXXXX") || rc=$?
+      |   if [ "$rc" -eq 0 ]; then
+      |     cp -- "$tp_f" "$tp_t" || rc=$?
+      |     if [ "$rc" -eq 0 ]; then
+      |       if [ -e "$tp_p" ]; then chmod --reference="$tp_p" "$tp_t" || rc=$?; else chmod 644 "$tp_t" || rc=$?; fi
+      |     fi
+      |     if [ "$rc" -eq 0 ] && [ -e "$tp_p" ]; then chown --reference="$tp_p" "$tp_t" 2>/dev/null; fi
+      |     if [ "$rc" -eq 0 ]; then mv -f "$tp_t" "$tp_p"; rc=$?; fi
+      |     if [ "$rc" -eq 0 ]; then changed=1; else rm -f "$tp_t"; fi
+      |   fi
+      | fi

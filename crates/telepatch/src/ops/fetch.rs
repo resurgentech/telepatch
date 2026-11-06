@@ -27,9 +27,9 @@
 //!
 //! `<cache>` is `/var/cache/telepatch/sha256` and `<stage>` is
 //! `/var/tmp/telepatch`; `TP_FETCH_CACHE` and `TP_FETCH_STAGE` override them
-//! (tests). `<run>` is [`run_id`]: one per process. Nothing is written
-//! under `/tmp`: every temporary lives in the staging directory or beside
-//! its target.
+//! (tests). `<run>` is `"$__tp_run"`, set by the executor in each shell
+//! from a per-process id. Nothing is written under `/tmp`: every temporary
+//! lives in the staging directory or beside its target.
 //!
 //! The op scripts ([`render`]) read only the cache entry (or the staged
 //! file): `.from` copies it to a candidate beside the target, with the
@@ -134,8 +134,10 @@ impl<V> Host<V> {
 }
 
 /// The staging directory name of this process: one per run, so two runs on
-/// one host never share one. `<unix nanos in hex>-<pid>`.
-pub fn run_id() -> &'static str {
+/// one host never share one. `<unix nanos in hex>-<pid>`. It never appears
+/// in a rendered script: the executor sets `$__tp_run` to it in each shell
+/// it opens ([`shell_init`]) and the scripts name that variable.
+fn run_id() -> &'static str {
     static ID: OnceLock<String> = OnceLock::new();
     ID.get_or_init(|| {
         let n = std::time::SystemTime::now()
@@ -146,13 +148,20 @@ pub fn run_id() -> &'static str {
     })
 }
 
-/// The `rm` that ends a host's run: the staging directory of [`run_id`].
-pub fn cleanup_script() -> String {
-    format!(
-        "rm -rf -- \"${{TP_FETCH_STAGE:-/var/tmp/telepatch}}\"/{}\n",
-        quote(run_id())
-    )
+/// The script the executor sends once to each shell it opens (root and
+/// login): `__tp_run`, this process's staging subdirectory name.
+pub(crate) fn shell_init() -> String {
+    format!("__tp_run={}\n", quote(run_id()))
 }
+
+/// The `rm` that ends a host's run: the staging directory `$__tp_run`
+/// names (`:?` so an unset variable removes nothing).
+pub fn cleanup_script() -> String {
+    "rm -rf -- \"${TP_FETCH_STAGE:-/var/tmp/telepatch}\"/\"${__tp_run:?}\"\n".to_string()
+}
+
+/// `tp_run`, this run's staging directory, from the shell's `$__tp_run`.
+pub(crate) const TP_RUN: &str = "tp_run=\"$tp_sd\"/\"$__tp_run\"\n";
 
 pub(crate) const LOCATE: &str = "tp_cd=\"${TP_FETCH_CACHE:-/var/cache/telepatch/sha256}\"\ntp_sd=\"${TP_FETCH_STAGE:-/var/tmp/telepatch}\"\n";
 
@@ -227,8 +236,7 @@ pub fn prepare_script(items: &[Item]) -> String {
 pub(crate) fn prelude() -> String {
     let mut s = String::from(LOCATE);
     s.push_str(&format!(
-        "tp_run=\"$tp_sd\"/{}\ntp_dl=\nif command -v curl >/dev/null 2>&1; then tp_dl=curl; elif command -v wget >/dev/null 2>&1; then tp_dl=wget; fi\ntp_keep=0\n",
-        quote(run_id())
+        "{TP_RUN}tp_dl=\nif command -v curl >/dev/null 2>&1; then tp_dl=curl; elif command -v wget >/dev/null 2>&1; then tp_dl=wget; fi\ntp_keep=0\n",
     ));
     s.push_str(MAGIC);
     s.push_str(
@@ -379,8 +387,7 @@ pub fn render(f: &FileSpec, src: &FileSrc, o: &mut String) {
     match &src.fetched.sha256 {
         Some(s) => o.push_str(&format!("tp_s={}\ntp_f=\"$tp_cd/$tp_s\"\n", quote(s))),
         None => o.push_str(&format!(
-            "tp_f=\"$tp_sd\"/{}/\"u-$(printf %s {} | sha256sum | cut -c1-32)\"\n",
-            quote(run_id()),
+            "tp_f=\"$tp_sd\"/\"$__tp_run\"/\"u-$(printf %s {} | sha256sum | cut -c1-32)\"\n",
             quote(&src.fetched.url)
         )),
     }

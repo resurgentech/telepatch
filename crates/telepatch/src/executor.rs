@@ -323,10 +323,14 @@ impl prepare::ShellSet for HostShells {
         if s.got.is_empty() {
             return Err(refusal(&self.target, &self.host, &who, s.limit));
         }
-        let sh = s.got.remove(0);
+        let mut sh = s.got.remove(0);
         // More than asked for is not expected; close the rest.
         for extra in s.got {
             extra.close().await;
+        }
+        if let Err(e) = init_shell(&mut sh).await {
+            sh.close().await;
+            return Err(format!("could not set up the shell for user {u}: {e}"));
         }
         self.users.insert(u.to_string(), sh);
         Ok(())
@@ -539,6 +543,30 @@ fn source_vars(w: &WindowOp) -> String {
     }
     o.push_str("fi\n");
     o
+}
+
+/// What the executor sets once in every shell it opens (root and login):
+/// `__tp_run`, this process's staging subdirectory name, so scripts name
+/// the variable and the plan carries no per-process value. A login op in
+/// a root shell gets it through its `env -i` ([`crate::trailer`]).
+async fn init_shell(shell: &mut Shell) -> Result<(), String> {
+    // An op's wrapper runs its body in a subshell, so the assignment goes
+    // in front of it, in the shell itself; the wrapped no-op is the
+    // handshake that it ran.
+    let ack = crate::trailer::wrap(
+        crate::trailer::OpKind::Sh,
+        &crate::ops::shell::raw_body("true"),
+        0,
+        shell.nonce(),
+    );
+    let script = format!("{}{ack}", crate::ops::fetch::shell_init());
+    shell.send(0, &script).await.map_err(|e| e.to_string())?;
+    let (rc, out) = prepare::collect(shell, 0).await?;
+    if rc == 0 {
+        Ok(())
+    } else {
+        Err(format!("exit {rc}: {out}"))
+    }
 }
 
 /// After a `unit` op sent as a source: a change sets the window flag.
@@ -1813,7 +1841,11 @@ async fn run_one<V: 'static>(
     for extra in shells.got {
         extra.close().await;
     }
-    let os = match read_os(&mut shell).await {
+    let os = match init_shell(&mut shell).await {
+        Ok(()) => read_os(&mut shell).await,
+        Err(e) => Err(e),
+    };
+    let os = match os {
         Ok(os) => os,
         Err(e) => {
             shell.close().await;

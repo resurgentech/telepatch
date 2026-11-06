@@ -432,9 +432,9 @@ impl BinaryRelease {
     pub fn render(&self, name: &str) -> String {
         let mut o = format!("rc=0; changed=0; installed=()\ntp_name={}\n", quote(name));
         o.push_str(fetch::LOCATE);
+        o.push_str(fetch::TP_RUN);
         o.push_str(&format!(
-            "tp_run=\"$tp_sd\"/{}\ntp_dec=\"$tp_run/br-$(printf %s \"$tp_name\" | sha256sum | cut -c1-32)\"\ntp_tok() {{ grep -oE '{VERSION_RE}' | head -n1; }}\n",
-            quote(fetch::run_id())
+            "tp_dec=\"$tp_run/br-$(printf %s \"$tp_name\" | sha256sum | cut -c1-32)\"\ntp_tok() {{ grep -oE '{VERSION_RE}' | head -n1; }}\n",
         ));
         o.push_str("if [ -f \"$tp_dec\" ]; then\n");
         o.push_str(
