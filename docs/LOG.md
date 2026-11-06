@@ -873,3 +873,47 @@ are appended, never edited in; a hook refuses rewrites.
   allowances, each tagged with its member. `just docker-vm
   test-live-fetch` 4/4 (ubuntu, rocky).
 - Commits: telepatch 42d920a
+
+## 2026-11-06 — T83a no cmp on the host; a fetch after the op that installs curl (telepatch, tp_basic)
+
+- File content, line candidates, unit and repo files compare by
+  `sha256sum`; no script needs `cmp` or `diff`. A window whose distro
+  `pkg` op installs curl or wget before a fetch or binary release carries
+  a split candidate, printed in the plan; when prepare finds neither tool
+  the engine applies the head through that op, then prepares the rest as
+  the next window; with a downloader on the host the run is unchanged.
+  tp_basic: 82 plan snapshots move on the comparison line only. `just
+  docker-vm test-live-fetch` 6/6 (ubuntu, rocky; split seen live).
+- Commits: telepatch 0c8db33, cd349ec (the split covers wget: tests); tp_basic 28b9083
+
+## 2026-11-06 — T84 rust_kernel without shell (tp_basic)
+
+- `rust-src` through `s.pkg(["stable"]).rustup().components([..])`,
+  `bindgen-cli` through `.cargo().locked()`; both HACK comments go;
+  `src_repos`'s `sh!` is the one left. The component op does not merge
+  into `rust_build`'s (Present vs Latest in the merge key; a `*` writer
+  between): reported. 13 `latest_kernel_build` snapshots move. `just
+  docker-vm test-container ubuntu2604 latest_kernel_build` identical;
+  `test-idempotent ubuntu2404 rust` CHANGED 0.
+- Commits: tp_basic f8c59b2
+
+## 2026-11-06 — T85 golang on binary_release (tp_basic)
+
+- The decided go example on `binary_release` (`Sum::json`, `Latest::text`,
+  `unpack_to("/usr/local/go").strip(1)`); `INSTALL`, `LATEST` and
+  `tests/golang.rs` go. 13 `dev_desktop` snapshots move: the go op becomes
+  `pkg[binary_release]`, and 7 show T83a's split candidate after
+  `dev_common`'s curl/wget op. `just test-vm ubuntu2404 dev_desktop` PASS
+  at 1 GiB (run 3 CHANGED 0; `go version go1.27.3` as each admin user).
+- Commits: tp_basic b5bd710
+
+## 2026-11-06 — T86 VM proof of service states, units and guarded restarts (tp_basic)
+
+- Test-only playbook `services_vm`: a unit with a drop-in, enabled, started
+  and restarted on its change; a file-guarded reload; a disabled and
+  stopped unit; a masked unit. `just test-vm ubuntu2404 services_vm` PASS
+  at 1 GiB (run 1 restart and reload suppressed by the start; run 2
+  CHANGED 0, both shown skipped; run 3, a changed Description var, one
+  restart, start timestamp moved, one daemon-reload in the journal).
+  `just docker-vm test-services ubuntu2404` PASS with it init-less.
+- Commits: tp_basic 5debb31, 7583ccb
