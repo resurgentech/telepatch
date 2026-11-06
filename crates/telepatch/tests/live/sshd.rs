@@ -1,5 +1,7 @@
-//! Live SSH: an `ubuntu:24.04` container running sshd on a localhost port,
-//! with a throwaway key generated into a temp dir. User `tp` has NOPASSWD
+//! Live SSH: an `ubuntu:24.04` container running sshd, in the daemon of the
+//! tp-* VM `just docker-vm` made, with port 22 published on the VM's address
+//! (`TP_DOCKER_VM_IP`; this machine reaches it over libvirt's NAT network),
+//! and a throwaway key generated into a temp dir here. User `tp` has NOPASSWD
 //! sudo, user `nosudo` has none; both accept the key. Run with
 //! `just test-live-ssh` (needs docker and the network for apt).
 
@@ -51,8 +53,26 @@ async fn serial() -> tokio::sync::MutexGuard<'static, ()> {
     SERIAL.lock().await
 }
 
+/// The `-p` argument that publishes the container's port 22 on the docker
+/// VM's address `ip` (`TP_DOCKER_VM_IP`), so the controller here can reach it.
+/// A loopback address would be the VM's own and unreachable from here.
+pub fn publish_arg(ip: Option<&str>) -> Result<String, String> {
+    let ip = ip.filter(|s| !s.is_empty()).ok_or_else(|| {
+        format!(
+            "{} (TP_DOCKER_VM_IP is not set)",
+            crate::container::DOCKER_VM_MSG
+        )
+    })?;
+    match ip.parse::<std::net::Ipv4Addr>() {
+        Ok(a) if !a.is_loopback() && !a.is_unspecified() => Ok(format!("{a}::22")),
+        _ => Err(format!("TP_DOCKER_VM_IP={ip} is not the VM's IPv4 address")),
+    }
+}
+
 pub struct Sshd {
     pub name: String,
+    /// The docker VM's address the port is published on.
+    pub host: String,
     pub port: u16,
     pub key: PathBuf,
     pub wrong_key: PathBuf,
@@ -67,6 +87,10 @@ impl Sshd {
 
     /// Like [`Sshd::start`], with extra sshd arguments (`-o MaxSessions=1`).
     pub fn start_with(sshd_args: &str) -> Sshd {
+        crate::container::require_docker_vm();
+        let publish = publish_arg(std::env::var("TP_DOCKER_VM_IP").ok().as_deref())
+            .unwrap_or_else(|e| panic!("{e}"));
+        let host = publish.trim_end_matches("::22").to_string();
         let keys = tempfile::tempdir().unwrap();
         let key = keys.path().join("id_tp");
         let wrong_key = keys.path().join("id_wrong");
@@ -79,7 +103,7 @@ impl Sshd {
             CONTAINERS.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
         );
         let out = Command::new("docker")
-            .args(["run", "-d", "--rm", "--name", &name, "-p", "127.0.0.1::22"])
+            .args(["run", "-d", "--rm", "--name", &name, "-p", &publish])
             .arg("-e")
             .arg(format!("TP_PUBKEY={}", pubkey.trim()))
             .arg("-e")
@@ -95,6 +119,7 @@ impl Sshd {
         );
         let mut d = Sshd {
             name,
+            host,
             port: 0,
             key,
             wrong_key,
@@ -133,7 +158,7 @@ impl Sshd {
     }
 
     pub fn dest(&self, user: &str) -> String {
-        format!("ssh://{user}@127.0.0.1:{}", self.port)
+        format!("ssh://{user}@{}:{}", self.host, self.port)
     }
 }
 

@@ -25,6 +25,7 @@ classify-corpus:
 os-fixtures:
     #!/usr/bin/env bash
     set -euo pipefail
+    bash ../tp_basic/scripts/lib/docker-guard.sh
     out=crates/telepatch/tests/fixtures/os-release
     mkdir -p "$out"
     sed -nE 's/^ *([a-z0-9]+) += \{ root = "([^"]+)".*/\1 \2/p' ../docker_images/docker-bake.hcl |
@@ -36,11 +37,13 @@ os-fixtures:
 # Live: start each upstream image in docker, read `os` through the docker
 # transport, compare with the committed fixtures. Needs docker; may pull.
 test-live-os:
+    bash ../tp_basic/scripts/lib/docker-guard.sh
     cargo test -p telepatch --test live -- --ignored os_
 
 # Live: the package playbook through the executor on ubuntu:24.04 and
 # rockylinux/rockylinux:10 via docker exec; second run must change nothing.
 test-live-pkg:
+    bash ../tp_basic/scripts/lib/docker-guard.sh
     cargo test -p telepatch --test live -- --ignored --nocapture pkg_
 
 # Live: the mise source's system layer in a fresh ubuntu:24.04 container as
@@ -48,18 +51,21 @@ test-live-pkg:
 # cut, root-owned config, system shim, a plain user runs it, pin, latest.
 # Needs docker and the network.
 test-live-mise:
+    bash ../tp_basic/scripts/lib/docker-guard.sh
     cargo test -p telepatch --test live -- --ignored --nocapture mise_
 
 # Live: the SSH transport against an ubuntu:24.04 sshd container (root
 # shell via sudo, read_os, AuthFailed, ConnectRefused, SudoRefused). Needs
 # docker, ssh, ssh-keygen and the network for apt.
 test-live-ssh:
+    bash ../tp_basic/scripts/lib/docker-guard.sh
     cargo test -p telepatch --test live -- --ignored --nocapture ssh_
 
 # Live: the group primitive (and, from T47, the user primitive) on
 # ubuntu:24.04 and rockylinux/rockylinux:10 via docker exec; second run
 # must change nothing. Needs docker.
 test-live-user:
+    bash ../tp_basic/scripts/lib/docker-guard.sh
     cargo test -p telepatch --test live -- --ignored --nocapture group:: user::
 
 # Live: the repo primitive with Docker's real repositories on ubuntu:24.04
@@ -67,6 +73,7 @@ test-live-user:
 # installing docker-ce-cli from it in the same run; second run must change
 # nothing. Needs docker and the network.
 test-live-repo:
+    bash ../tp_basic/scripts/lib/docker-guard.sh
     cargo test -p telepatch --test live -- --ignored --nocapture repo_
 
 # Live: the svc primitive on ubuntu:24.04 and rockylinux/rockylinux:10 in
@@ -74,7 +81,14 @@ test-live-repo:
 # installed, the unit is enabled offline and the start is skipped; second
 # run must change nothing. Needs docker and the network (apt/dnf).
 test-live-svc:
+    bash ../tp_basic/scripts/lib/docker-guard.sh
     cargo test -p telepatch --test live -- --ignored --nocapture svc_
+
+# Run a docker recipe of this justfile against the daemon of a fresh 1 GiB
+# tp-* VM, deleted afterwards (../tp_basic/scripts/docker-vm.sh). Every docker
+# recipe refuses to run outside it (exit 2). `just docker-vm test-live-os`
+docker-vm +recipe:
+    bash ../tp_basic/scripts/docker-vm.sh run -- just {{recipe}}
 
 # Build examples/hello for musl and fail unless the binary is static; then
 # smoke-test it.

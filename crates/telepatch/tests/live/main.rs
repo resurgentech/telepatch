@@ -1,4 +1,6 @@
-//! Live tests: need docker (and the network to pull images). All `#[ignore]`;
+//! Live tests: need the daemon of a tp-* VM (`just docker-vm <recipe>`; every
+//! container start checks it) and the network to pull images. All `#[ignore]`
+//! except the guard checks, which reach no daemon;
 //! run with `just test-live-os`, `just test-live-pkg`, `just test-live-mise`,
 //! `just test-live-user`, `just test-live-repo`, `just test-live-svc`,
 //! `just test-live-ssh`.
@@ -129,10 +131,78 @@ async fn user_principal_is_not_supported_yet() {
 
 #[tokio::test]
 async fn missing_container_is_a_limit_not_a_panic() {
-    // Fails whether or not docker exists: either way no shell and a Limit.
+    // A stub docker that answers as the daemon does for a missing container,
+    // so this (not ignored) test never reaches a daemon.
+    let d = tempfile::tempdir().unwrap();
+    let stub = d.path().join("docker");
+    std::fs::write(
+        &stub,
+        "#!/bin/sh\necho 'Error response from daemon: No such container: tp-test-no-such-container' >&2\nexit 1\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&stub, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
     let s = DockerTransport::new()
+        .docker(stub.to_str().unwrap())
         .open("tp-test-no-such-container", &Principal::Root, 1)
         .await;
     assert!(s.got.is_empty());
-    assert!(s.limit.is_some());
+    assert!(
+        matches!(&s.limit, Some(telepatch::transport::Limit::Other(m)) if m.contains("No such container")),
+        "{:?}",
+        s.limit
+    );
+}
+
+// ---- the guard: docker only in a tp-* VM -------------------------------------
+
+const VM_LABELS: &str = r#"["tp-docker-vm=tp-docker-x"]"#;
+
+#[test]
+fn docker_vm_check_refuses_without_tp_docker_vm_and_asks_no_daemon() {
+    let e = container::docker_vm_check(None, || panic!("docker info must not run")).unwrap_err();
+    assert!(
+        e.starts_with("docker workloads run only in a tp-* VM: use `just docker-vm <recipe>`"),
+        "{e}"
+    );
+    assert!(e.contains("TP_DOCKER_VM is not set"), "{e}");
+    let e =
+        container::docker_vm_check(Some(""), || panic!("docker info must not run")).unwrap_err();
+    assert!(e.contains("TP_DOCKER_VM is not set"), "{e}");
+    let e = container::docker_vm_check(Some("docker-x"), || panic!("docker info must not run"))
+        .unwrap_err();
+    assert!(e.contains("not a tp-* name"), "{e}");
+}
+
+#[test]
+fn docker_vm_check_refuses_a_daemon_without_the_vm_label() {
+    // this machine's daemon: no labels
+    let e = container::docker_vm_check(Some("tp-docker-x"), || Ok("[]".into())).unwrap_err();
+    assert!(e.contains("no label tp-docker-vm=tp-docker-x"), "{e}");
+    // another VM's daemon
+    let e = container::docker_vm_check(Some("tp-docker-x"), || {
+        Ok(r#"["tp-docker-vm=tp-docker-xy"]"#.into())
+    })
+    .unwrap_err();
+    assert!(e.contains("no label tp-docker-vm=tp-docker-x"), "{e}");
+    // docker info failing
+    let e =
+        container::docker_vm_check(Some("tp-docker-x"), || Err("no daemon".into())).unwrap_err();
+    assert!(e.contains("docker info failed: no daemon"), "{e}");
+}
+
+#[test]
+fn docker_vm_check_passes_on_the_vm_label() {
+    container::docker_vm_check(Some("tp-docker-x"), || Ok(VM_LABELS.into())).unwrap();
+}
+
+#[test]
+fn sshd_publishes_on_the_vm_address() {
+    assert_eq!(
+        sshd::publish_arg(Some("192.168.122.17")).unwrap(),
+        "192.168.122.17::22"
+    );
+    let e = sshd::publish_arg(None).unwrap_err();
+    assert!(e.contains("TP_DOCKER_VM_IP is not set"), "{e}");
+    assert!(sshd::publish_arg(Some("127.0.0.1")).is_err());
+    assert!(sshd::publish_arg(Some("example.com")).is_err());
 }
