@@ -917,3 +917,41 @@ are appended, never edited in; a hook refuses rewrites.
   restart, start timestamp moved, one daemon-reload in the journal).
   `just docker-vm test-services ubuntu2404` PASS with it init-less.
 - Commits: tp_basic 5debb31, 7583ccb
+
+## 2026-11-06 — T86b Playbook defaults per playbook, typed
+
+- `Playbook::new(name, run)` (const fn) replaces the struct literal (143
+  literals moved); `.defaults(fn() -> V)` with `V: Serialize` on that
+  method only, serialized to TOML as layer 3 for that playbook; an
+  unserializable value fails at load as `playbook <name> defaults: ..`.
+  `plan` and `run` take the named playbook's defaults;
+  `main_with_defaults` and `run_with_args_and_defaults` removed;
+  `testing::plan_for_playbook`. tp_basic: `Vars` derives `Serialize`,
+  `services_vm` supplies its probe description as a playbook default;
+  all 104 snapshots unchanged.
+- Commits: telepatch 95d13c2, tp_basic a00b7db
+
+## 2026-11-06 — T86a One rustup op per toolchain across roles
+
+- Rustup's `wanted` leaves the merge key (the merged op wants Latest
+  over Present); a rustup member joins an earlier head of equal key when
+  nothing between is a barrier, writes `*` or a `file:` key, or touches
+  the keys it adds (`rustup_hoist_is_safe`); set_default or Latest onto
+  a Present head is checked as `*`. Cargo writes `pkg:cargo:<u>:<name>`
+  plus new `Key::Home(u)` (overlaps `file:`, `bin:`) instead of `*`, and
+  never crosses a distro `pkg` op. Four adversarial tests. tp_basic:
+  `rust_kernel`'s `rust-src` folds into `rust_build`'s op in all 13
+  `latest_kernel_build` plans; 39 plans move on cargo's `writes`; no
+  distro op moves; `latest_kernel_build_has_one_rustup_op_per_toolchain`.
+- Commits: telepatch c66bf6e, tp_basic cb812ab
+
+## 2026-11-06 — T86c `plan` output is byte-stable
+
+- The staging subdir is `"$tp_sd"/"$__tp_run"`, a shell variable the
+  executor sets once in each shell it opens (root and login) from the
+  per-process id; a login op passes it through `env -i`; `run_id()` is
+  private. New snapshots of a binary release plus a no-sum fetch plan,
+  and a scan of every snapshot for a `<hex>-<pid>` id. tp_basic's
+  normaliser goes; the 13 `dev_desktop` plans move on the one staging
+  line; two `plan` processes print identical text.
+- Commits: telepatch ec68cac, tp_basic 5e9620e
