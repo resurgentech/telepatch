@@ -33,6 +33,12 @@
 //! are whole-line matches. The installed version is the first version
 //! token of `rustup run <tc> rustc --version`.
 //!
+//! Two rustup ops for one user and toolchain merge when the optimizer's
+//! hoist is safe (targets and components unioned, `set_default` or-ed); a
+//! different effective `profile` or `installer` is a trace error naming
+//! both sites ([`conflicts`]). In a later window the op is reduced to the
+//! targets and components no earlier window asked for ([`RustupSeen`]).
+//!
 //! `changed` iff the installer or `toolchain install` ran, an update moved
 //! the version, or a default, target or component was set.
 
@@ -73,6 +79,104 @@ impl RustupSpec {
                 list.push(x);
             }
         }
+    }
+}
+
+/// One site for an error message: `file:line`, or `unknown`.
+fn site_of(s: Option<crate::trace::Site>) -> String {
+    s.map_or_else(|| "unknown".to_string(), |s| s.to_string())
+}
+
+/// Trace errors for rustup ops that disagree: two ops for one user and
+/// toolchain with a different effective `profile` or `installer` (an unset
+/// profile is `default`). Each later op is compared with the first op of its
+/// user and toolchain; the message names both call sites, and the error
+/// sits at the later one. Whether the two would merge does not matter: the
+/// toolchain is installed once, so the second spelling would be silently
+/// ignored.
+pub fn conflicts(t: &crate::trace::Trace) -> Vec<crate::host::TraceError> {
+    use crate::trace::{Node, NodeId, OpSpec};
+    let mut first: Vec<((String, String), NodeId)> = Vec::new();
+    let mut out = Vec::new();
+    for (i, n) in t.nodes.iter().enumerate() {
+        let Node::Op(op) = n else { continue };
+        let OpSpec::Pkg(p) = &op.spec else { continue };
+        let (super::Source::Rustup(r), Some(tc)) = (&p.source, p.names.first()) else {
+            continue;
+        };
+        let key = (p.user.clone(), tc.clone());
+        let Some((_, at)) = first.iter().find(|(k, _)| *k == key) else {
+            first.push((key, NodeId(i)));
+            continue;
+        };
+        let Some(Node::Op(prev)) = t.nodes.get(at.0) else {
+            continue;
+        };
+        let OpSpec::Pkg(q) = &prev.spec else { continue };
+        let super::Source::Rustup(s) = &q.source else {
+            continue;
+        };
+        for (what, a, b) in [
+            ("profile", s.profile(), r.profile()),
+            ("installer", s.installer(), r.installer()),
+        ] {
+            if a != b {
+                out.push(t.locate(
+                    NodeId(i),
+                    crate::host::TraceError::new(format!(
+                        "rustup {tc} for {}: conflicting {what}: {a:?} at {} and {b:?} at {}",
+                        p.user,
+                        site_of(prev.site),
+                        site_of(op.site),
+                    )),
+                ));
+            }
+        }
+    }
+    out
+}
+
+/// What earlier windows of one host already asked of rustup, per user and
+/// toolchain: the targets and components of every op that certainly ran
+/// (no guard, no `allow_fail`). Carried from window to window by the
+/// engine; a later op for the same user and toolchain is reduced to what
+/// is not in here ([`RustupSeen::reduce`]).
+#[derive(Debug, Clone, Default)]
+pub struct RustupSeen {
+    have: std::collections::BTreeMap<(String, String), (Vec<String>, Vec<String>)>,
+}
+
+impl RustupSeen {
+    fn key(p: &super::PkgSpec) -> Option<(String, String)> {
+        let (super::Source::Rustup(_), Some(tc)) = (&p.source, p.names.first()) else {
+            return None;
+        };
+        Some((p.user.clone(), tc.clone()))
+    }
+
+    /// Drop from `p` the targets and components an earlier window already
+    /// has. The op itself stays, even when nothing is left (it still
+    /// checks the toolchain, and `.latest()` and guards on it keep their
+    /// meaning); `set_default` stays (the op checks it on the host).
+    pub fn reduce(&self, p: &mut super::PkgSpec) {
+        let Some(key) = Self::key(p) else { return };
+        let (Some((t, c)), super::Source::Rustup(r)) = (self.have.get(&key), &mut p.source) else {
+            return;
+        };
+        r.targets.retain(|x| !t.contains(x));
+        r.components.retain(|x| !c.contains(x));
+    }
+
+    /// Note what `p`, an op applied now, has asked for. `certain` is false
+    /// for an op that may not have run or may have failed (a guard,
+    /// `allow_fail`): it adds nothing.
+    pub fn record(&mut self, p: &super::PkgSpec, certain: bool) {
+        let (true, Some(key), super::Source::Rustup(r)) = (certain, Self::key(p), &p.source) else {
+            return;
+        };
+        let (t, c) = self.have.entry(key).or_default();
+        RustupSpec::add(t, r.targets.iter().cloned());
+        RustupSpec::add(c, r.components.iter().cloned());
     }
 }
 

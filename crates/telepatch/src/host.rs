@@ -437,6 +437,7 @@ pub(crate) use op_builders;
 fn derived_errors(t: &Trace) -> Vec<TraceError> {
     let mut v = crate::ops::svc::nothing_wanted(t);
     v.extend(crate::ops::unit::errors(t));
+    v.extend(crate::ops::pkg::rustup_conflicts(t));
     v.extend(crate::policy::violations(t));
     v.extend(crate::trace::guard_errors(t));
     v

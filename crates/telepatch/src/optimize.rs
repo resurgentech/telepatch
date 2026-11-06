@@ -64,6 +64,8 @@ fn is_distro_pkg(n: &crate::trace::OpNode) -> bool {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct MergeKey {
     source: crate::ops::pkg::Source,
+    /// Rustup only: user, toolchain, profile, installer.
+    scope: Option<(String, String, String, String)>,
     wanted: crate::ops::pkg::Wanted,
     mode: crate::ops::pkg::PkgMode,
     run_as: RunAs,
@@ -74,11 +76,12 @@ struct MergeKey {
 fn merge_key(item: &Item) -> Option<MergeKey> {
     let Item::Op(w) = item else { return None };
     match &w.node.spec {
-        // Script and Rustup ops and pinned Cargo ops never merge: no key, so no two
-        // compare equal.
+        // Script ops and pinned ops never merge: no key, so no two compare
+        // equal.
         OpSpec::Pkg(p) if !p.mergeable() => None,
         OpSpec::Pkg(p) => Some(MergeKey {
-            source: p.source.clone(),
+            source: p.merge_source(),
+            scope: p.merge_scope(),
             wanted: p.wanted.clone(),
             mode: p.mode,
             run_as: w.node.run_as.clone(),

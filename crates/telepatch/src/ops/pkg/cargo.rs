@@ -3,8 +3,8 @@
 //! The installed set comes from one `cargo install --list` (lines
 //! `<name> v<ver>:`, each followed by indented binary names; sources that
 //! print `(path)` after the version still count). `Present` installs the
-//! missing names with one `cargo install <missing…>` (no `--locked`, as the
-//! YAML does; A27). `Pinned(v)` is one name: `cargo install <n> --version
+//! missing names with one `cargo install <missing…>` (`--locked` only after
+//! `.locked()`; the YAML has none, A27). `Pinned(v)` is one name: `cargo install <n> --version
 //! <v>` when the installed version differs. `Latest` asks the host's own
 //! `cargo search <n> --limit 1` per name (`<n> = "<v>"`) and installs the
 //! names whose installed version differs. After an install the list is read
@@ -25,7 +25,8 @@ const LIST_SED: &str = r"s/^\([^ ][^ ]*\) v\([^ :][^ :]*\)[^:]*:$/\1 \2/p";
 const SEARCH_AWK: &str = r#"$1==n && $2=="=" {gsub(/"/, "", $3); print $3; exit}"#;
 
 /// The op body (sets `rc`, `changed`, `installed`).
-pub fn render(names: &[String], wanted: &Wanted) -> String {
+pub fn render(names: &[String], wanted: &Wanted, locked: bool) -> String {
+    let lk = if locked { " --locked" } else { "" };
     let want: Vec<String> = names.iter().map(|n| quote(n)).collect();
     let mut o = format!(
         "rc=0; changed=0; installed=()\ntp_want=({})\ndeclare -A tp_before=() tp_after=() tp_wantv=()\ntp_todo=()\ntp_list() {{ cargo install --list 2>/dev/null | sed -n '{LIST_SED}'; }}\n",
@@ -41,20 +42,20 @@ pub fn render(names: &[String], wanted: &Wanted) -> String {
             o.push_str(
                 "  for tp_n in \"${tp_want[@]}\"; do\n    [ -n \"${tp_before[$tp_n]+x}\" ] || tp_todo+=(\"$tp_n\")\n  done\n",
             );
-            "cargo install \"${tp_todo[@]}\"".to_string()
+            format!("cargo install{lk} \"${{tp_todo[@]}}\"")
         }
         Wanted::Pinned(v) => {
             o.push_str(&format!(
                 "  tp_pin={}\n  for tp_n in \"${{tp_want[@]}}\"; do\n    tp_wantv[$tp_n]=$tp_pin\n    [ \"${{tp_before[$tp_n]-}}\" = \"$tp_pin\" ] || tp_todo+=(\"$tp_n\")\n  done\n",
                 quote(v)
             ));
-            "cargo install \"${tp_todo[0]}\" --version \"$tp_pin\"".to_string()
+            format!("cargo install{lk} \"${{tp_todo[0]}}\" --version \"$tp_pin\"")
         }
         Wanted::Latest => {
             o.push_str(&format!(
                 "  for tp_n in \"${{tp_want[@]}}\"; do\n    tp_l=$(cargo search \"$tp_n\" --limit 1 2>/dev/null | awk -v n=\"$tp_n\" '{SEARCH_AWK}')\n    if [ -z \"$tp_l\" ]; then echo \"telepatch: cargo $tp_n: could not resolve the latest version\" >&2; rc=1; continue; fi\n    tp_wantv[$tp_n]=$tp_l\n    [ \"${{tp_before[$tp_n]-}}\" = \"$tp_l\" ] || tp_todo+=(\"$tp_n\")\n  done\n"
             ));
-            "cargo install \"${tp_todo[@]}\"".to_string()
+            format!("cargo install{lk} \"${{tp_todo[@]}}\"")
         }
     };
     o.push_str("fi\n");

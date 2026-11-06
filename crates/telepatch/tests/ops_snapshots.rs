@@ -382,6 +382,27 @@ fn cargo_as_user_root() {
 }
 
 #[test]
+fn cargo_locked() {
+    let h = host("debian12");
+    let id = h
+        .pkg(["cargo-deb", "cargo-generate-rpm"])
+        .cargo()
+        .locked()
+        .id();
+    assert!(h.snapshot().errors.is_empty(), "{:?}", h.snapshot().errors);
+    insta::assert_snapshot!(wrapped(&h, id));
+}
+
+#[test]
+fn cargo_locked_pinned() {
+    let h = host("debian12");
+    let p = h.pkg(["cargo-deb"]).cargo().locked();
+    p.pin("2.1.0");
+    assert!(h.snapshot().errors.is_empty(), "{:?}", h.snapshot().errors);
+    insta::assert_snapshot!(wrapped(&h, p.id()));
+}
+
+#[test]
 fn plan_shows_cargo_effects() {
     let h = host("debian12");
     h.pkg(["cargo-deb", "cargo-generate-rpm"]).cargo();
@@ -469,4 +490,46 @@ fn plan_shows_mise_effects() {
     h.pkg(["just", "fd"]).mise();
     h.as_user("root").pkg(["bat"]).mise().pin("0.25.0");
     insta::assert_snapshot!(render_host("h", &h.os, &h.snapshot()));
+}
+
+fn two_rustups(h: Host<()>) -> telepatch::PlaybookFuture {
+    Box::pin(async move {
+        {
+            let _r = h.role_enter("a");
+            h.pkg(["stable"])
+                .rustup()
+                .targets(["x86_64-unknown-linux-musl"])
+                .components(["clippy"]);
+        }
+        {
+            let _r = h.role_enter("b");
+            h.pkg(["stable"])
+                .rustup()
+                .targets(["wasm32-unknown-unknown"])
+                .components(["rust-src"])
+                .set_default();
+        }
+        Ok::<(), telepatch::TraceError>(())
+    })
+}
+
+/// Two rustup ops for one toolchain, merged: the one op script.
+#[test]
+fn plan_shows_rustup_merged() {
+    let os = Os::parse(
+        &std::fs::read_to_string(format!(
+            "{}/tests/fixtures/os-release/debian12",
+            env!("CARGO_MANIFEST_DIR")
+        ))
+        .unwrap(),
+    )
+    .unwrap();
+    let fx = telepatch::testing::FixtureHost::new("h", os, Rc::new(()));
+    insta::assert_snapshot!(telepatch::testing::plan(
+        &telepatch::Playbook {
+            name: "t",
+            run: two_rustups
+        },
+        &fx
+    ));
 }

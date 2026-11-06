@@ -61,7 +61,7 @@ impl Member {
             id,
             role: role.to_string(),
             pkg_names: match &op.spec {
-                OpSpec::Pkg(p) => p.names.clone(),
+                OpSpec::Pkg(p) => p.member_names(),
                 _ => Vec::new(),
             },
         }
@@ -111,6 +111,25 @@ pub fn prepare_window(
         }
     }
     Window { number, kind, ops }
+}
+
+/// What the engine carries from window to window of one host.
+#[derive(Debug, Clone, Default)]
+struct Carry {
+    /// The host's apt cache state (see [`prepare_window`]).
+    apt_stale: bool,
+    /// What earlier windows asked of rustup.
+    rustup: crate::ops::pkg::RustupSeen,
+}
+
+impl Carry {
+    /// `o` was applied in the window just prepared.
+    fn note(&mut self, o: &WindowOp) {
+        if let OpSpec::Pkg(p) = &o.node.spec {
+            self.rustup
+                .record(p, o.node.guard.is_none() && !o.node.allow_fail);
+        }
+    }
 }
 
 /// What the engine tells an executor besides running things.
@@ -183,7 +202,7 @@ impl<E: Executor> Engine<E> {
         let mut fut = (playbook.run)(host.clone());
         let mut cx = Context::from_waker(Waker::noop());
         let mut window = 1;
-        let mut apt_stale = false;
+        let mut carry = Carry::default();
         loop {
             let poll = fut.as_mut().poll(&mut cx);
             // A trace error is a playbook bug: fail before applying anything.
@@ -203,7 +222,7 @@ impl<E: Executor> Engine<E> {
                         &mut window,
                         WindowKind::Final,
                         ids,
-                        &mut apt_stale,
+                        &mut carry,
                     )
                     .await?;
                     // `.at_end()` ops: a window of their own, after the last.
@@ -218,7 +237,7 @@ impl<E: Executor> Engine<E> {
                             &mut window,
                             WindowKind::AtEnd,
                             late,
-                            &mut apt_stale,
+                            &mut carry,
                         )
                         .await?;
                     }
@@ -235,7 +254,7 @@ impl<E: Executor> Engine<E> {
                             queries.push(w.query.clone());
                         }
                     }
-                    self.block_round(&info, &host, &mut window, &queries, &mut apt_stale)
+                    self.block_round(&info, &host, &mut window, &queries, &mut carry)
                         .await?;
                     let values = self.executor.read_facts(&info, window, &queries).await;
                     for w in &waiting {
@@ -265,18 +284,11 @@ impl<E: Executor> Engine<E> {
         host: &Host<V>,
         window: &mut usize,
         queries: &[FactQuery],
-        apt_stale: &mut bool,
+        carry: &mut Carry,
     ) -> Result<(), EngineError> {
         let hoist = non_mutating_ready(host);
-        self.apply(
-            info,
-            host,
-            window,
-            WindowKind::NonMutating,
-            hoist,
-            apt_stale,
-        )
-        .await?;
+        self.apply(info, host, window, WindowKind::NonMutating, hoist, carry)
+            .await?;
 
         let mut keys: Vec<Key> = queries.iter().map(|q| q.fact.effect_key()).collect();
         // A read in u's principal needs u to exist, so a pending `user` op
@@ -319,15 +331,8 @@ impl<E: Executor> Engine<E> {
                     reads: keys,
                 },
             );
-            self.apply(
-                info,
-                host,
-                window,
-                WindowKind::ImplicitBarrier,
-                ids,
-                apt_stale,
-            )
-            .await?;
+            self.apply(info, host, window, WindowKind::ImplicitBarrier, ids, carry)
+                .await?;
         }
         Ok(())
     }
@@ -339,7 +344,7 @@ impl<E: Executor> Engine<E> {
         window: &mut usize,
         kind: WindowKind,
         mut ids: Vec<NodeId>,
-        apt_stale: &mut bool,
+        carry: &mut Carry,
     ) -> Result<(), EngineError> {
         // One window per piece: an op addressed to a user the run creates
         // starts the next window, so prepare checks that user after it
@@ -347,7 +352,7 @@ impl<E: Executor> Engine<E> {
         while !ids.is_empty() {
             let cut = user_split(host, &ids);
             let rest = ids.split_off(cut);
-            self.apply_one(info, host, *window, kind, ids, apt_stale)
+            self.apply_one(info, host, *window, kind, ids, carry)
                 .await?;
             ids = rest;
             if !ids.is_empty() {
@@ -364,7 +369,7 @@ impl<E: Executor> Engine<E> {
         window: usize,
         kind: WindowKind,
         ids: Vec<NodeId>,
-        apt_stale: &mut bool,
+        carry: &mut Carry,
     ) -> Result<(), EngineError> {
         let (Some(first), Some(last)) = (ids.first(), ids.last()) else {
             return Ok(());
@@ -384,10 +389,16 @@ impl<E: Executor> Engine<E> {
             {
                 match node {
                     Node::Op(op) if wanted.next_if(|id| id.0 == i).is_some() => {
+                        // A rustup op only asks for what earlier windows
+                        // did not.
+                        let mut op = op.clone();
+                        if let OpSpec::Pkg(p) = &mut op.spec {
+                            carry.rustup.reduce(p);
+                        }
                         items.push(Item::Op(WindowOp {
                             id: NodeId(i),
-                            node: op.clone(),
-                            members: vec![Member::of(NodeId(i), &roles[i], op)],
+                            members: vec![Member::of(NodeId(i), &roles[i], &op)],
+                            node: op,
                         }));
                     }
                     Node::Barrier => items.push(Item::Barrier(NodeId(i))),
@@ -396,7 +407,10 @@ impl<E: Executor> Engine<E> {
             }
             items
         };
-        let w = prepare_window(window, kind, items, apt_stale);
+        let w = prepare_window(window, kind, items, &mut carry.apt_stale);
+        for o in &w.ops {
+            carry.note(o);
+        }
         self.executor
             .apply(info, &w)
             .await

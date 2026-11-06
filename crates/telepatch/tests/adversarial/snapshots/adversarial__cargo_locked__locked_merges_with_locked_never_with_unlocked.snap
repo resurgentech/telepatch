@@ -1,0 +1,69 @@
+---
+source: crates/telepatch/tests/adversarial/cargo_locked.rs
+expression: out
+---
+host web1 (os: Debian/Ubuntu 24.04)
+blocking reads: 0
+
+window 1 (final)
+role a
+  #1 pkg[cargo] as shell:root reads [] writes [*] post [pkg:cargo:root:cargo-deb=Installed, pkg:cargo:root:cargo-generate-rpm=Installed]
+      | rc=0; changed=0; installed=()
+      | tp_want=('cargo-deb' 'cargo-generate-rpm')
+      | declare -A tp_before=() tp_after=() tp_wantv=()
+      | tp_todo=()
+      | tp_list() { cargo install --list 2>/dev/null | sed -n 's/^\([^ ][^ ]*\) v\([^ :][^ :]*\)[^:]*:$/\1 \2/p'; }
+      | if ! command -v cargo >/dev/null 2>&1; then echo 'telepatch: cargo not found' >&2; rc=127; fi
+      | if [ "$rc" -eq 0 ]; then
+      |   while read -r tp_n tp_v; do tp_before[$tp_n]=$tp_v; done < <(tp_list)
+      |   for tp_n in "${tp_want[@]}"; do
+      |     [ -n "${tp_before[$tp_n]+x}" ] || tp_todo+=("$tp_n")
+      |   done
+      | fi
+      | if [ "$rc" -eq 0 ] && [ "${#tp_todo[@]}" -gt 0 ]; then
+      |   cargo install --locked "${tp_todo[@]}"
+      |   rc=$?
+      |   while read -r tp_n tp_v; do tp_after[$tp_n]=$tp_v; done < <(tp_list)
+      |   for tp_n in "${tp_want[@]}"; do
+      |     if [ "${tp_after[$tp_n]-}" != "${tp_before[$tp_n]-}" ]; then changed=1; installed+=("$tp_n"); fi
+      |   done
+      |   if [ "$rc" -eq 0 ]; then
+      |     for tp_n in "${tp_todo[@]}"; do
+      |       tp_got=${tp_after[$tp_n]-}; tp_wv=${tp_wantv[$tp_n]-}
+      |       if [ -z "$tp_got" ] || { [ -n "$tp_wv" ] && [ "$tp_got" != "$tp_wv" ]; }; then
+      |         echo "telepatch: cargo $tp_n: installed ${tp_got:-absent}, wanted ${tp_wv:-present}" >&2; rc=1
+      |       fi
+      |     done
+      |   fi
+      | fi
+      merged from a #1, b #4
+role c
+  #7 pkg[cargo] as shell:root reads [] writes [*] post [pkg:cargo:root:ripgrep=Installed]
+      | rc=0; changed=0; installed=()
+      | tp_want=('ripgrep')
+      | declare -A tp_before=() tp_after=() tp_wantv=()
+      | tp_todo=()
+      | tp_list() { cargo install --list 2>/dev/null | sed -n 's/^\([^ ][^ ]*\) v\([^ :][^ :]*\)[^:]*:$/\1 \2/p'; }
+      | if ! command -v cargo >/dev/null 2>&1; then echo 'telepatch: cargo not found' >&2; rc=127; fi
+      | if [ "$rc" -eq 0 ]; then
+      |   while read -r tp_n tp_v; do tp_before[$tp_n]=$tp_v; done < <(tp_list)
+      |   for tp_n in "${tp_want[@]}"; do
+      |     [ -n "${tp_before[$tp_n]+x}" ] || tp_todo+=("$tp_n")
+      |   done
+      | fi
+      | if [ "$rc" -eq 0 ] && [ "${#tp_todo[@]}" -gt 0 ]; then
+      |   cargo install "${tp_todo[@]}"
+      |   rc=$?
+      |   while read -r tp_n tp_v; do tp_after[$tp_n]=$tp_v; done < <(tp_list)
+      |   for tp_n in "${tp_want[@]}"; do
+      |     if [ "${tp_after[$tp_n]-}" != "${tp_before[$tp_n]-}" ]; then changed=1; installed+=("$tp_n"); fi
+      |   done
+      |   if [ "$rc" -eq 0 ]; then
+      |     for tp_n in "${tp_todo[@]}"; do
+      |       tp_got=${tp_after[$tp_n]-}; tp_wv=${tp_wantv[$tp_n]-}
+      |       if [ -z "$tp_got" ] || { [ -n "$tp_wv" ] && [ "$tp_got" != "$tp_wv" ]; }; then
+      |         echo "telepatch: cargo $tp_n: installed ${tp_got:-absent}, wanted ${tp_wv:-present}" >&2; rc=1
+      |       fi
+      |     done
+      |   fi
+      | fi

@@ -34,8 +34,8 @@ pub use mise::{
     will_changes as mise_will_changes,
 };
 pub use rustup::{
-    DEFAULT_INSTALLER, RustupProbe, RustupSpec, parse_probe as parse_rustup_probe,
-    probe as rustup_probe, will_change as rustup_will_change,
+    DEFAULT_INSTALLER, RustupProbe, RustupSeen, RustupSpec, conflicts as rustup_conflicts,
+    parse_probe as parse_rustup_probe, probe as rustup_probe, will_change as rustup_will_change,
 };
 pub use script::{
     InstallerScript, Latest, Probed, VERSION_RE, parse_probe, version_token, will_change,
@@ -59,7 +59,11 @@ pub enum Source {
     Distro(Manager),
     Pip,
     /// `cargo install`, per user ([`cargo`]).
-    Cargo,
+    Cargo {
+        /// `.locked()`: `cargo install --locked`. Part of the source, so
+        /// locked and unlocked ops never merge.
+        locked: bool,
+    },
     /// Tools in mise's system layer, root only ([`mise`]).
     Mise,
     /// A rust toolchain with targets and components, per user
@@ -156,7 +160,7 @@ impl PkgSpec {
             Source::Distro(Manager::Yum) => "yum",
             Source::Distro(_) => "the distro manager",
             Source::Pip => "pip",
-            Source::Cargo => "cargo",
+            Source::Cargo { .. } => "cargo",
             Source::Mise => "mise",
             Source::Rustup(_) => "rustup",
             Source::Script(_) => "installer_script",
@@ -172,7 +176,7 @@ impl PkgSpec {
         match &self.source {
             Source::Distro(_) => Key::pkg(name),
             Source::Pip => Key::pkg(format!("pip:{name}")),
-            Source::Cargo => Key::pkg(format!("cargo:{}:{name}", self.user)),
+            Source::Cargo { .. } => Key::pkg(format!("cargo:{}:{name}", self.user)),
             Source::Mise => Key::pkg(format!("mise:root:{name}")),
             Source::Rustup(_) => Key::pkg(format!("rustup:{}:{name}", self.user)),
             Source::Script(_) => Key::pkg(format!("script:{}:{name}", self.user)),
@@ -183,7 +187,7 @@ impl PkgSpec {
     /// script, cargo and rustup (they write files nobody listed; A14).
     pub fn default_writes(&self) -> BTreeSet<Key> {
         match &self.source {
-            Source::Script(_) | Source::Cargo | Source::Mise | Source::Rustup(_) => {
+            Source::Script(_) | Source::Cargo { .. } | Source::Mise | Source::Rustup(_) => {
                 BTreeSet::from([Key::Any])
             }
             _ => self.keys(),
@@ -224,42 +228,86 @@ impl PkgSpec {
     pub fn kind(&self) -> &'static str {
         match &self.source {
             Source::Script(_) => "pkg[script]",
-            Source::Cargo => "pkg[cargo]",
+            Source::Cargo { .. } => "pkg[cargo]",
             Source::Mise => "pkg[mise]",
             Source::Rustup(_) => "pkg[rustup]",
             _ => "pkg",
         }
     }
 
+    /// The names a merged op's member answers for in `installed` reports:
+    /// the names, and for a rustup op also `<tc>/target/<t>` and
+    /// `<tc>/component/<c>`.
+    pub fn member_names(&self) -> Vec<String> {
+        let mut v = self.names.clone();
+        if let (Source::Rustup(r), Some(tc)) = (&self.source, self.names.first()) {
+            v.extend(r.targets.iter().map(|t| format!("{tc}/target/{t}")));
+            v.extend(r.components.iter().map(|c| format!("{tc}/component/{c}")));
+        }
+        v
+    }
+
     pub fn keys(&self) -> BTreeSet<Key> {
         self.names.iter().map(|n| self.key_of(n)).collect()
     }
 
-    /// May this op ever be folded into another? `Script` and `Rustup` ops
-    /// never merge (one toolchain per op, with its own options); a
-    /// pinned `Cargo`, `Mise` or distro op has exactly one name (the pin is for
-    /// that name).
+    /// May this op ever be folded into another? `Script` ops never merge;
+    /// a pinned `Cargo`, `Mise`, `Rustup` or distro op has exactly one name
+    /// (the pin is for that name). Rustup ops merge per user and toolchain
+    /// (see [`PkgSpec::merge_scope`]).
     pub fn mergeable(&self) -> bool {
         match &self.source {
-            Source::Script(_) | Source::Rustup(_) => false,
-            Source::Cargo | Source::Mise | Source::Distro(_) => {
+            Source::Script(_) => false,
+            Source::Cargo { .. } | Source::Mise | Source::Distro(_) | Source::Rustup(_) => {
                 !matches!(self.wanted, Wanted::Pinned(_))
             }
             _ => true,
         }
     }
 
+    /// The source as merge compares it: a rustup op's options (targets,
+    /// components, `set_default`) are what merging unions, so they are not
+    /// part of it. Everything else, `Cargo { locked }` included, is.
+    pub fn merge_source(&self) -> Source {
+        match &self.source {
+            Source::Rustup(_) => Source::Rustup(Box::default()),
+            s => s.clone(),
+        }
+    }
+
+    /// What else must be equal for a rustup op to merge: user, toolchain,
+    /// profile and installer. `None` for other sources.
+    pub fn merge_scope(&self) -> Option<(String, String, String, String)> {
+        let Source::Rustup(r) = &self.source else {
+            return None;
+        };
+        Some((
+            self.user.clone(),
+            self.names.first().cloned().unwrap_or_default(),
+            r.profile().to_string(),
+            r.installer().to_string(),
+        ))
+    }
+
     /// Can `other` be folded into this op (same source, wanted and mode)?
     pub fn can_merge(&self, other: &PkgSpec) -> bool {
         self.mergeable()
             && other.mergeable()
-            && self.source == other.source
+            && self.merge_source() == other.merge_source()
+            && self.merge_scope() == other.merge_scope()
             && self.wanted == other.wanted
             && self.mode == other.mode
     }
 
     /// Union of names, keeping first-seen order. `update_cache` is or-ed.
+    /// Rustup: targets and components are unioned and `set_default` is
+    /// or-ed.
     pub fn merge(&mut self, other: &PkgSpec) {
+        if let (Source::Rustup(a), Source::Rustup(b)) = (&mut self.source, &other.source) {
+            RustupSpec::add(&mut a.targets, b.targets.iter().cloned());
+            RustupSpec::add(&mut a.components, b.components.iter().cloned());
+            a.set_default |= b.set_default;
+        }
         for n in &other.names {
             if !self.names.contains(n) {
                 self.names.push(n.clone());
@@ -273,8 +321,8 @@ impl PkgSpec {
             let name = self.names.first().map(String::as_str).unwrap_or("");
             return s.render(name, &self.wanted);
         }
-        if self.source == Source::Cargo {
-            return cargo::render(&self.names, &self.wanted);
+        if let Source::Cargo { locked } = self.source {
+            return cargo::render(&self.names, &self.wanted, locked);
         }
         if self.source == Source::Mise {
             return mise::render(&self.names, &self.wanted);
@@ -324,7 +372,7 @@ impl PkgSpec {
                 Wanted::Present => pip(&mut o),
             },
             // Rendered above; every source is built.
-            (Source::Cargo | Source::Mise | Source::Rustup(_) | Source::Script(_), _) => {
+            (Source::Cargo { .. } | Source::Mise | Source::Rustup(_) | Source::Script(_), _) => {
                 unreachable!()
             }
         }
@@ -648,7 +696,24 @@ impl PkgHandle {
     /// name; `.latest()` asks `cargo search` on the host.
     #[track_caller]
     pub fn cargo(&self) -> Self {
-        self.source("cargo", Source::Cargo)
+        self.source("cargo", Source::Cargo { locked: false })
+    }
+
+    /// Cargo: install with `cargo install --locked` (the crates' own
+    /// `Cargo.lock`). Part of the source: a locked op never merges with an
+    /// unlocked one. On any other source: a trace error.
+    #[track_caller]
+    pub fn locked(&self) -> Self {
+        let mut cargo = true;
+        self.spec(|s| match &mut s.source {
+            Source::Cargo { locked } => *locked = true,
+            _ => cargo = false,
+        });
+        if !cargo {
+            self.0
+                .record_error(TraceError::new("locked() is only available on cargo ops"));
+        }
+        self.clone()
     }
 
     /// Tools installed by `mise` into its system layer (config
@@ -672,7 +737,11 @@ impl PkgHandle {
     /// `.installer`). Keys `pkg:rustup:<user>:<tc>` plus
     /// `...:<tc>/target/<t>` and `...:<tc>/component/<c>`; writes `*`
     /// unless narrowed. `.latest()` asks `rustup check`; `.pin(..)` is a
-    /// trace error (name a version toolchain instead).
+    /// trace error (name a version toolchain instead). Ops for one user and
+    /// toolchain merge wherever the optimizer's hoist is safe; a different
+    /// `.profile(..)` or `.installer(..)` between two such ops is a trace
+    /// error naming both sites. In a later window only what the earlier
+    /// ones lacked is asked.
     #[track_caller]
     pub fn rustup(&self) -> Self {
         self.source("rustup", Source::Rustup(Box::default()))
@@ -843,8 +912,9 @@ impl PkgHandle {
                 rustup_pin = true;
                 return;
             }
-            cargo_pin_many =
-                s.source == Source::Cargo && matches!(w, Wanted::Pinned(_)) && s.names.len() != 1;
+            cargo_pin_many = matches!(s.source, Source::Cargo { .. })
+                && matches!(w, Wanted::Pinned(_))
+                && s.names.len() != 1;
             mise_pin_many =
                 s.source == Source::Mise && matches!(w, Wanted::Pinned(_)) && s.names.len() != 1;
             s.wanted = w;
@@ -1156,7 +1226,11 @@ mod tests {
         assert_eq!(spec_of(&h, 0).wanted, Wanted::Present);
         h.pkg(["stable"]).rustup().latest();
         assert_eq!(errors(&h).len(), 1);
-        let a = PkgSpec::from_source(Source::Rustup(Box::default()), names(["stable"]));
+        // The pin never reaches a spec through the builders; merge still
+        // refuses one.
+        let mut a = PkgSpec::from_source(Source::Rustup(Box::default()), names(["stable"]));
+        assert!(a.mergeable());
+        a.wanted = Wanted::Pinned("1.94.0".into());
         assert!(!a.mergeable());
         assert!(!a.can_merge(&a.clone()));
     }
@@ -1343,13 +1417,59 @@ mod tests {
             errors(&h),
             ["cargo: a pinned op takes exactly one package name"]
         );
-        let mut a = PkgSpec::from_source(Source::Cargo, names(["a"]));
-        let mut b = PkgSpec::from_source(Source::Cargo, names(["b"]));
+        let mut a = PkgSpec::from_source(Source::Cargo { locked: false }, names(["a"]));
+        let mut b = PkgSpec::from_source(Source::Cargo { locked: false }, names(["b"]));
         assert!(a.can_merge(&b));
         a.wanted = Wanted::Pinned("1.0.0".into());
         b.wanted = Wanted::Pinned("1.0.0".into());
         assert!(!a.can_merge(&b));
         assert!(!a.mergeable());
+    }
+
+    #[test]
+    fn locked_is_cargo_only_and_part_of_the_source() {
+        let h = host();
+        h.pkg(["x"]).cargo().locked();
+        assert!(errors(&h).is_empty());
+        h.pkg(["x"]).locked();
+        h.pkg(["x"]).pip().locked();
+        assert_eq!(
+            errors(&h),
+            [
+                "locked() is only available on cargo ops",
+                "locked() is only available on cargo ops"
+            ]
+        );
+        let l = PkgSpec::from_source(Source::Cargo { locked: true }, names(["a"]));
+        let u = PkgSpec::from_source(Source::Cargo { locked: false }, names(["b"]));
+        assert!(l.can_merge(&l.clone()));
+        assert!(!l.can_merge(&u));
+    }
+
+    #[test]
+    fn rustup_merges_per_user_toolchain_and_unions_options() {
+        let rs = |user: &str, tc: &str, t: &str| {
+            let mut p = PkgSpec::from_source(Source::Rustup(Box::default()), names([tc]));
+            p.user = user.to_string();
+            if let Source::Rustup(r) = &mut p.source {
+                r.targets.push(t.to_string());
+            }
+            p
+        };
+        let mut a = rs("root", "stable", "t1");
+        let mut b = rs("root", "stable", "t2");
+        if let Source::Rustup(r) = &mut b.source {
+            r.set_default = true;
+        }
+        assert!(a.can_merge(&b));
+        assert!(!a.can_merge(&rs("deploy", "stable", "t1")));
+        assert!(!a.can_merge(&rs("root", "nightly", "t1")));
+        a.merge(&b);
+        let Source::Rustup(r) = &a.source else {
+            panic!()
+        };
+        assert_eq!(r.targets, ["t1", "t2"]);
+        assert!(r.set_default);
     }
 
     #[test]

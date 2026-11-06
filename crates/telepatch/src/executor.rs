@@ -640,7 +640,11 @@ fn gate(
 fn subject(w: &WindowOp, m: &crate::engine::Member) -> String {
     match &w.node.spec {
         OpSpec::Pkg(p) => {
-            let names = if m.pkg_names.is_empty() {
+            // A rustup member also lists its targets and components after
+            // the toolchain: the subject is the toolchain.
+            let names = if m.pkg_names.is_empty()
+                || matches!(p.source, crate::ops::pkg::Source::Rustup(_))
+            {
                 &p.names
             } else {
                 &m.pkg_names
@@ -751,7 +755,7 @@ fn describe(op: &OpNode) -> String {
             if matches!(
                 p.source,
                 crate::ops::pkg::Source::Script(_)
-                    | crate::ops::pkg::Source::Cargo
+                    | crate::ops::pkg::Source::Cargo { .. }
                     | crate::ops::pkg::Source::Mise
                     | crate::ops::pkg::Source::Rustup(_)
             ) =>

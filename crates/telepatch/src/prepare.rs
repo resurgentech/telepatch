@@ -117,7 +117,7 @@ pub fn pkg_probe(source: &Source, names: &[String]) -> String {
                 "printf '%s\\n' \"$tp_l\" | grep -qx -- \"$(printf %s {q} | tr 'A-Z_' 'a-z-')\""
             ),
             // Not probed here (see `pkg_names`): report nothing as present.
-            Source::Cargo | Source::Mise | Source::Rustup(_) | Source::Script(_) => {
+            Source::Cargo { .. } | Source::Mise | Source::Rustup(_) | Source::Script(_) => {
                 "false".to_string()
             }
         };
@@ -133,7 +133,7 @@ pub fn manager_name(s: &Source) -> &'static str {
         Source::Distro(Manager::Yum) => "yum",
         Source::Distro(Manager::Pacman) => "pacman",
         Source::Pip => "pip",
-        Source::Cargo => "cargo",
+        Source::Cargo { .. } => "cargo",
         Source::Mise => "mise",
         Source::Rustup(_) => "rustup",
         Source::Script(_) => "script",
@@ -158,7 +158,7 @@ pub fn missing_names(names: &[String], output: &str) -> Vec<String> {
 pub fn source_probe(p: &PkgSpec) -> Option<String> {
     match &p.source {
         Source::Script(s) => Some(s.probe(&p.wanted)),
-        Source::Cargo => Some(crate::ops::pkg::cargo_probe(&p.names, &p.wanted)),
+        Source::Cargo { .. } => Some(crate::ops::pkg::cargo_probe(&p.names, &p.wanted)),
         Source::Mise => Some(crate::ops::pkg::mise_probe(&p.names, &p.wanted)),
         Source::Rustup(r) => {
             let tc = p.names.first().map(String::as_str).unwrap_or("");
@@ -226,7 +226,7 @@ pub fn source_changes(window: usize, p: &PkgSpec, out: Option<&str>) -> Vec<Will
                 .into_iter()
                 .collect()
         }
-        Source::Cargo => {
+        Source::Cargo { .. } => {
             let probed = out
                 .map(crate::ops::pkg::parse_cargo_probe)
                 .unwrap_or_default();
