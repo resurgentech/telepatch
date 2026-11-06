@@ -14,7 +14,10 @@ pub enum Key {
     Repo(String),
     /// A command on `PATH`; see [`Key::overlaps`].
     Bin(String),
-    /// Everything: the effects of this op cannot be enumerated.
+    /// Everything under one user's home directory, `home:<user>`; see
+    /// [`Key::overlaps`].
+    Home(String),
+    /// Everything:the effects of this op cannot be enumerated.
     Any,
 }
 
@@ -40,6 +43,9 @@ impl Key {
     pub fn bin(n: impl Into<String>) -> Key {
         Key::Bin(n.into())
     }
+    pub fn home(user: impl Into<String>) -> Key {
+        Key::Home(user.into())
+    }
 
     /// `*` overlaps everything; otherwise keys overlap when equal. Paths are
     /// compared whole (no directory-prefix semantics yet).
@@ -47,13 +53,22 @@ impl Key {
     /// `bin:<cmd>` is the exception: installing a package or writing a file
     /// can create a binary, so it also overlaps every `pkg:` and `file:`
     /// key (coarse on purpose; a binary's path is not known up front).
+    ///
+    /// `home:<user>` is everything under a user's home directory, whose
+    /// path is only known on the host: it overlaps every `file:` and `bin:`
+    /// key (paths are not compared), `*` and an equal `home:` key, and
+    /// nothing else. A cargo op writes it, so a fact read under the home
+    /// (`exists("/root/.cargo/bin/x")`, `bin_exists("x")`) waits for the op.
     pub fn overlaps(&self, other: &Key) -> bool {
         let creates_bin = |k: &Key| matches!(k, Key::Pkg(_) | Key::File(_));
+        let in_home = |k: &Key| matches!(k, Key::File(_) | Key::Bin(_));
         matches!(self, Key::Any)
             || matches!(other, Key::Any)
             || self == other
             || (matches!(self, Key::Bin(_)) && creates_bin(other))
             || (matches!(other, Key::Bin(_)) && creates_bin(self))
+            || (matches!(self, Key::Home(_)) && in_home(other))
+            || (matches!(other, Key::Home(_)) && in_home(self))
     }
 }
 
@@ -67,6 +82,7 @@ impl fmt::Display for Key {
             Key::Svc(n) => write!(f, "svc:{n}"),
             Key::Repo(n) => write!(f, "repo:{n}"),
             Key::Bin(n) => write!(f, "bin:{n}"),
+            Key::Home(u) => write!(f, "home:{u}"),
             Key::Any => f.write_str("*"),
         }
     }
@@ -107,6 +123,7 @@ mod tests {
             (Key::svc("nginx"), "svc:nginx"),
             (Key::repo("hashicorp"), "repo:hashicorp"),
             (Key::bin("cargo"), "bin:cargo"),
+            (Key::home("deploy"), "home:deploy"),
             (Key::Any, "*"),
         ];
         for (k, s) in cases {
@@ -132,5 +149,33 @@ mod tests {
         assert!(Key::bin("a").overlaps(&Key::bin("a")));
         assert!(!Key::bin("a").overlaps(&Key::bin("b")));
         assert!(!Key::bin("a").overlaps(&Key::svc("a")));
+    }
+
+    /// `home:<user>` stands for everything under a user's home: it
+    /// overlaps every `file:` and `bin:` key (paths are not compared), `*`
+    /// and an equal `home:` key, nothing else.
+    #[test]
+    fn home_overlap() {
+        let h = Key::home("root");
+        for k in [
+            Key::file("/root/.cargo/bin/x"),
+            Key::file("/etc/x"),
+            Key::bin("cargo"),
+            Key::Any,
+            Key::home("root"),
+        ] {
+            assert!(h.overlaps(&k), "{k}");
+            assert!(k.overlaps(&h), "{k}");
+        }
+        for k in [
+            Key::home("deploy"),
+            Key::pkg("cargo"),
+            Key::pkg("cargo:root:x"),
+            Key::user("root"),
+            Key::repo("x"),
+        ] {
+            assert!(!h.overlaps(&k), "{k}");
+            assert!(!k.overlaps(&h), "{k}");
+        }
     }
 }

@@ -33,11 +33,21 @@
 //! are whole-line matches. The installed version is the first version
 //! token of `rustup run <tc> rustc --version`.
 //!
-//! Two rustup ops for one user and toolchain merge when the optimizer's
-//! hoist is safe (targets and components unioned, `set_default` or-ed); a
-//! different effective `profile` or `installer` is a trace error naming
-//! both sites ([`conflicts`]). In a later window the op is reduced to the
-//! targets and components no earlier window asked for ([`RustupSeen`]).
+//! Two rustup ops for one user and toolchain (and equal `RunAs`, guard and
+//! `allow_fail`) merge across roles, Present and Latest alike: targets and
+//! components unioned, `set_default` or-ed, Latest wins. The op keeps
+//! writing `*`; the optimizer's rustup hoist
+//! ([`crate::optimize::Graph::rustup_hoist_is_safe`]) checks only what the
+//! later op adds, so a cargo or distro op between does not block it (a
+//! distro `rustup`, `rustc` or `cargo` neither: the op finds rustup in
+//! `~/.cargo/bin`, which it prepends to `PATH`), while a barrier, a `*` or `file:` writer, or an op
+//! touching an added target or component does. A later op adding
+//! `set_default` or Latest is checked as writing `*`. In a merged op a
+//! Present member counts as changed when the Latest member's update ran
+//! (the member rule on `installed`). A different effective `profile` or
+//! `installer` is a trace error naming both sites ([`conflicts`]). In a
+//! later window the op is reduced to the targets and components no earlier
+//! window asked for ([`RustupSeen`]).
 //!
 //! `changed` iff the installer or `toolchain install` ran, an update moved
 //! the version, or a default, target or component was set.

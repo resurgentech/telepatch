@@ -2,11 +2,17 @@
 //!
 //! 1. Edges: between two items in trace order, where one writes what the
 //!    other reads or writes (or reads what the other writes), or either is
-//!    a barrier.
-//! 2. Merge: `pkg` ops with the same manager, mode, `RunAs`, guard and
-//!    `allow_fail` are folded into the earliest one when
+//!    a barrier. A repo op and a cargo op each also conflict with every
+//!    distro `pkg` op, both ways.
+//! 2. Merge: `pkg` ops with the same manager, mode, wanted, `RunAs`, guard
+//!    and `allow_fail` are folded into the earliest one when
 //!    [`Graph::hoist_is_safe`] holds, i.e. no other item between the
-//!    earliest and the latest member has an edge to a member. Then guarded
+//!    earliest and the latest member has an edge to a member. Rustup ops
+//!    (same user, toolchain, profile, installer, `RunAs`, guard and
+//!    `allow_fail`; any wanted, the merged op wanting the stronger) use
+//!    [`Graph::rustup_hoist_is_safe`] instead: only the moving op's
+//!    effects are checked, and of those only what it adds to the earlier
+//!    op. Then guarded
 //!    ops with an equal spec (any kind), `RunAs` and `allow_fail` are folded
 //!    (svc units compared by key, so a restart of `docker` and one of
 //!    `docker.service` are equal; a restart and a reload are not)
@@ -52,6 +58,11 @@ fn conflicts(a: &Item, b: &Item) -> bool {
     if (writes_repo(a) && is_distro_pkg(b)) || (writes_repo(b) && is_distro_pkg(a)) {
         return true;
     }
+    // A distro install may be a cargo op's build dependency (`libssl-dev`),
+    // so no cargo op moves across a distro `pkg` op, in either direction.
+    if (is_cargo(a) && is_distro_pkg(b)) || (is_cargo(b) && is_distro_pkg(a)) {
+        return true;
+    }
     hit(&a.writes, &b.reads) || hit(&a.writes, &b.writes) || hit(&a.reads, &b.writes)
 }
 
@@ -63,13 +74,23 @@ fn is_distro_pkg(n: &crate::trace::OpNode) -> bool {
     matches!(&n.spec, OpSpec::Pkg(p) if matches!(p.source, crate::ops::pkg::Source::Distro(_)))
 }
 
+fn is_cargo(n: &crate::trace::OpNode) -> bool {
+    matches!(&n.spec, OpSpec::Pkg(p) if matches!(p.source, crate::ops::pkg::Source::Cargo { .. }))
+}
+
+fn is_rustup(item: &Item) -> bool {
+    matches!(item, Item::Op(w) if matches!(&w.node.spec,
+        OpSpec::Pkg(p) if matches!(p.source, crate::ops::pkg::Source::Rustup(_))))
+}
+
 /// What must be equal for two pkg ops to be merge candidates.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct MergeKey {
     source: crate::ops::pkg::Source,
     /// Rustup only: user, toolchain, profile, installer.
     scope: Option<(String, String, String, String)>,
-    wanted: crate::ops::pkg::Wanted,
+    /// `None` for rustup ([`crate::ops::pkg::PkgSpec::merge_wanted`]).
+    wanted: Option<crate::ops::pkg::Wanted>,
     mode: crate::ops::pkg::PkgMode,
     run_as: RunAs,
     guard: Option<Guard>,
@@ -85,7 +106,7 @@ fn merge_key(item: &Item) -> Option<MergeKey> {
         OpSpec::Pkg(p) => Some(MergeKey {
             source: p.merge_source(),
             scope: p.merge_scope(),
-            wanted: p.wanted.clone(),
+            wanted: p.merge_wanted(),
             mode: p.mode,
             run_as: w.node.run_as.clone(),
             guard: w.node.guard.clone(),
@@ -193,8 +214,68 @@ impl Graph {
             })
     }
 
+    /// May rustup op `m` (a single trace op) join the earlier rustup head
+    /// `head` of an equal [`merge_key`]? The rustup rule, in place of
+    /// [`Graph::hoist_is_safe`]: only `m` moves, so only what `m` would
+    /// change is checked, and rustup keeps writing `*` for every other
+    /// purpose (edges, the apt cache pass). Not if a live item strictly
+    /// between is a barrier, writes `*` or any `file:` key (the toolchain
+    /// lives in files under the user's home), or reads or writes a key
+    /// that overlaps one `m` adds (`pkg:rustup:<u>:<tc>/target/<t>` or
+    /// `.../component/<c>` the head lacks) or one `m` declared with
+    /// `.reads(..)`/`.writes(..)`. When `m` adds a `set_default` or a
+    /// Latest the head lacks, it is checked as writing `*`: it merges only
+    /// across items with no effects (in practice, when adjacent).
+    pub fn rustup_hoist_is_safe(&self, head: usize, m: usize) -> bool {
+        use crate::ops::pkg::{Source, Wanted};
+        let (Some(Item::Op(h)), Some(Item::Op(w))) = (&self.items[head], &self.items[m]) else {
+            return false;
+        };
+        let (OpSpec::Pkg(hp), OpSpec::Pkg(mp)) = (&h.node.spec, &w.node.spec) else {
+            return false;
+        };
+        let (Source::Rustup(hr), Source::Rustup(mr), Some(tc)) =
+            (&hp.source, &mp.source, mp.names.first())
+        else {
+            return false;
+        };
+        let mut keys: BTreeSet<Key> = BTreeSet::new();
+        if (mr.set_default && !hr.set_default)
+            || (mp.wanted == Wanted::Latest && hp.wanted != Wanted::Latest)
+        {
+            keys.insert(Key::Any);
+        }
+        for t in mr.targets.iter().filter(|t| !hr.targets.contains(t)) {
+            keys.insert(mp.key_of(&format!("{tc}/target/{t}")));
+        }
+        for c in mr.components.iter().filter(|c| !hr.components.contains(c)) {
+            keys.insert(mp.key_of(&format!("{tc}/component/{c}")));
+        }
+        keys.extend(w.node.reads.iter().cloned());
+        if w.node.writes != w.node.spec.default_writes() {
+            keys.extend(w.node.writes.iter().cloned());
+        }
+        (head + 1..m)
+            .filter_map(|x| self.items[x].as_ref())
+            .all(|item| match item {
+                Item::Barrier(_) => false,
+                Item::Op(o) => {
+                    let n = &o.node;
+                    !n.writes
+                        .iter()
+                        .any(|k| matches!(k, Key::Any | Key::File(_)))
+                        && !n
+                            .reads
+                            .iter()
+                            .chain(n.writes.iter())
+                            .any(|e| keys.iter().any(|k| k.overlaps(e)))
+                }
+            })
+    }
+
     /// Fold `group[1..]` into `group[0]` (the earliest). Callers check
-    /// [`Graph::hoist_is_safe`] and [`merge_key`] equality first.
+    /// [`Graph::hoist_is_safe`] (or [`Graph::rustup_hoist_is_safe`]) and
+    /// [`merge_key`] equality first.
     fn merge(&mut self, group: &[usize]) {
         let head = group[0];
         for &o in &group[1..] {
@@ -218,15 +299,25 @@ impl Graph {
     }
 
     /// Pass 2. Each candidate joins the first earlier group it can safely
-    /// join, else starts its own.
+    /// join, else starts its own. Rustup candidates use
+    /// [`Graph::rustup_hoist_is_safe`], every other source
+    /// [`Graph::hoist_is_safe`].
     fn merge_pass(&mut self) {
         let mut groups: Vec<(MergeKey, usize)> = Vec::new();
         for i in 0..self.items.len() {
             let Some(item) = &self.items[i] else { continue };
             let Some(key) = merge_key(item) else { continue };
+            let rustup = is_rustup(item);
             let joined = groups
                 .iter()
-                .find(|(k, head)| *k == key && self.hoist_is_safe(&[*head, i]))
+                .find(|(k, head)| {
+                    *k == key
+                        && if rustup {
+                            self.rustup_hoist_is_safe(*head, i)
+                        } else {
+                            self.hoist_is_safe(&[*head, i])
+                        }
+                })
                 .map(|(_, head)| *head);
             match joined {
                 Some(head) => self.merge(&[head, i]),

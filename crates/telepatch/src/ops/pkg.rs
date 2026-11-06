@@ -202,15 +202,21 @@ impl PkgSpec {
         }
     }
 
-    /// Default write set: the names' keys for distro and pip, `*` for
-    /// script, cargo and rustup (they write files nobody listed; A14).
+    /// Default write set: the names' keys for distro and pip; for cargo the
+    /// names' keys plus `home:<user>` (`cargo install` writes under the
+    /// user's `~/.cargo`, which [`Key::Home`] stands for); `*` for script,
+    /// binary release, mise and rustup (they write files nobody listed;
+    /// A14).
     pub fn default_writes(&self) -> BTreeSet<Key> {
         match &self.source {
-            Source::Script(_)
-            | Source::BinaryRelease(_)
-            | Source::Cargo { .. }
-            | Source::Mise
-            | Source::Rustup(_) => BTreeSet::from([Key::Any]),
+            Source::Script(_) | Source::BinaryRelease(_) | Source::Mise | Source::Rustup(_) => {
+                BTreeSet::from([Key::Any])
+            }
+            Source::Cargo { .. } => {
+                let mut w = self.keys();
+                w.insert(Key::home(&self.user));
+                w
+            }
             _ => self.keys(),
         }
     }
@@ -315,24 +321,40 @@ impl PkgSpec {
         ))
     }
 
-    /// Can `other` be folded into this op (same source, wanted and mode)?
+    /// `wanted` as merge compares it: `None` for rustup, whose Present and
+    /// Latest ops merge into one that wants Latest ([`PkgSpec::merge`];
+    /// Pinned rustup never gets this far, see [`PkgSpec::mergeable`]).
+    /// Every other source merges only with an equal `wanted`.
+    pub fn merge_wanted(&self) -> Option<Wanted> {
+        match &self.source {
+            Source::Rustup(_) => None,
+            _ => Some(self.wanted.clone()),
+        }
+    }
+
+    /// Can `other` be folded into this op (same source, mode and, except
+    /// for rustup, wanted)? The spec half of the optimizer's merge key.
     pub fn can_merge(&self, other: &PkgSpec) -> bool {
         self.mergeable()
             && other.mergeable()
             && self.merge_source() == other.merge_source()
             && self.merge_scope() == other.merge_scope()
-            && self.wanted == other.wanted
+            && self.merge_wanted() == other.merge_wanted()
             && self.mode == other.mode
     }
 
     /// Union of names, keeping first-seen order. `update_cache` is or-ed.
-    /// Rustup: targets and components are unioned and `set_default` is
-    /// or-ed.
+    /// Rustup: targets and components are unioned, `set_default` is or-ed
+    /// and the merged op wants the stronger of the two (Latest over
+    /// Present).
     pub fn merge(&mut self, other: &PkgSpec) {
         if let (Source::Rustup(a), Source::Rustup(b)) = (&mut self.source, &other.source) {
             RustupSpec::add(&mut a.targets, b.targets.iter().cloned());
             RustupSpec::add(&mut a.components, b.components.iter().cloned());
             a.set_default |= b.set_default;
+            if other.wanted == Wanted::Latest {
+                self.wanted = Wanted::Latest;
+            }
         }
         for n in &other.names {
             if !self.names.contains(n) {
@@ -726,9 +748,14 @@ impl PkgHandle {
     }
 
     /// Crates installed with `cargo install`, for the op's principal
-    /// (`pkg:cargo:<user>:<name>` keys); writes `*` unless narrowed with
-    /// `.writes([..])`; posts `Installed` per name. `.pin(v)` takes one
-    /// name; `.latest()` asks `cargo search` on the host.
+    /// (`pkg:cargo:<user>:<name>` keys); writes those keys and
+    /// `home:<user>` (which overlaps every `file:` and `bin:` key, so a
+    /// fact read under the home waits for the op) unless narrowed with
+    /// `.writes([..])`; posts `Installed` per name. The optimizer never
+    /// moves a cargo op across a distro `pkg` op (a build dependency), and
+    /// a rustup op before it writes `*`, so cargo runs after the toolchain
+    /// in trace order. `.pin(v)` takes one name; `.latest()` asks `cargo
+    /// search` on the host.
     #[track_caller]
     pub fn cargo(&self) -> Self {
         self.source("cargo", Source::Cargo { locked: false })
@@ -773,7 +800,9 @@ impl PkgHandle {
     /// `...:<tc>/target/<t>` and `...:<tc>/component/<c>`; writes `*`
     /// unless narrowed. `.latest()` asks `rustup check`; `.pin(..)` is a
     /// trace error (name a version toolchain instead). Ops for one user and
-    /// toolchain merge wherever the optimizer's hoist is safe; a different
+    /// toolchain merge across roles, Present and Latest into one that wants
+    /// Latest, when nothing between them touches what the later op adds
+    /// (the optimizer's rustup hoist, [`crate::optimize`]); a different
     /// `.profile(..)` or `.installer(..)` between two such ops is a trace
     /// error naming both sites. In a later window only what the earlier
     /// ones lacked is asked.
@@ -1441,7 +1470,18 @@ mod tests {
                 .map(|(k, v)| format!("{k}={v}"))
                 .collect::<Vec<_>>()
         };
-        assert_eq!(ops[0].writes, BTreeSet::from([Key::Any]));
+        assert_eq!(
+            ops[0].writes,
+            BTreeSet::from([
+                Key::pkg("cargo:root:cargo-deb"),
+                Key::pkg("cargo:root:cargo-generate-rpm"),
+                Key::home("root"),
+            ])
+        );
+        assert_eq!(
+            ops[1].writes,
+            BTreeSet::from([Key::pkg("cargo:deploy:cargo-deb"), Key::home("deploy")])
+        );
         assert_eq!(
             post(ops[0]),
             [
@@ -1521,6 +1561,41 @@ mod tests {
         };
         assert_eq!(r.targets, ["t1", "t2"]);
         assert!(r.set_default);
+    }
+
+    /// For rustup, `wanted` is not part of what must be equal: Present and
+    /// Latest merge and the merged op wants Latest, whichever came first.
+    /// Pinned never merges.
+    #[test]
+    fn rustup_present_and_latest_merge_to_latest() {
+        let rs = |w: Wanted| {
+            let mut p = PkgSpec::from_source(Source::Rustup(Box::default()), names(["stable"]));
+            p.wanted = w;
+            p
+        };
+        for (a, b) in [
+            (Wanted::Present, Wanted::Latest),
+            (Wanted::Latest, Wanted::Present),
+            (Wanted::Latest, Wanted::Latest),
+        ] {
+            let mut x = rs(a.clone());
+            let y = rs(b.clone());
+            assert!(x.can_merge(&y), "{a:?} {b:?}");
+            x.merge(&y);
+            assert_eq!(x.wanted, Wanted::Latest, "{a:?} {b:?}");
+        }
+        let mut x = rs(Wanted::Present);
+        x.merge(&rs(Wanted::Present));
+        assert_eq!(x.wanted, Wanted::Present);
+        assert!(!rs(Wanted::Present).can_merge(&rs(Wanted::Pinned("1".into()))));
+        // Distro and cargo keep `wanted` in the key.
+        let mut d = PkgSpec::new(Manager::Apt, names(["git"]));
+        let mut l = d.clone();
+        l.wanted = Wanted::Latest;
+        assert!(!d.can_merge(&l));
+        d.source = Source::Cargo { locked: false };
+        l.source = Source::Cargo { locked: false };
+        assert!(!d.can_merge(&l));
     }
 
     #[test]
@@ -1657,7 +1732,11 @@ mod tests {
             kinds,
             ["pkg[cargo]", "pkg[mise]", "pkg[rustup]", "pkg[script]"]
         );
-        for i in 0..4 {
+        assert_eq!(
+            op_of(&h, 0).writes,
+            BTreeSet::from([Key::pkg("cargo:root:cargo-deb"), Key::home("root")])
+        );
+        for i in 1..4 {
             assert_eq!(op_of(&h, i).writes, BTreeSet::from([Key::Any]), "{i}");
         }
         let post =

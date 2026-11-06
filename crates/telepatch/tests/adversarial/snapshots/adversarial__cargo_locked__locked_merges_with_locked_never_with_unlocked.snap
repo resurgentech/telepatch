@@ -7,7 +7,7 @@ blocking reads: 0
 
 window 1 (final)
 role a
-  #1 pkg[cargo] as shell:root reads [] writes [*] post [pkg:cargo:root:cargo-deb=Installed, pkg:cargo:root:cargo-generate-rpm=Installed]
+  #1 pkg[cargo] as shell:root reads [] writes [pkg:cargo:root:cargo-deb, pkg:cargo:root:cargo-generate-rpm, home:root] post [pkg:cargo:root:cargo-deb=Installed, pkg:cargo:root:cargo-generate-rpm=Installed]
       | rc=0; changed=0; installed=()
       | tp_want=('cargo-deb' 'cargo-generate-rpm')
       | declare -A tp_before=() tp_after=() tp_wantv=()
@@ -38,7 +38,7 @@ role a
       | fi
       merged from a #1, b #4
 role c
-  #7 pkg[cargo] as shell:root reads [] writes [*] post [pkg:cargo:root:ripgrep=Installed]
+  #7 pkg[cargo] as shell:root reads [] writes [pkg:cargo:root:ripgrep, home:root] post [pkg:cargo:root:ripgrep=Installed]
       | rc=0; changed=0; installed=()
       | tp_want=('ripgrep')
       | declare -A tp_before=() tp_after=() tp_wantv=()

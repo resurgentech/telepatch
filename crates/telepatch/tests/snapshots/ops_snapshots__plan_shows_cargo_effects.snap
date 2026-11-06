@@ -6,7 +6,7 @@ host h (os: Debian/Debian 12)
 blocking reads: 0
 
 role (none)
-  #0 pkg[cargo] as shell:root reads [] writes [*] post [pkg:cargo:root:cargo-deb=Installed, pkg:cargo:root:cargo-generate-rpm=Installed]
+  #0 pkg[cargo] as shell:root reads [] writes [pkg:cargo:root:cargo-deb, pkg:cargo:root:cargo-generate-rpm, home:root] post [pkg:cargo:root:cargo-deb=Installed, pkg:cargo:root:cargo-generate-rpm=Installed]
       | rc=0; changed=0; installed=()
       | tp_want=('cargo-deb' 'cargo-generate-rpm')
       | declare -A tp_before=() tp_after=() tp_wantv=()

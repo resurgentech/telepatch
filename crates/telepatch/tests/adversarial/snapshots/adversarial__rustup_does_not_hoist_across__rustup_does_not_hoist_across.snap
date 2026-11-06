@@ -1,0 +1,826 @@
+---
+source: crates/telepatch/tests/adversarial/rustup_does_not_hoist_across.rs
+expression: all
+---
+=== sh
+host web1 (os: Debian/Ubuntu 24.04)
+blocking reads: 0
+
+window 1 (final)
+role a
+  #1 pkg[rustup] as shell:root reads [] writes [*] post [pkg:rustup:root:stable=Installed]
+      | rc=0; changed=0; installed=()
+      | tp_tc='stable'
+      | tp_prof='default'
+      | tp_path() {
+      |   tp_cb=${CARGO_HOME:-$HOME/.cargo}/bin
+      |   if [ -d "$tp_cb" ]; then case ":$PATH:" in *":$tp_cb:"*) ;; *) PATH=$tp_cb:$PATH;; esac; fi
+      | }
+      | tp_match() { awk -v t="$1" 'function tcm(f, t) { return f == t || (index(f, t "-") == 1 && substr(f, length(t) + 2) ~ /^(x86_64|i[3-6]86|aarch64|arm[0-9a-z_]*|riscv[0-9a-z]*|powerpc[0-9a-z_]*|s390x|loongarch64|mips[0-9a-z_]*|sparc[0-9a-z_]*|thumb[0-9a-z_]*|wasm[0-9]+)-[a-z0-9_]+-[a-z]/) } { if (tcm($1, t)) m=1 } END { exit m ? 0 : 1 }'; }
+      | tp_ver() { rustup run "$tp_tc" rustc --version 2>/dev/null | grep -oE '[0-9]+(\.[0-9A-Za-z+~-]+)*' | head -n1; }
+      | tp_has_tc() { rustup toolchain list 2>/dev/null | tp_match "$tp_tc"; }
+      | tp_updates() { awk -v t="$tp_tc" 'function tcm(f, t) { return f == t || (index(f, t "-") == 1 && substr(f, length(t) + 2) ~ /^(x86_64|i[3-6]86|aarch64|arm[0-9a-z_]*|riscv[0-9a-z]*|powerpc[0-9a-z_]*|s390x|loongarch64|mips[0-9a-z_]*|sparc[0-9a-z_]*|thumb[0-9a-z_]*|wasm[0-9]+)-[a-z0-9_]+-[a-z]/) } /[Uu]pdate available/ { if ($1 == "rustup") print "self"; else if (tcm($1, t)) { v=$0; sub(/.*-> */, "", v); split(v, a, " "); print "tc " a[1] } }'; }
+      | tp_check() { tp_chk=$(rustup check 2>&1); tp_crc=$?; [ "$tp_crc" -eq 0 ] || [ "$tp_crc" -eq 100 ]; }
+      | tp_path
+      | tp_fresh=0
+      | if ! command -v rustup >/dev/null 2>&1; then
+      |   ( set -o pipefail; curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain "$tp_tc" --profile "$tp_prof" )
+      |   rc=$?
+      |   tp_path
+      |   if [ "$rc" -eq 0 ] && ! command -v rustup >/dev/null 2>&1; then echo 'telepatch: rustup not found after the installer' >&2; rc=1; fi
+      |   if [ "$rc" -eq 0 ]; then tp_fresh=1; fi
+      | elif ! tp_has_tc; then
+      |   rustup toolchain install "$tp_tc" --profile "$tp_prof"
+      |   rc=$?
+      |   if [ "$rc" -eq 0 ]; then tp_fresh=1; fi
+      | fi
+      | if [ "$tp_fresh" -eq 1 ]; then
+      |   if tp_has_tc; then changed=1; installed+=("$tp_tc"); else echo "telepatch: rustup toolchain $tp_tc: not installed afterwards" >&2; rc=1; fi
+      | fi
+role b
+  #4 sh as shell:root reads [] writes [*]
+      | rc=0; changed=0; skipped=0
+      | echo between
+      | rc=$?
+      | if [ "$rc" -eq 0 ]; then changed=1; fi
+  #5 pkg[rustup] as shell:root reads [] writes [*] post [pkg:rustup:root:stable=Installed, pkg:rustup:root:stable/component/rust-src=Installed]
+      | rc=0; changed=0; installed=()
+      | tp_tc='stable'
+      | tp_prof='default'
+      | tp_path() {
+      |   tp_cb=${CARGO_HOME:-$HOME/.cargo}/bin
+      |   if [ -d "$tp_cb" ]; then case ":$PATH:" in *":$tp_cb:"*) ;; *) PATH=$tp_cb:$PATH;; esac; fi
+      | }
+      | tp_match() { awk -v t="$1" 'function tcm(f, t) { return f == t || (index(f, t "-") == 1 && substr(f, length(t) + 2) ~ /^(x86_64|i[3-6]86|aarch64|arm[0-9a-z_]*|riscv[0-9a-z]*|powerpc[0-9a-z_]*|s390x|loongarch64|mips[0-9a-z_]*|sparc[0-9a-z_]*|thumb[0-9a-z_]*|wasm[0-9]+)-[a-z0-9_]+-[a-z]/) } { if (tcm($1, t)) m=1 } END { exit m ? 0 : 1 }'; }
+      | tp_ver() { rustup run "$tp_tc" rustc --version 2>/dev/null | grep -oE '[0-9]+(\.[0-9A-Za-z+~-]+)*' | head -n1; }
+      | tp_has_tc() { rustup toolchain list 2>/dev/null | tp_match "$tp_tc"; }
+      | tp_updates() { awk -v t="$tp_tc" 'function tcm(f, t) { return f == t || (index(f, t "-") == 1 && substr(f, length(t) + 2) ~ /^(x86_64|i[3-6]86|aarch64|arm[0-9a-z_]*|riscv[0-9a-z]*|powerpc[0-9a-z_]*|s390x|loongarch64|mips[0-9a-z_]*|sparc[0-9a-z_]*|thumb[0-9a-z_]*|wasm[0-9]+)-[a-z0-9_]+-[a-z]/) } /[Uu]pdate available/ { if ($1 == "rustup") print "self"; else if (tcm($1, t)) { v=$0; sub(/.*-> */, "", v); split(v, a, " "); print "tc " a[1] } }'; }
+      | tp_check() { tp_chk=$(rustup check 2>&1); tp_crc=$?; [ "$tp_crc" -eq 0 ] || [ "$tp_crc" -eq 100 ]; }
+      | tp_path
+      | tp_fresh=0
+      | if ! command -v rustup >/dev/null 2>&1; then
+      |   ( set -o pipefail; curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain "$tp_tc" --profile "$tp_prof" )
+      |   rc=$?
+      |   tp_path
+      |   if [ "$rc" -eq 0 ] && ! command -v rustup >/dev/null 2>&1; then echo 'telepatch: rustup not found after the installer' >&2; rc=1; fi
+      |   if [ "$rc" -eq 0 ]; then tp_fresh=1; fi
+      | elif ! tp_has_tc; then
+      |   rustup toolchain install "$tp_tc" --profile "$tp_prof"
+      |   rc=$?
+      |   if [ "$rc" -eq 0 ]; then tp_fresh=1; fi
+      | fi
+      | if [ "$tp_fresh" -eq 1 ]; then
+      |   if tp_has_tc; then changed=1; installed+=("$tp_tc"); else echo "telepatch: rustup toolchain $tp_tc: not installed afterwards" >&2; rc=1; fi
+      | fi
+      | if [ "$rc" -eq 0 ]; then
+      |   tp_have=$(rustup component list --installed --toolchain "$tp_tc" 2>/dev/null)
+      |   tp_miss=()
+      |   for tp_x in 'rust-src'; do
+      |     printf '%s\n' "$tp_have" | tp_match "$tp_x" || tp_miss+=("$tp_x")
+      |   done
+      |   if [ "${#tp_miss[@]}" -gt 0 ]; then
+      |     rustup component add --toolchain "$tp_tc" "${tp_miss[@]}"
+      |     rc=$?
+      |     if [ "$rc" -eq 0 ]; then
+      |       changed=1
+      |       for tp_x in "${tp_miss[@]}"; do installed+=("$tp_tc/component/$tp_x"); done
+      |     fi
+      |   fi
+      | fi
+
+warning: sh! in a role body at crates/telepatch/tests/adversarial/rustup_does_not_hoist_across.rs:20
+
+=== file
+host web1 (os: Debian/Ubuntu 24.04)
+blocking reads: 0
+
+window 1 (final)
+role a
+  #1 pkg[rustup] as shell:root reads [] writes [*] post [pkg:rustup:root:stable=Installed]
+      | rc=0; changed=0; installed=()
+      | tp_tc='stable'
+      | tp_prof='default'
+      | tp_path() {
+      |   tp_cb=${CARGO_HOME:-$HOME/.cargo}/bin
+      |   if [ -d "$tp_cb" ]; then case ":$PATH:" in *":$tp_cb:"*) ;; *) PATH=$tp_cb:$PATH;; esac; fi
+      | }
+      | tp_match() { awk -v t="$1" 'function tcm(f, t) { return f == t || (index(f, t "-") == 1 && substr(f, length(t) + 2) ~ /^(x86_64|i[3-6]86|aarch64|arm[0-9a-z_]*|riscv[0-9a-z]*|powerpc[0-9a-z_]*|s390x|loongarch64|mips[0-9a-z_]*|sparc[0-9a-z_]*|thumb[0-9a-z_]*|wasm[0-9]+)-[a-z0-9_]+-[a-z]/) } { if (tcm($1, t)) m=1 } END { exit m ? 0 : 1 }'; }
+      | tp_ver() { rustup run "$tp_tc" rustc --version 2>/dev/null | grep -oE '[0-9]+(\.[0-9A-Za-z+~-]+)*' | head -n1; }
+      | tp_has_tc() { rustup toolchain list 2>/dev/null | tp_match "$tp_tc"; }
+      | tp_updates() { awk -v t="$tp_tc" 'function tcm(f, t) { return f == t || (index(f, t "-") == 1 && substr(f, length(t) + 2) ~ /^(x86_64|i[3-6]86|aarch64|arm[0-9a-z_]*|riscv[0-9a-z]*|powerpc[0-9a-z_]*|s390x|loongarch64|mips[0-9a-z_]*|sparc[0-9a-z_]*|thumb[0-9a-z_]*|wasm[0-9]+)-[a-z0-9_]+-[a-z]/) } /[Uu]pdate available/ { if ($1 == "rustup") print "self"; else if (tcm($1, t)) { v=$0; sub(/.*-> */, "", v); split(v, a, " "); print "tc " a[1] } }'; }
+      | tp_check() { tp_chk=$(rustup check 2>&1); tp_crc=$?; [ "$tp_crc" -eq 0 ] || [ "$tp_crc" -eq 100 ]; }
+      | tp_path
+      | tp_fresh=0
+      | if ! command -v rustup >/dev/null 2>&1; then
+      |   ( set -o pipefail; curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain "$tp_tc" --profile "$tp_prof" )
+      |   rc=$?
+      |   tp_path
+      |   if [ "$rc" -eq 0 ] && ! command -v rustup >/dev/null 2>&1; then echo 'telepatch: rustup not found after the installer' >&2; rc=1; fi
+      |   if [ "$rc" -eq 0 ]; then tp_fresh=1; fi
+      | elif ! tp_has_tc; then
+      |   rustup toolchain install "$tp_tc" --profile "$tp_prof"
+      |   rc=$?
+      |   if [ "$rc" -eq 0 ]; then tp_fresh=1; fi
+      | fi
+      | if [ "$tp_fresh" -eq 1 ]; then
+      |   if tp_has_tc; then changed=1; installed+=("$tp_tc"); else echo "telepatch: rustup toolchain $tp_tc: not installed afterwards" >&2; rc=1; fi
+      | fi
+role b
+  #4 file as shell:root reads [] writes [file:/etc/between] post [file:/etc/between=Exists(true)]
+      | rc=0; changed=0
+      | tp_p='/etc/between'
+      | if [ -d "$tp_p" ]; then echo "telepatch: $tp_p is a directory" >&2; rc=1; fi
+      | tp_b='eAo='
+      | if [ "$rc" -eq 0 ] && ! { [ -f "$tp_p" ] && [ "$(printf %s "$tp_b" | base64 -d | sha256sum | cut -d' ' -f1)" = "$(sha256sum < "$tp_p" | cut -d' ' -f1)" ]; }; then
+      |   tp_t=$(mktemp "$tp_p.tpXXXXXX") || rc=$?
+      |   if [ "$rc" -eq 0 ]; then
+      |     if printf %s "$tp_b" | base64 -d > "$tp_t"; then
+      |       if [ -e "$tp_p" ]; then
+      |         chmod --reference="$tp_p" "$tp_t"; chown --reference="$tp_p" "$tp_t" 2>/dev/null
+      |       else
+      |         chmod 644 "$tp_t"
+      |       fi
+      |       mv -f "$tp_t" "$tp_p"; rc=$?
+      |     else
+      |       rc=$?
+      |     fi
+      |     if [ "$rc" -eq 0 ]; then changed=1; else rm -f "$tp_t"; fi
+      |   fi
+      | fi
+  #5 pkg[rustup] as shell:root reads [] writes [*] post [pkg:rustup:root:stable=Installed, pkg:rustup:root:stable/component/rust-src=Installed]
+      | rc=0; changed=0; installed=()
+      | tp_tc='stable'
+      | tp_prof='default'
+      | tp_path() {
+      |   tp_cb=${CARGO_HOME:-$HOME/.cargo}/bin
+      |   if [ -d "$tp_cb" ]; then case ":$PATH:" in *":$tp_cb:"*) ;; *) PATH=$tp_cb:$PATH;; esac; fi
+      | }
+      | tp_match() { awk -v t="$1" 'function tcm(f, t) { return f == t || (index(f, t "-") == 1 && substr(f, length(t) + 2) ~ /^(x86_64|i[3-6]86|aarch64|arm[0-9a-z_]*|riscv[0-9a-z]*|powerpc[0-9a-z_]*|s390x|loongarch64|mips[0-9a-z_]*|sparc[0-9a-z_]*|thumb[0-9a-z_]*|wasm[0-9]+)-[a-z0-9_]+-[a-z]/) } { if (tcm($1, t)) m=1 } END { exit m ? 0 : 1 }'; }
+      | tp_ver() { rustup run "$tp_tc" rustc --version 2>/dev/null | grep -oE '[0-9]+(\.[0-9A-Za-z+~-]+)*' | head -n1; }
+      | tp_has_tc() { rustup toolchain list 2>/dev/null | tp_match "$tp_tc"; }
+      | tp_updates() { awk -v t="$tp_tc" 'function tcm(f, t) { return f == t || (index(f, t "-") == 1 && substr(f, length(t) + 2) ~ /^(x86_64|i[3-6]86|aarch64|arm[0-9a-z_]*|riscv[0-9a-z]*|powerpc[0-9a-z_]*|s390x|loongarch64|mips[0-9a-z_]*|sparc[0-9a-z_]*|thumb[0-9a-z_]*|wasm[0-9]+)-[a-z0-9_]+-[a-z]/) } /[Uu]pdate available/ { if ($1 == "rustup") print "self"; else if (tcm($1, t)) { v=$0; sub(/.*-> */, "", v); split(v, a, " "); print "tc " a[1] } }'; }
+      | tp_check() { tp_chk=$(rustup check 2>&1); tp_crc=$?; [ "$tp_crc" -eq 0 ] || [ "$tp_crc" -eq 100 ]; }
+      | tp_path
+      | tp_fresh=0
+      | if ! command -v rustup >/dev/null 2>&1; then
+      |   ( set -o pipefail; curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain "$tp_tc" --profile "$tp_prof" )
+      |   rc=$?
+      |   tp_path
+      |   if [ "$rc" -eq 0 ] && ! command -v rustup >/dev/null 2>&1; then echo 'telepatch: rustup not found after the installer' >&2; rc=1; fi
+      |   if [ "$rc" -eq 0 ]; then tp_fresh=1; fi
+      | elif ! tp_has_tc; then
+      |   rustup toolchain install "$tp_tc" --profile "$tp_prof"
+      |   rc=$?
+      |   if [ "$rc" -eq 0 ]; then tp_fresh=1; fi
+      | fi
+      | if [ "$tp_fresh" -eq 1 ]; then
+      |   if tp_has_tc; then changed=1; installed+=("$tp_tc"); else echo "telepatch: rustup toolchain $tp_tc: not installed afterwards" >&2; rc=1; fi
+      | fi
+      | if [ "$rc" -eq 0 ]; then
+      |   tp_have=$(rustup component list --installed --toolchain "$tp_tc" 2>/dev/null)
+      |   tp_miss=()
+      |   for tp_x in 'rust-src'; do
+      |     printf '%s\n' "$tp_have" | tp_match "$tp_x" || tp_miss+=("$tp_x")
+      |   done
+      |   if [ "${#tp_miss[@]}" -gt 0 ]; then
+      |     rustup component add --toolchain "$tp_tc" "${tp_miss[@]}"
+      |     rc=$?
+      |     if [ "$rc" -eq 0 ]; then
+      |       changed=1
+      |       for tp_x in "${tp_miss[@]}"; do installed+=("$tp_tc/component/$tp_x"); done
+      |     fi
+      |   fi
+      | fi
+
+=== barrier
+host web1 (os: Debian/Ubuntu 24.04)
+blocking reads: 0
+
+window 1 (final)
+role a
+  #1 pkg[rustup] as shell:root reads [] writes [*] post [pkg:rustup:root:stable=Installed]
+      | rc=0; changed=0; installed=()
+      | tp_tc='stable'
+      | tp_prof='default'
+      | tp_path() {
+      |   tp_cb=${CARGO_HOME:-$HOME/.cargo}/bin
+      |   if [ -d "$tp_cb" ]; then case ":$PATH:" in *":$tp_cb:"*) ;; *) PATH=$tp_cb:$PATH;; esac; fi
+      | }
+      | tp_match() { awk -v t="$1" 'function tcm(f, t) { return f == t || (index(f, t "-") == 1 && substr(f, length(t) + 2) ~ /^(x86_64|i[3-6]86|aarch64|arm[0-9a-z_]*|riscv[0-9a-z]*|powerpc[0-9a-z_]*|s390x|loongarch64|mips[0-9a-z_]*|sparc[0-9a-z_]*|thumb[0-9a-z_]*|wasm[0-9]+)-[a-z0-9_]+-[a-z]/) } { if (tcm($1, t)) m=1 } END { exit m ? 0 : 1 }'; }
+      | tp_ver() { rustup run "$tp_tc" rustc --version 2>/dev/null | grep -oE '[0-9]+(\.[0-9A-Za-z+~-]+)*' | head -n1; }
+      | tp_has_tc() { rustup toolchain list 2>/dev/null | tp_match "$tp_tc"; }
+      | tp_updates() { awk -v t="$tp_tc" 'function tcm(f, t) { return f == t || (index(f, t "-") == 1 && substr(f, length(t) + 2) ~ /^(x86_64|i[3-6]86|aarch64|arm[0-9a-z_]*|riscv[0-9a-z]*|powerpc[0-9a-z_]*|s390x|loongarch64|mips[0-9a-z_]*|sparc[0-9a-z_]*|thumb[0-9a-z_]*|wasm[0-9]+)-[a-z0-9_]+-[a-z]/) } /[Uu]pdate available/ { if ($1 == "rustup") print "self"; else if (tcm($1, t)) { v=$0; sub(/.*-> */, "", v); split(v, a, " "); print "tc " a[1] } }'; }
+      | tp_check() { tp_chk=$(rustup check 2>&1); tp_crc=$?; [ "$tp_crc" -eq 0 ] || [ "$tp_crc" -eq 100 ]; }
+      | tp_path
+      | tp_fresh=0
+      | if ! command -v rustup >/dev/null 2>&1; then
+      |   ( set -o pipefail; curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain "$tp_tc" --profile "$tp_prof" )
+      |   rc=$?
+      |   tp_path
+      |   if [ "$rc" -eq 0 ] && ! command -v rustup >/dev/null 2>&1; then echo 'telepatch: rustup not found after the installer' >&2; rc=1; fi
+      |   if [ "$rc" -eq 0 ]; then tp_fresh=1; fi
+      | elif ! tp_has_tc; then
+      |   rustup toolchain install "$tp_tc" --profile "$tp_prof"
+      |   rc=$?
+      |   if [ "$rc" -eq 0 ]; then tp_fresh=1; fi
+      | fi
+      | if [ "$tp_fresh" -eq 1 ]; then
+      |   if tp_has_tc; then changed=1; installed+=("$tp_tc"); else echo "telepatch: rustup toolchain $tp_tc: not installed afterwards" >&2; rc=1; fi
+      | fi
+role b
+  #5 pkg[rustup] as shell:root reads [] writes [*] post [pkg:rustup:root:stable=Installed, pkg:rustup:root:stable/component/rust-src=Installed]
+      | rc=0; changed=0; installed=()
+      | tp_tc='stable'
+      | tp_prof='default'
+      | tp_path() {
+      |   tp_cb=${CARGO_HOME:-$HOME/.cargo}/bin
+      |   if [ -d "$tp_cb" ]; then case ":$PATH:" in *":$tp_cb:"*) ;; *) PATH=$tp_cb:$PATH;; esac; fi
+      | }
+      | tp_match() { awk -v t="$1" 'function tcm(f, t) { return f == t || (index(f, t "-") == 1 && substr(f, length(t) + 2) ~ /^(x86_64|i[3-6]86|aarch64|arm[0-9a-z_]*|riscv[0-9a-z]*|powerpc[0-9a-z_]*|s390x|loongarch64|mips[0-9a-z_]*|sparc[0-9a-z_]*|thumb[0-9a-z_]*|wasm[0-9]+)-[a-z0-9_]+-[a-z]/) } { if (tcm($1, t)) m=1 } END { exit m ? 0 : 1 }'; }
+      | tp_ver() { rustup run "$tp_tc" rustc --version 2>/dev/null | grep -oE '[0-9]+(\.[0-9A-Za-z+~-]+)*' | head -n1; }
+      | tp_has_tc() { rustup toolchain list 2>/dev/null | tp_match "$tp_tc"; }
+      | tp_updates() { awk -v t="$tp_tc" 'function tcm(f, t) { return f == t || (index(f, t "-") == 1 && substr(f, length(t) + 2) ~ /^(x86_64|i[3-6]86|aarch64|arm[0-9a-z_]*|riscv[0-9a-z]*|powerpc[0-9a-z_]*|s390x|loongarch64|mips[0-9a-z_]*|sparc[0-9a-z_]*|thumb[0-9a-z_]*|wasm[0-9]+)-[a-z0-9_]+-[a-z]/) } /[Uu]pdate available/ { if ($1 == "rustup") print "self"; else if (tcm($1, t)) { v=$0; sub(/.*-> */, "", v); split(v, a, " "); print "tc " a[1] } }'; }
+      | tp_check() { tp_chk=$(rustup check 2>&1); tp_crc=$?; [ "$tp_crc" -eq 0 ] || [ "$tp_crc" -eq 100 ]; }
+      | tp_path
+      | tp_fresh=0
+      | if ! command -v rustup >/dev/null 2>&1; then
+      |   ( set -o pipefail; curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain "$tp_tc" --profile "$tp_prof" )
+      |   rc=$?
+      |   tp_path
+      |   if [ "$rc" -eq 0 ] && ! command -v rustup >/dev/null 2>&1; then echo 'telepatch: rustup not found after the installer' >&2; rc=1; fi
+      |   if [ "$rc" -eq 0 ]; then tp_fresh=1; fi
+      | elif ! tp_has_tc; then
+      |   rustup toolchain install "$tp_tc" --profile "$tp_prof"
+      |   rc=$?
+      |   if [ "$rc" -eq 0 ]; then tp_fresh=1; fi
+      | fi
+      | if [ "$tp_fresh" -eq 1 ]; then
+      |   if tp_has_tc; then changed=1; installed+=("$tp_tc"); else echo "telepatch: rustup toolchain $tp_tc: not installed afterwards" >&2; rc=1; fi
+      | fi
+      | if [ "$rc" -eq 0 ]; then
+      |   tp_have=$(rustup component list --installed --toolchain "$tp_tc" 2>/dev/null)
+      |   tp_miss=()
+      |   for tp_x in 'rust-src'; do
+      |     printf '%s\n' "$tp_have" | tp_match "$tp_x" || tp_miss+=("$tp_x")
+      |   done
+      |   if [ "${#tp_miss[@]}" -gt 0 ]; then
+      |     rustup component add --toolchain "$tp_tc" "${tp_miss[@]}"
+      |     rc=$?
+      |     if [ "$rc" -eq 0 ]; then
+      |       changed=1
+      |       for tp_x in "${tp_miss[@]}"; do installed+=("$tp_tc/component/$tp_x"); done
+      |     fi
+      |   fi
+      | fi
+
+=== set_default across cargo
+host web1 (os: Debian/Ubuntu 24.04)
+blocking reads: 0
+
+window 1 (final)
+role a
+  #1 pkg[rustup] as shell:root reads [] writes [*] post [pkg:rustup:root:stable=Installed]
+      | rc=0; changed=0; installed=()
+      | tp_tc='stable'
+      | tp_prof='default'
+      | tp_path() {
+      |   tp_cb=${CARGO_HOME:-$HOME/.cargo}/bin
+      |   if [ -d "$tp_cb" ]; then case ":$PATH:" in *":$tp_cb:"*) ;; *) PATH=$tp_cb:$PATH;; esac; fi
+      | }
+      | tp_match() { awk -v t="$1" 'function tcm(f, t) { return f == t || (index(f, t "-") == 1 && substr(f, length(t) + 2) ~ /^(x86_64|i[3-6]86|aarch64|arm[0-9a-z_]*|riscv[0-9a-z]*|powerpc[0-9a-z_]*|s390x|loongarch64|mips[0-9a-z_]*|sparc[0-9a-z_]*|thumb[0-9a-z_]*|wasm[0-9]+)-[a-z0-9_]+-[a-z]/) } { if (tcm($1, t)) m=1 } END { exit m ? 0 : 1 }'; }
+      | tp_ver() { rustup run "$tp_tc" rustc --version 2>/dev/null | grep -oE '[0-9]+(\.[0-9A-Za-z+~-]+)*' | head -n1; }
+      | tp_has_tc() { rustup toolchain list 2>/dev/null | tp_match "$tp_tc"; }
+      | tp_updates() { awk -v t="$tp_tc" 'function tcm(f, t) { return f == t || (index(f, t "-") == 1 && substr(f, length(t) + 2) ~ /^(x86_64|i[3-6]86|aarch64|arm[0-9a-z_]*|riscv[0-9a-z]*|powerpc[0-9a-z_]*|s390x|loongarch64|mips[0-9a-z_]*|sparc[0-9a-z_]*|thumb[0-9a-z_]*|wasm[0-9]+)-[a-z0-9_]+-[a-z]/) } /[Uu]pdate available/ { if ($1 == "rustup") print "self"; else if (tcm($1, t)) { v=$0; sub(/.*-> */, "", v); split(v, a, " "); print "tc " a[1] } }'; }
+      | tp_check() { tp_chk=$(rustup check 2>&1); tp_crc=$?; [ "$tp_crc" -eq 0 ] || [ "$tp_crc" -eq 100 ]; }
+      | tp_path
+      | tp_fresh=0
+      | if ! command -v rustup >/dev/null 2>&1; then
+      |   ( set -o pipefail; curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain "$tp_tc" --profile "$tp_prof" )
+      |   rc=$?
+      |   tp_path
+      |   if [ "$rc" -eq 0 ] && ! command -v rustup >/dev/null 2>&1; then echo 'telepatch: rustup not found after the installer' >&2; rc=1; fi
+      |   if [ "$rc" -eq 0 ]; then tp_fresh=1; fi
+      | elif ! tp_has_tc; then
+      |   rustup toolchain install "$tp_tc" --profile "$tp_prof"
+      |   rc=$?
+      |   if [ "$rc" -eq 0 ]; then tp_fresh=1; fi
+      | fi
+      | if [ "$tp_fresh" -eq 1 ]; then
+      |   if tp_has_tc; then changed=1; installed+=("$tp_tc"); else echo "telepatch: rustup toolchain $tp_tc: not installed afterwards" >&2; rc=1; fi
+      | fi
+role b
+  #4 pkg[cargo] as shell:root reads [] writes [pkg:cargo:root:cargo-deb, home:root] post [pkg:cargo:root:cargo-deb=Installed]
+      | rc=0; changed=0; installed=()
+      | tp_want=('cargo-deb')
+      | declare -A tp_before=() tp_after=() tp_wantv=()
+      | tp_todo=()
+      | tp_list() { cargo install --list 2>/dev/null | sed -n 's/^\([^ ][^ ]*\) v\([^ :][^ :]*\)[^:]*:$/\1 \2/p'; }
+      | if ! command -v cargo >/dev/null 2>&1; then echo 'telepatch: cargo not found' >&2; rc=127; fi
+      | if [ "$rc" -eq 0 ]; then
+      |   while read -r tp_n tp_v; do tp_before[$tp_n]=$tp_v; done < <(tp_list)
+      |   for tp_n in "${tp_want[@]}"; do
+      |     [ -n "${tp_before[$tp_n]+x}" ] || tp_todo+=("$tp_n")
+      |   done
+      | fi
+      | if [ "$rc" -eq 0 ] && [ "${#tp_todo[@]}" -gt 0 ]; then
+      |   cargo install "${tp_todo[@]}"
+      |   rc=$?
+      |   while read -r tp_n tp_v; do tp_after[$tp_n]=$tp_v; done < <(tp_list)
+      |   for tp_n in "${tp_want[@]}"; do
+      |     if [ "${tp_after[$tp_n]-}" != "${tp_before[$tp_n]-}" ]; then changed=1; installed+=("$tp_n"); fi
+      |   done
+      |   if [ "$rc" -eq 0 ]; then
+      |     for tp_n in "${tp_todo[@]}"; do
+      |       tp_got=${tp_after[$tp_n]-}; tp_wv=${tp_wantv[$tp_n]-}
+      |       if [ -z "$tp_got" ] || { [ -n "$tp_wv" ] && [ "$tp_got" != "$tp_wv" ]; }; then
+      |         echo "telepatch: cargo $tp_n: installed ${tp_got:-absent}, wanted ${tp_wv:-present}" >&2; rc=1
+      |       fi
+      |     done
+      |   fi
+      | fi
+  #5 pkg[rustup] as shell:root reads [] writes [*] post [pkg:rustup:root:stable=Installed]
+      | rc=0; changed=0; installed=()
+      | tp_tc='stable'
+      | tp_prof='default'
+      | tp_path() {
+      |   tp_cb=${CARGO_HOME:-$HOME/.cargo}/bin
+      |   if [ -d "$tp_cb" ]; then case ":$PATH:" in *":$tp_cb:"*) ;; *) PATH=$tp_cb:$PATH;; esac; fi
+      | }
+      | tp_match() { awk -v t="$1" 'function tcm(f, t) { return f == t || (index(f, t "-") == 1 && substr(f, length(t) + 2) ~ /^(x86_64|i[3-6]86|aarch64|arm[0-9a-z_]*|riscv[0-9a-z]*|powerpc[0-9a-z_]*|s390x|loongarch64|mips[0-9a-z_]*|sparc[0-9a-z_]*|thumb[0-9a-z_]*|wasm[0-9]+)-[a-z0-9_]+-[a-z]/) } { if (tcm($1, t)) m=1 } END { exit m ? 0 : 1 }'; }
+      | tp_ver() { rustup run "$tp_tc" rustc --version 2>/dev/null | grep -oE '[0-9]+(\.[0-9A-Za-z+~-]+)*' | head -n1; }
+      | tp_has_tc() { rustup toolchain list 2>/dev/null | tp_match "$tp_tc"; }
+      | tp_updates() { awk -v t="$tp_tc" 'function tcm(f, t) { return f == t || (index(f, t "-") == 1 && substr(f, length(t) + 2) ~ /^(x86_64|i[3-6]86|aarch64|arm[0-9a-z_]*|riscv[0-9a-z]*|powerpc[0-9a-z_]*|s390x|loongarch64|mips[0-9a-z_]*|sparc[0-9a-z_]*|thumb[0-9a-z_]*|wasm[0-9]+)-[a-z0-9_]+-[a-z]/) } /[Uu]pdate available/ { if ($1 == "rustup") print "self"; else if (tcm($1, t)) { v=$0; sub(/.*-> */, "", v); split(v, a, " "); print "tc " a[1] } }'; }
+      | tp_check() { tp_chk=$(rustup check 2>&1); tp_crc=$?; [ "$tp_crc" -eq 0 ] || [ "$tp_crc" -eq 100 ]; }
+      | tp_path
+      | tp_fresh=0
+      | if ! command -v rustup >/dev/null 2>&1; then
+      |   ( set -o pipefail; curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain "$tp_tc" --profile "$tp_prof" )
+      |   rc=$?
+      |   tp_path
+      |   if [ "$rc" -eq 0 ] && ! command -v rustup >/dev/null 2>&1; then echo 'telepatch: rustup not found after the installer' >&2; rc=1; fi
+      |   if [ "$rc" -eq 0 ]; then tp_fresh=1; fi
+      | elif ! tp_has_tc; then
+      |   rustup toolchain install "$tp_tc" --profile "$tp_prof"
+      |   rc=$?
+      |   if [ "$rc" -eq 0 ]; then tp_fresh=1; fi
+      | fi
+      | if [ "$tp_fresh" -eq 1 ]; then
+      |   if tp_has_tc; then changed=1; installed+=("$tp_tc"); else echo "telepatch: rustup toolchain $tp_tc: not installed afterwards" >&2; rc=1; fi
+      | fi
+      | if [ "$rc" -eq 0 ] && ! rustup default 2>/dev/null | tp_match "$tp_tc"; then
+      |   rustup default "$tp_tc"
+      |   rc=$?
+      |   if [ "$rc" -eq 0 ]; then changed=1; fi
+      | fi
+
+=== latest onto present across cargo
+host web1 (os: Debian/Ubuntu 24.04)
+blocking reads: 0
+
+window 1 (final)
+role a
+  #1 pkg[rustup] as shell:root reads [] writes [*] post [pkg:rustup:root:stable=Installed]
+      | rc=0; changed=0; installed=()
+      | tp_tc='stable'
+      | tp_prof='default'
+      | tp_path() {
+      |   tp_cb=${CARGO_HOME:-$HOME/.cargo}/bin
+      |   if [ -d "$tp_cb" ]; then case ":$PATH:" in *":$tp_cb:"*) ;; *) PATH=$tp_cb:$PATH;; esac; fi
+      | }
+      | tp_match() { awk -v t="$1" 'function tcm(f, t) { return f == t || (index(f, t "-") == 1 && substr(f, length(t) + 2) ~ /^(x86_64|i[3-6]86|aarch64|arm[0-9a-z_]*|riscv[0-9a-z]*|powerpc[0-9a-z_]*|s390x|loongarch64|mips[0-9a-z_]*|sparc[0-9a-z_]*|thumb[0-9a-z_]*|wasm[0-9]+)-[a-z0-9_]+-[a-z]/) } { if (tcm($1, t)) m=1 } END { exit m ? 0 : 1 }'; }
+      | tp_ver() { rustup run "$tp_tc" rustc --version 2>/dev/null | grep -oE '[0-9]+(\.[0-9A-Za-z+~-]+)*' | head -n1; }
+      | tp_has_tc() { rustup toolchain list 2>/dev/null | tp_match "$tp_tc"; }
+      | tp_updates() { awk -v t="$tp_tc" 'function tcm(f, t) { return f == t || (index(f, t "-") == 1 && substr(f, length(t) + 2) ~ /^(x86_64|i[3-6]86|aarch64|arm[0-9a-z_]*|riscv[0-9a-z]*|powerpc[0-9a-z_]*|s390x|loongarch64|mips[0-9a-z_]*|sparc[0-9a-z_]*|thumb[0-9a-z_]*|wasm[0-9]+)-[a-z0-9_]+-[a-z]/) } /[Uu]pdate available/ { if ($1 == "rustup") print "self"; else if (tcm($1, t)) { v=$0; sub(/.*-> */, "", v); split(v, a, " "); print "tc " a[1] } }'; }
+      | tp_check() { tp_chk=$(rustup check 2>&1); tp_crc=$?; [ "$tp_crc" -eq 0 ] || [ "$tp_crc" -eq 100 ]; }
+      | tp_path
+      | tp_fresh=0
+      | if ! command -v rustup >/dev/null 2>&1; then
+      |   ( set -o pipefail; curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain "$tp_tc" --profile "$tp_prof" )
+      |   rc=$?
+      |   tp_path
+      |   if [ "$rc" -eq 0 ] && ! command -v rustup >/dev/null 2>&1; then echo 'telepatch: rustup not found after the installer' >&2; rc=1; fi
+      |   if [ "$rc" -eq 0 ]; then tp_fresh=1; fi
+      | elif ! tp_has_tc; then
+      |   rustup toolchain install "$tp_tc" --profile "$tp_prof"
+      |   rc=$?
+      |   if [ "$rc" -eq 0 ]; then tp_fresh=1; fi
+      | fi
+      | if [ "$tp_fresh" -eq 1 ]; then
+      |   if tp_has_tc; then changed=1; installed+=("$tp_tc"); else echo "telepatch: rustup toolchain $tp_tc: not installed afterwards" >&2; rc=1; fi
+      | fi
+role b
+  #4 pkg[cargo] as shell:root reads [] writes [pkg:cargo:root:cargo-deb, home:root] post [pkg:cargo:root:cargo-deb=Installed]
+      | rc=0; changed=0; installed=()
+      | tp_want=('cargo-deb')
+      | declare -A tp_before=() tp_after=() tp_wantv=()
+      | tp_todo=()
+      | tp_list() { cargo install --list 2>/dev/null | sed -n 's/^\([^ ][^ ]*\) v\([^ :][^ :]*\)[^:]*:$/\1 \2/p'; }
+      | if ! command -v cargo >/dev/null 2>&1; then echo 'telepatch: cargo not found' >&2; rc=127; fi
+      | if [ "$rc" -eq 0 ]; then
+      |   while read -r tp_n tp_v; do tp_before[$tp_n]=$tp_v; done < <(tp_list)
+      |   for tp_n in "${tp_want[@]}"; do
+      |     [ -n "${tp_before[$tp_n]+x}" ] || tp_todo+=("$tp_n")
+      |   done
+      | fi
+      | if [ "$rc" -eq 0 ] && [ "${#tp_todo[@]}" -gt 0 ]; then
+      |   cargo install "${tp_todo[@]}"
+      |   rc=$?
+      |   while read -r tp_n tp_v; do tp_after[$tp_n]=$tp_v; done < <(tp_list)
+      |   for tp_n in "${tp_want[@]}"; do
+      |     if [ "${tp_after[$tp_n]-}" != "${tp_before[$tp_n]-}" ]; then changed=1; installed+=("$tp_n"); fi
+      |   done
+      |   if [ "$rc" -eq 0 ]; then
+      |     for tp_n in "${tp_todo[@]}"; do
+      |       tp_got=${tp_after[$tp_n]-}; tp_wv=${tp_wantv[$tp_n]-}
+      |       if [ -z "$tp_got" ] || { [ -n "$tp_wv" ] && [ "$tp_got" != "$tp_wv" ]; }; then
+      |         echo "telepatch: cargo $tp_n: installed ${tp_got:-absent}, wanted ${tp_wv:-present}" >&2; rc=1
+      |       fi
+      |     done
+      |   fi
+      | fi
+  #5 pkg[rustup] as shell:root reads [] writes [*] post [pkg:rustup:root:stable=Installed]
+      | rc=0; changed=0; installed=()
+      | tp_tc='stable'
+      | tp_prof='default'
+      | tp_path() {
+      |   tp_cb=${CARGO_HOME:-$HOME/.cargo}/bin
+      |   if [ -d "$tp_cb" ]; then case ":$PATH:" in *":$tp_cb:"*) ;; *) PATH=$tp_cb:$PATH;; esac; fi
+      | }
+      | tp_match() { awk -v t="$1" 'function tcm(f, t) { return f == t || (index(f, t "-") == 1 && substr(f, length(t) + 2) ~ /^(x86_64|i[3-6]86|aarch64|arm[0-9a-z_]*|riscv[0-9a-z]*|powerpc[0-9a-z_]*|s390x|loongarch64|mips[0-9a-z_]*|sparc[0-9a-z_]*|thumb[0-9a-z_]*|wasm[0-9]+)-[a-z0-9_]+-[a-z]/) } { if (tcm($1, t)) m=1 } END { exit m ? 0 : 1 }'; }
+      | tp_ver() { rustup run "$tp_tc" rustc --version 2>/dev/null | grep -oE '[0-9]+(\.[0-9A-Za-z+~-]+)*' | head -n1; }
+      | tp_has_tc() { rustup toolchain list 2>/dev/null | tp_match "$tp_tc"; }
+      | tp_updates() { awk -v t="$tp_tc" 'function tcm(f, t) { return f == t || (index(f, t "-") == 1 && substr(f, length(t) + 2) ~ /^(x86_64|i[3-6]86|aarch64|arm[0-9a-z_]*|riscv[0-9a-z]*|powerpc[0-9a-z_]*|s390x|loongarch64|mips[0-9a-z_]*|sparc[0-9a-z_]*|thumb[0-9a-z_]*|wasm[0-9]+)-[a-z0-9_]+-[a-z]/) } /[Uu]pdate available/ { if ($1 == "rustup") print "self"; else if (tcm($1, t)) { v=$0; sub(/.*-> */, "", v); split(v, a, " "); print "tc " a[1] } }'; }
+      | tp_check() { tp_chk=$(rustup check 2>&1); tp_crc=$?; [ "$tp_crc" -eq 0 ] || [ "$tp_crc" -eq 100 ]; }
+      | tp_path
+      | tp_fresh=0
+      | if ! command -v rustup >/dev/null 2>&1; then
+      |   ( set -o pipefail; curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain "$tp_tc" --profile "$tp_prof" )
+      |   rc=$?
+      |   tp_path
+      |   if [ "$rc" -eq 0 ] && ! command -v rustup >/dev/null 2>&1; then echo 'telepatch: rustup not found after the installer' >&2; rc=1; fi
+      |   if [ "$rc" -eq 0 ]; then tp_fresh=1; fi
+      | elif ! tp_has_tc; then
+      |   rustup toolchain install "$tp_tc" --profile "$tp_prof"
+      |   rc=$?
+      |   if [ "$rc" -eq 0 ]; then tp_fresh=1; fi
+      | fi
+      | if [ "$tp_fresh" -eq 1 ]; then
+      |   if tp_has_tc; then changed=1; installed+=("$tp_tc"); else echo "telepatch: rustup toolchain $tp_tc: not installed afterwards" >&2; rc=1; fi
+      | fi
+      | if [ "$rc" -eq 0 ] && [ "$tp_fresh" -eq 0 ]; then
+      |   tp_v0=$(tp_ver)
+      |   if ! tp_check; then
+      |     echo "telepatch: rustup check failed (rc $tp_crc): $tp_chk" >&2; rc=1
+      |   elif [ -n "$(printf '%s\n' "$tp_chk" | tp_updates)" ]; then
+      |     rustup update "$tp_tc"
+      |     rc=$?
+      |     if [ "$(tp_ver)" != "$tp_v0" ]; then changed=1; installed+=("$tp_tc"); fi
+      |   fi
+      | fi
+
+=== guard
+host web1 (os: Debian/Ubuntu 24.04)
+blocking reads: 0
+
+window 1 (final)
+role (none)
+  #0 pkg as shell:root reads [] writes [pkg:git] post [pkg:git=Installed]
+      | rc=0; changed=0; installed=()
+      | tp_want=('git')
+      | tp_missing=()
+      | export DEBIAN_FRONTEND=noninteractive
+      | for tp_n in "${tp_want[@]}"; do
+      |   [ "$(dpkg-query -W -f='${db:Status-Status}' "$tp_n" 2>/dev/null)" = installed ] || tp_missing+=("$tp_n")
+      | done
+      | if [ "$rc" -eq 0 ] && [ "${#tp_missing[@]}" -gt 0 ]; then
+      |   if ! find /var/lib/apt/lists -maxdepth 1 -type f ! -name lock 2>/dev/null | grep -q .; then apt-get -q update || rc=$?; fi
+      |   if [ "$rc" -eq 0 ]; then
+      |     apt-get -y -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold install "${tp_missing[@]}"
+      |     rc=$?
+      |     if [ "$rc" -eq 0 ]; then changed=1; installed=("${tp_missing[@]}"); fi
+      |   fi
+      | fi
+role a
+  #2 pkg[rustup] as shell:root reads [] writes [*] post [pkg:rustup:root:stable=Installed]
+      | rc=0; changed=0; installed=()
+      | tp_tc='stable'
+      | tp_prof='default'
+      | tp_path() {
+      |   tp_cb=${CARGO_HOME:-$HOME/.cargo}/bin
+      |   if [ -d "$tp_cb" ]; then case ":$PATH:" in *":$tp_cb:"*) ;; *) PATH=$tp_cb:$PATH;; esac; fi
+      | }
+      | tp_match() { awk -v t="$1" 'function tcm(f, t) { return f == t || (index(f, t "-") == 1 && substr(f, length(t) + 2) ~ /^(x86_64|i[3-6]86|aarch64|arm[0-9a-z_]*|riscv[0-9a-z]*|powerpc[0-9a-z_]*|s390x|loongarch64|mips[0-9a-z_]*|sparc[0-9a-z_]*|thumb[0-9a-z_]*|wasm[0-9]+)-[a-z0-9_]+-[a-z]/) } { if (tcm($1, t)) m=1 } END { exit m ? 0 : 1 }'; }
+      | tp_ver() { rustup run "$tp_tc" rustc --version 2>/dev/null | grep -oE '[0-9]+(\.[0-9A-Za-z+~-]+)*' | head -n1; }
+      | tp_has_tc() { rustup toolchain list 2>/dev/null | tp_match "$tp_tc"; }
+      | tp_updates() { awk -v t="$tp_tc" 'function tcm(f, t) { return f == t || (index(f, t "-") == 1 && substr(f, length(t) + 2) ~ /^(x86_64|i[3-6]86|aarch64|arm[0-9a-z_]*|riscv[0-9a-z]*|powerpc[0-9a-z_]*|s390x|loongarch64|mips[0-9a-z_]*|sparc[0-9a-z_]*|thumb[0-9a-z_]*|wasm[0-9]+)-[a-z0-9_]+-[a-z]/) } /[Uu]pdate available/ { if ($1 == "rustup") print "self"; else if (tcm($1, t)) { v=$0; sub(/.*-> */, "", v); split(v, a, " "); print "tc " a[1] } }'; }
+      | tp_check() { tp_chk=$(rustup check 2>&1); tp_crc=$?; [ "$tp_crc" -eq 0 ] || [ "$tp_crc" -eq 100 ]; }
+      | tp_path
+      | tp_fresh=0
+      | if ! command -v rustup >/dev/null 2>&1; then
+      |   ( set -o pipefail; curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain "$tp_tc" --profile "$tp_prof" )
+      |   rc=$?
+      |   tp_path
+      |   if [ "$rc" -eq 0 ] && ! command -v rustup >/dev/null 2>&1; then echo 'telepatch: rustup not found after the installer' >&2; rc=1; fi
+      |   if [ "$rc" -eq 0 ]; then tp_fresh=1; fi
+      | elif ! tp_has_tc; then
+      |   rustup toolchain install "$tp_tc" --profile "$tp_prof"
+      |   rc=$?
+      |   if [ "$rc" -eq 0 ]; then tp_fresh=1; fi
+      | fi
+      | if [ "$tp_fresh" -eq 1 ]; then
+      |   if tp_has_tc; then changed=1; installed+=("$tp_tc"); else echo "telepatch: rustup toolchain $tp_tc: not installed afterwards" >&2; rc=1; fi
+      | fi
+role b
+  #5 pkg[cargo] as shell:root reads [] writes [pkg:cargo:root:cargo-deb, home:root] post [pkg:cargo:root:cargo-deb=Installed]
+      | rc=0; changed=0; installed=()
+      | tp_want=('cargo-deb')
+      | declare -A tp_before=() tp_after=() tp_wantv=()
+      | tp_todo=()
+      | tp_list() { cargo install --list 2>/dev/null | sed -n 's/^\([^ ][^ ]*\) v\([^ :][^ :]*\)[^:]*:$/\1 \2/p'; }
+      | if ! command -v cargo >/dev/null 2>&1; then echo 'telepatch: cargo not found' >&2; rc=127; fi
+      | if [ "$rc" -eq 0 ]; then
+      |   while read -r tp_n tp_v; do tp_before[$tp_n]=$tp_v; done < <(tp_list)
+      |   for tp_n in "${tp_want[@]}"; do
+      |     [ -n "${tp_before[$tp_n]+x}" ] || tp_todo+=("$tp_n")
+      |   done
+      | fi
+      | if [ "$rc" -eq 0 ] && [ "${#tp_todo[@]}" -gt 0 ]; then
+      |   cargo install "${tp_todo[@]}"
+      |   rc=$?
+      |   while read -r tp_n tp_v; do tp_after[$tp_n]=$tp_v; done < <(tp_list)
+      |   for tp_n in "${tp_want[@]}"; do
+      |     if [ "${tp_after[$tp_n]-}" != "${tp_before[$tp_n]-}" ]; then changed=1; installed+=("$tp_n"); fi
+      |   done
+      |   if [ "$rc" -eq 0 ]; then
+      |     for tp_n in "${tp_todo[@]}"; do
+      |       tp_got=${tp_after[$tp_n]-}; tp_wv=${tp_wantv[$tp_n]-}
+      |       if [ -z "$tp_got" ] || { [ -n "$tp_wv" ] && [ "$tp_got" != "$tp_wv" ]; }; then
+      |         echo "telepatch: cargo $tp_n: installed ${tp_got:-absent}, wanted ${tp_wv:-present}" >&2; rc=1
+      |       fi
+      |     done
+      |   fi
+      | fi
+  #6 pkg[rustup] as shell:root reads [] writes [*] when changed(#0) post [pkg:rustup:root:stable=Installed, pkg:rustup:root:stable/component/rust-src=Installed]
+      | rc=0; changed=0; installed=()
+      | tp_tc='stable'
+      | tp_prof='default'
+      | tp_path() {
+      |   tp_cb=${CARGO_HOME:-$HOME/.cargo}/bin
+      |   if [ -d "$tp_cb" ]; then case ":$PATH:" in *":$tp_cb:"*) ;; *) PATH=$tp_cb:$PATH;; esac; fi
+      | }
+      | tp_match() { awk -v t="$1" 'function tcm(f, t) { return f == t || (index(f, t "-") == 1 && substr(f, length(t) + 2) ~ /^(x86_64|i[3-6]86|aarch64|arm[0-9a-z_]*|riscv[0-9a-z]*|powerpc[0-9a-z_]*|s390x|loongarch64|mips[0-9a-z_]*|sparc[0-9a-z_]*|thumb[0-9a-z_]*|wasm[0-9]+)-[a-z0-9_]+-[a-z]/) } { if (tcm($1, t)) m=1 } END { exit m ? 0 : 1 }'; }
+      | tp_ver() { rustup run "$tp_tc" rustc --version 2>/dev/null | grep -oE '[0-9]+(\.[0-9A-Za-z+~-]+)*' | head -n1; }
+      | tp_has_tc() { rustup toolchain list 2>/dev/null | tp_match "$tp_tc"; }
+      | tp_updates() { awk -v t="$tp_tc" 'function tcm(f, t) { return f == t || (index(f, t "-") == 1 && substr(f, length(t) + 2) ~ /^(x86_64|i[3-6]86|aarch64|arm[0-9a-z_]*|riscv[0-9a-z]*|powerpc[0-9a-z_]*|s390x|loongarch64|mips[0-9a-z_]*|sparc[0-9a-z_]*|thumb[0-9a-z_]*|wasm[0-9]+)-[a-z0-9_]+-[a-z]/) } /[Uu]pdate available/ { if ($1 == "rustup") print "self"; else if (tcm($1, t)) { v=$0; sub(/.*-> */, "", v); split(v, a, " "); print "tc " a[1] } }'; }
+      | tp_check() { tp_chk=$(rustup check 2>&1); tp_crc=$?; [ "$tp_crc" -eq 0 ] || [ "$tp_crc" -eq 100 ]; }
+      | tp_path
+      | tp_fresh=0
+      | if ! command -v rustup >/dev/null 2>&1; then
+      |   ( set -o pipefail; curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain "$tp_tc" --profile "$tp_prof" )
+      |   rc=$?
+      |   tp_path
+      |   if [ "$rc" -eq 0 ] && ! command -v rustup >/dev/null 2>&1; then echo 'telepatch: rustup not found after the installer' >&2; rc=1; fi
+      |   if [ "$rc" -eq 0 ]; then tp_fresh=1; fi
+      | elif ! tp_has_tc; then
+      |   rustup toolchain install "$tp_tc" --profile "$tp_prof"
+      |   rc=$?
+      |   if [ "$rc" -eq 0 ]; then tp_fresh=1; fi
+      | fi
+      | if [ "$tp_fresh" -eq 1 ]; then
+      |   if tp_has_tc; then changed=1; installed+=("$tp_tc"); else echo "telepatch: rustup toolchain $tp_tc: not installed afterwards" >&2; rc=1; fi
+      | fi
+      | if [ "$rc" -eq 0 ]; then
+      |   tp_have=$(rustup component list --installed --toolchain "$tp_tc" 2>/dev/null)
+      |   tp_miss=()
+      |   for tp_x in 'rust-src'; do
+      |     printf '%s\n' "$tp_have" | tp_match "$tp_x" || tp_miss+=("$tp_x")
+      |   done
+      |   if [ "${#tp_miss[@]}" -gt 0 ]; then
+      |     rustup component add --toolchain "$tp_tc" "${tp_miss[@]}"
+      |     rc=$?
+      |     if [ "$rc" -eq 0 ]; then
+      |       changed=1
+      |       for tp_x in "${tp_miss[@]}"; do installed+=("$tp_tc/component/$tp_x"); done
+      |     fi
+      |   fi
+      | fi
+
+=== allow_fail
+host web1 (os: Debian/Ubuntu 24.04)
+blocking reads: 0
+
+window 1 (final)
+role a
+  #1 pkg[rustup] as shell:root reads [] writes [*] post [pkg:rustup:root:stable=Installed]
+      | rc=0; changed=0; installed=()
+      | tp_tc='stable'
+      | tp_prof='default'
+      | tp_path() {
+      |   tp_cb=${CARGO_HOME:-$HOME/.cargo}/bin
+      |   if [ -d "$tp_cb" ]; then case ":$PATH:" in *":$tp_cb:"*) ;; *) PATH=$tp_cb:$PATH;; esac; fi
+      | }
+      | tp_match() { awk -v t="$1" 'function tcm(f, t) { return f == t || (index(f, t "-") == 1 && substr(f, length(t) + 2) ~ /^(x86_64|i[3-6]86|aarch64|arm[0-9a-z_]*|riscv[0-9a-z]*|powerpc[0-9a-z_]*|s390x|loongarch64|mips[0-9a-z_]*|sparc[0-9a-z_]*|thumb[0-9a-z_]*|wasm[0-9]+)-[a-z0-9_]+-[a-z]/) } { if (tcm($1, t)) m=1 } END { exit m ? 0 : 1 }'; }
+      | tp_ver() { rustup run "$tp_tc" rustc --version 2>/dev/null | grep -oE '[0-9]+(\.[0-9A-Za-z+~-]+)*' | head -n1; }
+      | tp_has_tc() { rustup toolchain list 2>/dev/null | tp_match "$tp_tc"; }
+      | tp_updates() { awk -v t="$tp_tc" 'function tcm(f, t) { return f == t || (index(f, t "-") == 1 && substr(f, length(t) + 2) ~ /^(x86_64|i[3-6]86|aarch64|arm[0-9a-z_]*|riscv[0-9a-z]*|powerpc[0-9a-z_]*|s390x|loongarch64|mips[0-9a-z_]*|sparc[0-9a-z_]*|thumb[0-9a-z_]*|wasm[0-9]+)-[a-z0-9_]+-[a-z]/) } /[Uu]pdate available/ { if ($1 == "rustup") print "self"; else if (tcm($1, t)) { v=$0; sub(/.*-> */, "", v); split(v, a, " "); print "tc " a[1] } }'; }
+      | tp_check() { tp_chk=$(rustup check 2>&1); tp_crc=$?; [ "$tp_crc" -eq 0 ] || [ "$tp_crc" -eq 100 ]; }
+      | tp_path
+      | tp_fresh=0
+      | if ! command -v rustup >/dev/null 2>&1; then
+      |   ( set -o pipefail; curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain "$tp_tc" --profile "$tp_prof" )
+      |   rc=$?
+      |   tp_path
+      |   if [ "$rc" -eq 0 ] && ! command -v rustup >/dev/null 2>&1; then echo 'telepatch: rustup not found after the installer' >&2; rc=1; fi
+      |   if [ "$rc" -eq 0 ]; then tp_fresh=1; fi
+      | elif ! tp_has_tc; then
+      |   rustup toolchain install "$tp_tc" --profile "$tp_prof"
+      |   rc=$?
+      |   if [ "$rc" -eq 0 ]; then tp_fresh=1; fi
+      | fi
+      | if [ "$tp_fresh" -eq 1 ]; then
+      |   if tp_has_tc; then changed=1; installed+=("$tp_tc"); else echo "telepatch: rustup toolchain $tp_tc: not installed afterwards" >&2; rc=1; fi
+      | fi
+role b
+  #4 pkg[cargo] as shell:root reads [] writes [pkg:cargo:root:cargo-deb, home:root] post [pkg:cargo:root:cargo-deb=Installed]
+      | rc=0; changed=0; installed=()
+      | tp_want=('cargo-deb')
+      | declare -A tp_before=() tp_after=() tp_wantv=()
+      | tp_todo=()
+      | tp_list() { cargo install --list 2>/dev/null | sed -n 's/^\([^ ][^ ]*\) v\([^ :][^ :]*\)[^:]*:$/\1 \2/p'; }
+      | if ! command -v cargo >/dev/null 2>&1; then echo 'telepatch: cargo not found' >&2; rc=127; fi
+      | if [ "$rc" -eq 0 ]; then
+      |   while read -r tp_n tp_v; do tp_before[$tp_n]=$tp_v; done < <(tp_list)
+      |   for tp_n in "${tp_want[@]}"; do
+      |     [ -n "${tp_before[$tp_n]+x}" ] || tp_todo+=("$tp_n")
+      |   done
+      | fi
+      | if [ "$rc" -eq 0 ] && [ "${#tp_todo[@]}" -gt 0 ]; then
+      |   cargo install "${tp_todo[@]}"
+      |   rc=$?
+      |   while read -r tp_n tp_v; do tp_after[$tp_n]=$tp_v; done < <(tp_list)
+      |   for tp_n in "${tp_want[@]}"; do
+      |     if [ "${tp_after[$tp_n]-}" != "${tp_before[$tp_n]-}" ]; then changed=1; installed+=("$tp_n"); fi
+      |   done
+      |   if [ "$rc" -eq 0 ]; then
+      |     for tp_n in "${tp_todo[@]}"; do
+      |       tp_got=${tp_after[$tp_n]-}; tp_wv=${tp_wantv[$tp_n]-}
+      |       if [ -z "$tp_got" ] || { [ -n "$tp_wv" ] && [ "$tp_got" != "$tp_wv" ]; }; then
+      |         echo "telepatch: cargo $tp_n: installed ${tp_got:-absent}, wanted ${tp_wv:-present}" >&2; rc=1
+      |       fi
+      |     done
+      |   fi
+      | fi
+  #5 pkg[rustup] as shell:root reads [] writes [*] allow_fail post [pkg:rustup:root:stable=Installed, pkg:rustup:root:stable/component/rust-src=Installed]
+      | rc=0; changed=0; installed=()
+      | tp_tc='stable'
+      | tp_prof='default'
+      | tp_path() {
+      |   tp_cb=${CARGO_HOME:-$HOME/.cargo}/bin
+      |   if [ -d "$tp_cb" ]; then case ":$PATH:" in *":$tp_cb:"*) ;; *) PATH=$tp_cb:$PATH;; esac; fi
+      | }
+      | tp_match() { awk -v t="$1" 'function tcm(f, t) { return f == t || (index(f, t "-") == 1 && substr(f, length(t) + 2) ~ /^(x86_64|i[3-6]86|aarch64|arm[0-9a-z_]*|riscv[0-9a-z]*|powerpc[0-9a-z_]*|s390x|loongarch64|mips[0-9a-z_]*|sparc[0-9a-z_]*|thumb[0-9a-z_]*|wasm[0-9]+)-[a-z0-9_]+-[a-z]/) } { if (tcm($1, t)) m=1 } END { exit m ? 0 : 1 }'; }
+      | tp_ver() { rustup run "$tp_tc" rustc --version 2>/dev/null | grep -oE '[0-9]+(\.[0-9A-Za-z+~-]+)*' | head -n1; }
+      | tp_has_tc() { rustup toolchain list 2>/dev/null | tp_match "$tp_tc"; }
+      | tp_updates() { awk -v t="$tp_tc" 'function tcm(f, t) { return f == t || (index(f, t "-") == 1 && substr(f, length(t) + 2) ~ /^(x86_64|i[3-6]86|aarch64|arm[0-9a-z_]*|riscv[0-9a-z]*|powerpc[0-9a-z_]*|s390x|loongarch64|mips[0-9a-z_]*|sparc[0-9a-z_]*|thumb[0-9a-z_]*|wasm[0-9]+)-[a-z0-9_]+-[a-z]/) } /[Uu]pdate available/ { if ($1 == "rustup") print "self"; else if (tcm($1, t)) { v=$0; sub(/.*-> */, "", v); split(v, a, " "); print "tc " a[1] } }'; }
+      | tp_check() { tp_chk=$(rustup check 2>&1); tp_crc=$?; [ "$tp_crc" -eq 0 ] || [ "$tp_crc" -eq 100 ]; }
+      | tp_path
+      | tp_fresh=0
+      | if ! command -v rustup >/dev/null 2>&1; then
+      |   ( set -o pipefail; curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain "$tp_tc" --profile "$tp_prof" )
+      |   rc=$?
+      |   tp_path
+      |   if [ "$rc" -eq 0 ] && ! command -v rustup >/dev/null 2>&1; then echo 'telepatch: rustup not found after the installer' >&2; rc=1; fi
+      |   if [ "$rc" -eq 0 ]; then tp_fresh=1; fi
+      | elif ! tp_has_tc; then
+      |   rustup toolchain install "$tp_tc" --profile "$tp_prof"
+      |   rc=$?
+      |   if [ "$rc" -eq 0 ]; then tp_fresh=1; fi
+      | fi
+      | if [ "$tp_fresh" -eq 1 ]; then
+      |   if tp_has_tc; then changed=1; installed+=("$tp_tc"); else echo "telepatch: rustup toolchain $tp_tc: not installed afterwards" >&2; rc=1; fi
+      | fi
+      | if [ "$rc" -eq 0 ]; then
+      |   tp_have=$(rustup component list --installed --toolchain "$tp_tc" 2>/dev/null)
+      |   tp_miss=()
+      |   for tp_x in 'rust-src'; do
+      |     printf '%s\n' "$tp_have" | tp_match "$tp_x" || tp_miss+=("$tp_x")
+      |   done
+      |   if [ "${#tp_miss[@]}" -gt 0 ]; then
+      |     rustup component add --toolchain "$tp_tc" "${tp_miss[@]}"
+      |     rc=$?
+      |     if [ "$rc" -eq 0 ]; then
+      |       changed=1
+      |       for tp_x in "${tp_miss[@]}"; do installed+=("$tp_tc/component/$tp_x"); done
+      |     fi
+      |   fi
+      | fi
+
+=== h and h.as_user("root")
+host web1 (os: Debian/Ubuntu 24.04)
+blocking reads: 0
+
+window 1 (final)
+role a
+  #1 pkg[rustup] as shell:root reads [] writes [*] post [pkg:rustup:root:stable=Installed]
+      | rc=0; changed=0; installed=()
+      | tp_tc='stable'
+      | tp_prof='default'
+      | tp_path() {
+      |   tp_cb=${CARGO_HOME:-$HOME/.cargo}/bin
+      |   if [ -d "$tp_cb" ]; then case ":$PATH:" in *":$tp_cb:"*) ;; *) PATH=$tp_cb:$PATH;; esac; fi
+      | }
+      | tp_match() { awk -v t="$1" 'function tcm(f, t) { return f == t || (index(f, t "-") == 1 && substr(f, length(t) + 2) ~ /^(x86_64|i[3-6]86|aarch64|arm[0-9a-z_]*|riscv[0-9a-z]*|powerpc[0-9a-z_]*|s390x|loongarch64|mips[0-9a-z_]*|sparc[0-9a-z_]*|thumb[0-9a-z_]*|wasm[0-9]+)-[a-z0-9_]+-[a-z]/) } { if (tcm($1, t)) m=1 } END { exit m ? 0 : 1 }'; }
+      | tp_ver() { rustup run "$tp_tc" rustc --version 2>/dev/null | grep -oE '[0-9]+(\.[0-9A-Za-z+~-]+)*' | head -n1; }
+      | tp_has_tc() { rustup toolchain list 2>/dev/null | tp_match "$tp_tc"; }
+      | tp_updates() { awk -v t="$tp_tc" 'function tcm(f, t) { return f == t || (index(f, t "-") == 1 && substr(f, length(t) + 2) ~ /^(x86_64|i[3-6]86|aarch64|arm[0-9a-z_]*|riscv[0-9a-z]*|powerpc[0-9a-z_]*|s390x|loongarch64|mips[0-9a-z_]*|sparc[0-9a-z_]*|thumb[0-9a-z_]*|wasm[0-9]+)-[a-z0-9_]+-[a-z]/) } /[Uu]pdate available/ { if ($1 == "rustup") print "self"; else if (tcm($1, t)) { v=$0; sub(/.*-> */, "", v); split(v, a, " "); print "tc " a[1] } }'; }
+      | tp_check() { tp_chk=$(rustup check 2>&1); tp_crc=$?; [ "$tp_crc" -eq 0 ] || [ "$tp_crc" -eq 100 ]; }
+      | tp_path
+      | tp_fresh=0
+      | if ! command -v rustup >/dev/null 2>&1; then
+      |   ( set -o pipefail; curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain "$tp_tc" --profile "$tp_prof" )
+      |   rc=$?
+      |   tp_path
+      |   if [ "$rc" -eq 0 ] && ! command -v rustup >/dev/null 2>&1; then echo 'telepatch: rustup not found after the installer' >&2; rc=1; fi
+      |   if [ "$rc" -eq 0 ]; then tp_fresh=1; fi
+      | elif ! tp_has_tc; then
+      |   rustup toolchain install "$tp_tc" --profile "$tp_prof"
+      |   rc=$?
+      |   if [ "$rc" -eq 0 ]; then tp_fresh=1; fi
+      | fi
+      | if [ "$tp_fresh" -eq 1 ]; then
+      |   if tp_has_tc; then changed=1; installed+=("$tp_tc"); else echo "telepatch: rustup toolchain $tp_tc: not installed afterwards" >&2; rc=1; fi
+      | fi
+role b
+  #4 pkg[cargo] as shell:root reads [] writes [pkg:cargo:root:cargo-deb, home:root] post [pkg:cargo:root:cargo-deb=Installed]
+      | rc=0; changed=0; installed=()
+      | tp_want=('cargo-deb')
+      | declare -A tp_before=() tp_after=() tp_wantv=()
+      | tp_todo=()
+      | tp_list() { cargo install --list 2>/dev/null | sed -n 's/^\([^ ][^ ]*\) v\([^ :][^ :]*\)[^:]*:$/\1 \2/p'; }
+      | if ! command -v cargo >/dev/null 2>&1; then echo 'telepatch: cargo not found' >&2; rc=127; fi
+      | if [ "$rc" -eq 0 ]; then
+      |   while read -r tp_n tp_v; do tp_before[$tp_n]=$tp_v; done < <(tp_list)
+      |   for tp_n in "${tp_want[@]}"; do
+      |     [ -n "${tp_before[$tp_n]+x}" ] || tp_todo+=("$tp_n")
+      |   done
+      | fi
+      | if [ "$rc" -eq 0 ] && [ "${#tp_todo[@]}" -gt 0 ]; then
+      |   cargo install "${tp_todo[@]}"
+      |   rc=$?
+      |   while read -r tp_n tp_v; do tp_after[$tp_n]=$tp_v; done < <(tp_list)
+      |   for tp_n in "${tp_want[@]}"; do
+      |     if [ "${tp_after[$tp_n]-}" != "${tp_before[$tp_n]-}" ]; then changed=1; installed+=("$tp_n"); fi
+      |   done
+      |   if [ "$rc" -eq 0 ]; then
+      |     for tp_n in "${tp_todo[@]}"; do
+      |       tp_got=${tp_after[$tp_n]-}; tp_wv=${tp_wantv[$tp_n]-}
+      |       if [ -z "$tp_got" ] || { [ -n "$tp_wv" ] && [ "$tp_got" != "$tp_wv" ]; }; then
+      |         echo "telepatch: cargo $tp_n: installed ${tp_got:-absent}, wanted ${tp_wv:-present}" >&2; rc=1
+      |       fi
+      |     done
+      |   fi
+      | fi
+  #5 pkg[rustup] as login:root reads [] writes [*] post [pkg:rustup:root:stable=Installed, pkg:rustup:root:stable/component/rust-src=Installed]
+      | rc=0; changed=0; installed=()
+      | tp_tc='stable'
+      | tp_prof='default'
+      | tp_path() {
+      |   tp_cb=${CARGO_HOME:-$HOME/.cargo}/bin
+      |   if [ -d "$tp_cb" ]; then case ":$PATH:" in *":$tp_cb:"*) ;; *) PATH=$tp_cb:$PATH;; esac; fi
+      | }
+      | tp_match() { awk -v t="$1" 'function tcm(f, t) { return f == t || (index(f, t "-") == 1 && substr(f, length(t) + 2) ~ /^(x86_64|i[3-6]86|aarch64|arm[0-9a-z_]*|riscv[0-9a-z]*|powerpc[0-9a-z_]*|s390x|loongarch64|mips[0-9a-z_]*|sparc[0-9a-z_]*|thumb[0-9a-z_]*|wasm[0-9]+)-[a-z0-9_]+-[a-z]/) } { if (tcm($1, t)) m=1 } END { exit m ? 0 : 1 }'; }
+      | tp_ver() { rustup run "$tp_tc" rustc --version 2>/dev/null | grep -oE '[0-9]+(\.[0-9A-Za-z+~-]+)*' | head -n1; }
+      | tp_has_tc() { rustup toolchain list 2>/dev/null | tp_match "$tp_tc"; }
+      | tp_updates() { awk -v t="$tp_tc" 'function tcm(f, t) { return f == t || (index(f, t "-") == 1 && substr(f, length(t) + 2) ~ /^(x86_64|i[3-6]86|aarch64|arm[0-9a-z_]*|riscv[0-9a-z]*|powerpc[0-9a-z_]*|s390x|loongarch64|mips[0-9a-z_]*|sparc[0-9a-z_]*|thumb[0-9a-z_]*|wasm[0-9]+)-[a-z0-9_]+-[a-z]/) } /[Uu]pdate available/ { if ($1 == "rustup") print "self"; else if (tcm($1, t)) { v=$0; sub(/.*-> */, "", v); split(v, a, " "); print "tc " a[1] } }'; }
+      | tp_check() { tp_chk=$(rustup check 2>&1); tp_crc=$?; [ "$tp_crc" -eq 0 ] || [ "$tp_crc" -eq 100 ]; }
+      | tp_path
+      | tp_fresh=0
+      | if ! command -v rustup >/dev/null 2>&1; then
+      |   ( set -o pipefail; curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain "$tp_tc" --profile "$tp_prof" )
+      |   rc=$?
+      |   tp_path
+      |   if [ "$rc" -eq 0 ] && ! command -v rustup >/dev/null 2>&1; then echo 'telepatch: rustup not found after the installer' >&2; rc=1; fi
+      |   if [ "$rc" -eq 0 ]; then tp_fresh=1; fi
+      | elif ! tp_has_tc; then
+      |   rustup toolchain install "$tp_tc" --profile "$tp_prof"
+      |   rc=$?
+      |   if [ "$rc" -eq 0 ]; then tp_fresh=1; fi
+      | fi
+      | if [ "$tp_fresh" -eq 1 ]; then
+      |   if tp_has_tc; then changed=1; installed+=("$tp_tc"); else echo "telepatch: rustup toolchain $tp_tc: not installed afterwards" >&2; rc=1; fi
+      | fi
+      | if [ "$rc" -eq 0 ]; then
+      |   tp_have=$(rustup component list --installed --toolchain "$tp_tc" 2>/dev/null)
+      |   tp_miss=()
+      |   for tp_x in 'rust-src'; do
+      |     printf '%s\n' "$tp_have" | tp_match "$tp_x" || tp_miss+=("$tp_x")
+      |   done
+      |   if [ "${#tp_miss[@]}" -gt 0 ]; then
+      |     rustup component add --toolchain "$tp_tc" "${tp_miss[@]}"
+      |     rc=$?
+      |     if [ "$rc" -eq 0 ]; then
+      |       changed=1
+      |       for tp_x in "${tp_miss[@]}"; do installed+=("$tp_tc/component/$tp_x"); done
+      |     fi
+      |   fi
+      | fi
