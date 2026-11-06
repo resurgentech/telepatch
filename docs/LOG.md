@@ -789,3 +789,43 @@ are appended, never edited in; a hook refuses rewrites.
   daemon-reload before the next svc op after a changed unit (booted);
   `.restart_on(&unit)`; recipe `test-live-unit` 2/2 in a docker VM.
 - Commits: telepatch b5d69c3
+
+## 2026-11-06 — T77a owned handles, exact restart suppression, reload flush (telepatch)
+
+- Every builder returns an owned handle (`op_builders!`), so `let daemon =
+  h.file(..).content(..);` binds; a restart is dropped only by a start
+  that started the unit (`SvcResult.started`, `!started(#n)`); a changed
+  unit with no svc op after it in its window gets one daemon-reload at
+  the window's end, reported and in prepare. `just docker-vm
+  test-live-svc test-live-unit` 4/4 and 2/2.
+- Commits: telepatch 0232dde
+
+## 2026-11-06 — T80 cargo().locked() and one rustup op per toolchain (telepatch)
+
+- `.locked()` passes `--locked` and is part of the cargo source (locked
+  and unlocked never merge); rustup ops of one user and toolchain merge
+  where the hoist is safe (targets and components unioned, set_default
+  or-ed); a conflicting profile or installer is a trace error naming
+  both sites; a later window asks only for what earlier ones lacked.
+- Commits: telepatch 9ae95fc
+
+## 2026-11-06 — T78 one pkg, every source chained (telepatch, tp_basic)
+
+- `h.pkg(names)` is the distro manager; `.yum()`, `.pip()`, `.cargo()`,
+  `.mise()`, `.rustup()`, `.installer_script(InstallerScript)` switch the
+  source (a second call is a trace error); `h.pip`/`h.cargo`/`h.mise`/
+  `h.rustup`/`h.yum`/`h.script` and `ScriptSpec` removed; the importer
+  emits the chained form; tp_basic's nine call sites moved, plans
+  unchanged. `just docker-vm test-acceptance` 7/7 identical.
+- Commits: telepatch 2bb5c17, tp_basic cefe938
+
+## 2026-11-06 — T79 pin and latest on the distro manager (telepatch)
+
+- `.pin(v)` on apt (`name=v`), dnf/yum (`name-v`), checked by version
+  through the manager; a pacman pin that is neither the repo's nor the
+  installed version blocks the host in prepare; `.latest()` upgrades only
+  names whose candidate is newer (apt `--only-upgrade` with one refresh
+  per window, dnf `upgrade`, pacman `-S --needed`); pinned ops never
+  merge. Zypper not built (no zypper manager exists). `just docker-vm
+  test-live-pkg` 9/9 on ubuntu2404, rockylinux10, arch.
+- Commits: telepatch 8536933
