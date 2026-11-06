@@ -673,3 +673,67 @@ are appended, never edited in; a hook refuses rewrites.
   identical. A uid with no writable home gets a mise cache warning on
   stderr; the README says so.
 - Commits: docker_images fdf38ca, tp_basic a456c04
+
+## 2026-11-06 — T70a docker workloads run in a disposable tp-* VM (tp_basic, telepatch, docker_images)
+
+- `scripts/docker-vm.sh run [--disk N] [--keep] -- <cmd>` (tp_basic): a
+  1 GiB ubuntu2404 VM with docker.io and docker-buildx, its daemon
+  labelled `tp-docker-vm=<name>`, the socket forwarded over ssh with
+  vmtool's key in place; the VM deleted and checked gone afterwards.
+  `just docker-vm <recipe>` in all three repos.
+- `scripts/lib/docker-guard.sh` fails closed (exit 2) unless that label
+  is on the daemon `DOCKER_HOST` reaches; first line of every docker
+  recipe in the three repos and in the scripts; `require_docker_vm()` in
+  telepatch's live tests. Its `--self-test` (stub docker) runs all 23
+  recipes and scripts: exit 2, no docker call.
+- No local bind mounts: `image-state.sh` on stdin, the dist by `docker
+  cp`; bases built in the VM from the pinned export with bake (`di_base`).
+  sshd publishes on `$TP_DOCKER_VM_IP`. A non-ignored live test that ran
+  `docker exec` on this machine now uses a stub. `vm_up` survives
+  vmtool's disk-grow race with sshd.
+- `just docker-vm test-container ubuntu2404 dev_base` identical (6
+  intended differences); `just docker-vm test-live-ssh` 5/5; `just
+  docker-vm test-live-os` 11/13: arch and omarchy fixtures predate
+  `archlinux:latest`'s current build date (not refreshed: it moves 8
+  tp_basic snapshots).
+- Commits: tp_basic c0d741a, telepatch 91a63cb, docker_images c65be41
+
+## 2026-11-06 — T70b every VM at 1 GiB, with swap (tp_basic)
+
+- `vm_up` creates every tp-* VM with 1 GiB and refuses any other size;
+  a 4 GiB `/tp-swap` with `swapon` only; default disk = image + swap;
+  peak memory and swap printed before each delete; on a failed run an
+  `Out of memory`/`oom-kill` kernel line is printed with the killed
+  process and the step, kept in `build/`, exit 3.
+- `just test-vm ubuntu2404 dev_base` PASS (CHANGED 0; peak 387 MiB,
+  swap 24 MiB); `just test-vm ubuntu2404 dev_desktop` PASS (run 3
+  CHANGED 0, working checks; peak 669 MiB, swap 488 MiB; run 1 1203 s).
+- Commits: tp_basic 563f9a8
+
+## 2026-11-06 — T71 the design note states the decided API (telepatch)
+
+- `docs/execution-model.html`: "The decided API", the 24 entries with a
+  built/designed status each; the held and unruled list in one place;
+  a Removed list; the contradicting sections rewritten. README's table
+  matches. `tests/note.rs` guards removed forms, headings and statuses.
+- Commits: telepatch f1af534
+
+## 2026-11-06 — T72 trace errors with a location; policy errors (telepatch)
+
+- `TraceError` carries message, role chain and caller `file:line`
+  (`#[track_caller]` through every op builder) and prints the decided
+  form. `Policy { UnitViaFile, UnguardedRestart, Unverified }`,
+  `.allow(Policy, reason)` (empty reason a hard error); `UnitViaFile`
+  checked below `/etc/systemd/system`; allowances in the plan and the
+  run report. No tp_basic snapshot moved.
+- Commits: telepatch 9dddbb6
+
+## 2026-11-06 — T73 sh! is a reported warning (telepatch, tp_basic)
+
+- Each `sh!` records its site; plan and run report end with `warning:
+  sh! in a role body at <file>:<line>` per site; exit status unchanged.
+  tp_basic `tests/hacks.rs` requires a `// HACK(<primitive>): …` line
+  above every `sh!`; the three sites carry one. 17 tp_basic snapshots
+  (kernel_build debian family, latest_kernel_build) and 7 telepatch
+  test snapshots gain warning lines, additions only.
+- Commits: telepatch 3893696, tp_basic 13d6828
