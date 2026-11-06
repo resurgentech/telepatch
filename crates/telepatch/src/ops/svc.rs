@@ -49,8 +49,12 @@
 //!
 //! # Restart and reload
 //!
-//! `.restart()` and `.reload()` are actions, on an op of their own (with a
-//! state want, or with each other, a trace error). An action carries a
+//! `.restart()` and `.reload()` are actions. Called on a chain that wants a
+//! state (`h.svc(u).enabled().started().restart_on(&x)`), the action is
+//! traced as a svc op of its own after the state op and the chain's handle
+//! names it from there on, so the chain is exactly the two calls
+//! `h.svc(u).enabled().started(); h.svc(u).restart_on(&x);` (a state want
+//! after the action, or restart with reload, is a trace error). An action carries a
 //! guard, `.when(g)` or `.restart_on(&op)`; without one it is the policy
 //! error `UnguardedRestart` ([`crate::policy`]). Booted: `systemctl
 //! restart` (which starts an inactive unit), or `systemctl reload` when
@@ -416,36 +420,61 @@ impl SvcHandle {
     /// Restart the unit (`systemctl restart`, which also starts an
     /// inactive one). An action: it needs a guard, `.when(g)` or
     /// [`SvcHandle::restart_on`]; unguarded is the policy error
-    /// `UnguardedRestart`. On an op of its own.
+    /// `UnguardedRestart`. On a chain that already wants a state
+    /// (`h.svc(u).enabled().started().restart()`), the action is traced as
+    /// a svc op of its own right after the state op, and the returned
+    /// handle names it: what follows (`.when`, `.allow`, `.changed()`)
+    /// applies to the action, and the state wants stay unguarded, exactly
+    /// as the two calls `h.svc(u).enabled().started(); h.svc(u).restart()`.
     #[track_caller]
     pub fn restart(&self) -> Self {
-        self.0.edit(|op| {
-            if let OpSpec::Svc(s) = &mut op.spec {
-                s.restart = true;
-            }
-        });
-        self.clone()
+        self.action(Action::Restart)
     }
 
     /// Reload the unit (`systemctl reload`; an inactive unit is started).
-    /// An action, guarded as [`SvcHandle::restart`].
+    /// An action, guarded and chained as [`SvcHandle::restart`].
     #[track_caller]
     pub fn reload(&self) -> Self {
-        self.0.edit(|op| {
-            if let OpSpec::Svc(s) = &mut op.spec {
-                s.reload = true;
-            }
-        });
-        self.clone()
+        self.action(Action::Reload)
     }
 
     /// `.restart().when(op.changed())`, for any op handle. Like `.when`,
-    /// it replaces a guard set before.
+    /// it replaces a guard the action had before.
     #[track_caller]
     pub fn restart_on(&self, op: &OpHandle) -> Self {
-        self.restart();
-        self.0.when(op.changed());
-        self.clone()
+        let r = self.restart();
+        r.0.when(op.changed());
+        r
+    }
+
+    #[track_caller]
+    fn action(&self, a: Action) -> Self {
+        let set = |s: &mut SvcSpec| match a {
+            Action::Restart => s.restart = true,
+            Action::Reload => s.reload = true,
+        };
+        let state = self
+            .0
+            .with_node(|op| match &op.spec {
+                OpSpec::Svc(s) if s.wants_state() && s.action().is_none() => Some(s.unit.clone()),
+                _ => None,
+            })
+            .flatten();
+        match state {
+            Some(unit) => {
+                let mut s = SvcSpec::new(unit);
+                set(&mut s);
+                SvcHandle(self.0.follow(OpSpec::Svc(s)))
+            }
+            None => {
+                self.0.edit(|op| {
+                    if let OpSpec::Svc(s) = &mut op.spec {
+                        set(s);
+                    }
+                });
+                self.clone()
+            }
+        }
     }
 }
 
@@ -496,10 +525,10 @@ pub fn nothing_wanted(trace: &Trace) -> Vec<TraceError> {
             .collect();
             if !with.is_empty() {
                 errs.push(format!(
-                    "svc({}): .{}() is an action on an op of its own, not with {}",
+                    "svc({}): {} after .{}(): a chain names its states before the action",
                     s.unit,
-                    a.name(),
-                    with.join(", ")
+                    with.join(", "),
+                    a.name()
                 ));
             }
         }

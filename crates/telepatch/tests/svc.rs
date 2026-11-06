@@ -1177,7 +1177,7 @@ fn restart_shares_an_op_with_no_state() {
     let h = host();
     let f = h.file("/etc/x");
     f.content("x");
-    h.svc("docker").started().restart().when(f.changed());
+    h.svc("docker").restart().when(f.changed()).started();
     h.svc("ssh").restart().reload().when(f.changed());
     let errs: Vec<String> = h
         .snapshot()
@@ -1188,7 +1188,7 @@ fn restart_shares_an_op_with_no_state() {
     assert_eq!(
         errs,
         [
-            "svc(docker): .restart() is an action on an op of its own, not with .started()",
+            "svc(docker): .started() after .restart(): a chain names its states before the action",
             "svc(ssh): .restart() and .reload() are exclusive",
         ]
     );
@@ -1488,4 +1488,295 @@ fn executor_allowed_unguarded_restart_runs_every_run_and_says_so() {
             n
         );
     }
+}
+
+// --- state and restart on one chain (T77b) ---
+
+/// The state ops and the action ops of a host's trace, as (wants state,
+/// action, guard) per svc node in trace order.
+fn svc_nodes(h: &Host<()>) -> Vec<(bool, Option<&'static str>, Option<telepatch::Guard>)> {
+    h.snapshot()
+        .nodes
+        .iter()
+        .filter_map(|n| match n {
+            Node::Op(op) => match &op.spec {
+                telepatch::OpSpec::Svc(s) => Some((
+                    s.enabled || s.started || s.disabled || s.masked || s.stopped,
+                    s.action().map(|a| a.name()),
+                    op.guard.clone(),
+                )),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn the_decided_chain_traces_as_two_ops() {
+    let h = host();
+    let unit = h
+        .unit("minikube.service")
+        .content("[Service]\nExecStart=/bin/true\n");
+    let r = h.svc("minikube").enabled().started().restart_on(&unit);
+    assert!(errors_of(&h).is_empty(), "{:?}", errors_of(&h));
+    assert_eq!(
+        svc_nodes(&h),
+        [
+            (true, None, None),
+            (false, Some("restart"), Some(unit.changed())),
+        ]
+    );
+    // the chain's handle names the action op from the action on
+    let last = h.snapshot().nodes.len() - 1;
+    assert_eq!(r.id().0, last);
+    assert_eq!(r.changed(), telepatch::Guard::Changed(r.id()));
+}
+
+#[test]
+fn restart_and_reload_when_on_a_chain_guard_only_the_action() {
+    let h = host();
+    let f = h.file("/etc/x").content("x");
+    h.svc("docker")
+        .enabled()
+        .started()
+        .restart()
+        .when(f.changed());
+    h.svc("ssh").started().reload().when(f.ok());
+    assert!(errors_of(&h).is_empty(), "{:?}", errors_of(&h));
+    assert_eq!(
+        svc_nodes(&h),
+        [
+            (true, None, None),
+            (false, Some("restart"), Some(f.changed())),
+            (true, None, None),
+            (false, Some("reload"), Some(f.ok())),
+        ]
+    );
+}
+
+/// The chained form and the two-call form give the same plan.
+#[test]
+fn the_chain_and_the_two_calls_give_the_same_plan() {
+    let chain = host();
+    let u = chain
+        .unit("minikube.service")
+        .content("[Service]\nExecStart=/bin/true\n");
+    chain.svc("minikube").enabled().started().restart_on(&u);
+    let f = chain.file("/etc/x").content("x");
+    chain.svc("sshd").started().reload().when(f.changed());
+
+    let two = host();
+    let u = two
+        .unit("minikube.service")
+        .content("[Service]\nExecStart=/bin/true\n");
+    two.svc("minikube").enabled().started();
+    two.svc("minikube").restart_on(&u);
+    let f = two.file("/etc/x").content("x");
+    two.svc("sshd").started();
+    two.svc("sshd").reload().when(f.changed());
+
+    let a = render_host("t", &chain.os, &chain.snapshot());
+    let b = render_host("t", &two.os, &two.snapshot());
+    assert_eq!(a, b);
+    assert!(a.contains("restart"), "{a}");
+}
+
+#[test]
+fn a_bare_restart_on_a_chain_is_still_unguarded_restart() {
+    fn run_(h: Host<()>) -> PlaybookFuture {
+        Box::pin(async move {
+            h.svc("docker").enabled().started().restart();
+            Ok(())
+        })
+    }
+    let e = trace_error(run_);
+    assert!(
+        e.contains("svc docker.service: .restart() has no guard (policy: unguarded-restart)"),
+        "{e}"
+    );
+    let h = host();
+    h.svc("flaky-agent").enabled().started().restart().allow(
+        telepatch::Policy::UnguardedRestart,
+        "leaks memory; the vendor says restart daily",
+    );
+    assert!(errors_of(&h).is_empty(), "{:?}", errors_of(&h));
+}
+
+#[test]
+fn restart_with_reload_on_one_chain_stays_a_trace_error() {
+    let h = host();
+    let f = h.file("/etc/x").content("x");
+    h.svc("ssh").started().restart().reload().when(f.changed());
+    let errs: Vec<String> = h
+        .snapshot()
+        .errors
+        .iter()
+        .map(|e| e.message().to_string())
+        .collect();
+    assert_eq!(errs, ["svc(ssh): .restart() and .reload() are exclusive"]);
+}
+
+/// `.when(g)` guards the op the handle names when it is called: before the
+/// action that is the state op, and the action that follows has no guard.
+#[test]
+fn when_before_the_action_guards_the_state_op() {
+    let h = host();
+    let f = h.file("/etc/x").content("x");
+    h.svc("docker").started().when(f.ok()).restart_on(&f);
+    assert!(errors_of(&h).is_empty(), "{:?}", errors_of(&h));
+    assert_eq!(
+        svc_nodes(&h),
+        [
+            (true, None, Some(f.ok())),
+            (false, Some("restart"), Some(f.changed())),
+        ]
+    );
+    let h = host();
+    let f = h.file("/etc/x").content("x");
+    h.svc("docker").started().when(f.changed()).restart();
+    let errs = errors_of(&h);
+    assert!(
+        errs.iter()
+            .any(|e| e.contains(".restart() has no guard (policy: unguarded-restart)")),
+        "{errs:?}"
+    );
+}
+
+#[test]
+fn a_state_after_the_action_is_a_trace_error() {
+    let h = host();
+    let f = h.file("/etc/x").content("x");
+    h.svc("docker").restart_on(&f).started();
+    let errs: Vec<String> = h
+        .snapshot()
+        .errors
+        .iter()
+        .map(|e| e.message().to_string())
+        .collect();
+    assert_eq!(
+        errs,
+        ["svc(docker): .started() after .restart(): a chain names its states before the action"]
+    );
+}
+
+/// `enabled().started().restart_on(&daemon)` in one chain.
+fn pb_chain() -> Playbook<PathBuf> {
+    fn run_(h: Host<PathBuf>) -> PlaybookFuture {
+        Box::pin(async move {
+            let daemon = h.file(&conf(&h, "daemon.json")).content("{}\n");
+            h.svc("docker").enabled().started().restart_on(&daemon);
+            Ok(())
+        })
+    }
+    Playbook {
+        name: "svc",
+        run: run_,
+    }
+}
+
+#[test]
+fn executor_chain_inactive_unit_is_started_and_not_restarted() {
+    let d = tempfile::tempdir().unwrap();
+    let bin = stubs(d.path());
+    let (r1, out1) = go(&pb_chain(), d.path(), &bin, true);
+    assert_eq!(r1.exit_code(), 0, "{}\n{out1}", r1.render());
+    let l = log(d.path());
+    assert!(l.contains("systemctl start -- docker\n"), "{l}");
+    assert_eq!(restarts(d.path()), 0, "{l}");
+    let (r2, out2) = go(&pb_chain(), d.path(), &bin, true);
+    assert_eq!(
+        r2.hosts[0].status,
+        HostStatus::Ok,
+        "{}\n{out2}",
+        r2.render()
+    );
+    assert_eq!(changed_column(&r2), "0", "{}", r2.render());
+    assert_eq!(restarts(d.path()), 0, "{}", log(d.path()));
+}
+
+#[test]
+fn executor_chain_active_unit_with_a_changed_file_restarts_once() {
+    let d = tempfile::tempdir().unwrap();
+    let bin = stubs(d.path());
+    set(d.path(), "state", "enabled");
+    set(d.path(), "active", "");
+    let (r1, out1) = go(&pb_chain(), d.path(), &bin, true);
+    assert_eq!(r1.exit_code(), 0, "{}\n{out1}", r1.render());
+    assert_eq!(restarts(d.path()), 1, "{}\n{out1}", log(d.path()));
+    let (r2, out2) = go(&pb_chain(), d.path(), &bin, true);
+    assert_eq!(
+        r2.hosts[0].status,
+        HostStatus::Ok,
+        "{}\n{out2}",
+        r2.render()
+    );
+    assert_eq!(changed_column(&r2), "0", "{}", r2.render());
+    assert_eq!(restarts(d.path()), 1, "{}", log(d.path()));
+}
+
+/// The chain and the two calls print the same prepare lines and report.
+#[test]
+fn executor_chain_and_two_calls_print_the_same_run() {
+    let run_both = |pb: Playbook<PathBuf>| {
+        let d = tempfile::tempdir().unwrap();
+        let bin = stubs(d.path());
+        set(d.path(), "active", "");
+        let (r, out) = go(&pb, d.path(), &bin, true);
+        let dir = d.path().display().to_string();
+        (r.render().replace(&dir, "D"), out.replace(&dir, "D"))
+    };
+    let a = run_both(pb_chain());
+    let b = run_both(pb_enable_start_then_restart());
+    assert_eq!(a.1, b.1);
+    assert_eq!(a.0, b.0);
+}
+
+/// A chained restart in one role and a plain restart of the same unit in
+/// another merge into one restart, as two plain ones do.
+#[test]
+fn executor_a_chained_restart_merges_with_another_roles_restart() {
+    fn run_(h: Host<PathBuf>) -> PlaybookFuture {
+        Box::pin(async move {
+            {
+                let _r = h.role_enter("a");
+                let f = h.file(&conf(&h, "a.conf")).content("a\n");
+                h.svc("docker").enabled().started().restart_on(&f);
+            }
+            let _r = h.role_enter("b");
+            let f = h.file(&conf(&h, "b.conf")).content("b\n");
+            h.svc("docker.service").restart_on(&f);
+            Ok(())
+        })
+    }
+    let pb = Playbook {
+        name: "svc",
+        run: run_,
+    };
+    let d = tempfile::tempdir().unwrap();
+    let bin = stubs(d.path());
+    set(d.path(), "state", "enabled");
+    set(d.path(), "active", "");
+    let (r1, out1) = go(&pb, d.path(), &bin, true);
+    assert_eq!(r1.exit_code(), 0, "{}\n{out1}", r1.render());
+    assert_eq!(restarts(d.path()), 1, "{}\n{out1}", log(d.path()));
+    let n = r1.hosts[0]
+        .ops
+        .iter()
+        .filter(|o| o.desc.contains("restart"))
+        .count();
+    assert_eq!(n, 1, "{}", r1.render());
+}
+
+/// A bound handle keeps naming the op it was bound to.
+#[test]
+fn a_bound_state_handle_keeps_naming_the_state_op() {
+    let h = host();
+    let f = h.file("/etc/x").content("x");
+    let s = h.svc("docker").enabled().started();
+    let r = s.restart_on(&f);
+    assert_ne!(s.id(), r.id());
+    assert_eq!(s.changed(), telepatch::Guard::Changed(s.id()));
+    assert_eq!(r.ok(), telepatch::Guard::ExitOk(r.id()));
+    assert!(errors_of(&h).is_empty(), "{:?}", errors_of(&h));
 }

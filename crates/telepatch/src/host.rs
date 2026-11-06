@@ -297,6 +297,41 @@ impl OpHandle {
         self.id
     }
 
+    /// Read this op's node.
+    pub(crate) fn with_node<R>(&self, f: impl FnOnce(&OpNode) -> R) -> Option<R> {
+        match &self.trace.borrow().nodes[self.id.0] {
+            Node::Op(op) => Some(f(op)),
+            _ => None,
+        }
+    }
+
+    /// Trace a new op at the end of the trace, in this op's shell, at the
+    /// caller's site, and return its handle: a builder that starts an op of
+    /// its own from a chain (`h.svc(u).started().restart_on(&x)`).
+    #[track_caller]
+    pub(crate) fn follow(&self, spec: OpSpec) -> OpHandle {
+        let run_as = self
+            .with_node(|op| op.run_as.clone())
+            .unwrap_or_else(RunAs::root_shell);
+        let node = OpNode {
+            writes: spec.default_writes(),
+            post: spec.default_post(),
+            spec,
+            run_as,
+            reads: Default::default(),
+            guard: None,
+            allow_fail: false,
+            site: Some(Site::caller()),
+            allowed: Vec::new(),
+            at_end: false,
+        };
+        let id = self.trace.borrow_mut().push(Node::Op(node));
+        OpHandle {
+            trace: self.trace.clone(),
+            id,
+        }
+    }
+
     pub(crate) fn edit(&self, f: impl FnOnce(&mut OpNode)) -> &Self {
         if let Node::Op(op) = &mut self.trace.borrow_mut().nodes[self.id.0] {
             f(op);

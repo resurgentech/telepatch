@@ -265,3 +265,49 @@ fn the_examples_bind_a_chain_and_handles_are_owned() {
         );
     }
 }
+
+/// The `#d-unit` example's svc line traces as written: state wants and a
+/// guarded restart on one chain (T77b). The unit's `.content` takes bytes
+/// here; the template value it shows is T89's.
+#[test]
+fn the_minikube_example_traces_as_written() {
+    let html = note_html();
+    let r = element_with_id(&html, "d-unit").expect("a section with id=\"d-unit\"");
+    let unit_text = text(&html[r]);
+    let line = "h.svc(\"minikube\").enabled().started().restart_on(&unit);";
+    assert!(
+        unit_text.contains(line),
+        "the note no longer shows {line:?}"
+    );
+
+    let h = telepatch::Host::new(
+        "t",
+        telepatch::facts::os::Os::parse("ID=debian\nVERSION_ID=12\n").unwrap(),
+        std::rc::Rc::new(()),
+    );
+    let unit = h
+        .unit("minikube.service")
+        .content("[Service]\nExecStart=/usr/local/bin/minikube start\n")
+        .mode(0o600);
+    h.svc("minikube").enabled().started().restart_on(&unit);
+    let snap = h.snapshot();
+    assert!(snap.errors.is_empty(), "{:?}", snap.errors);
+
+    // and the note says what the chain means
+    let r = element_with_id(&html, "d-restart-guard").expect("d-restart-guard");
+    let guard_text = text(&html[r]);
+    for needle in [
+        "h.svc(\"docker\").enabled().started().restart_on(&daemon);",
+        "the state wants apply on every run",
+        ".when(g) guards the op the handle names when it is called",
+    ] {
+        assert!(
+            guard_text.contains(needle),
+            "d-restart-guard does not say {needle:?}"
+        );
+    }
+    assert!(
+        !text(&html).contains("an action on an op of its own"),
+        "the note still says a restart must be an op of its own"
+    );
+}
