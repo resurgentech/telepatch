@@ -178,7 +178,7 @@ fn the_site_is_the_callers_line_through_every_layer() {
         .validate("visudo -c");
     // A handle builder through a private helper (want).
     let l3 = line!() + 1;
-    h.pkg(["git"]).pin("1");
+    h.pkg(["git", "tig"]).pin("1");
     // A source method on a user scope (pkg_spec_op directly).
     let l4 = line!() + 1;
     h.as_user("bob").pkg(["node"]).mise();

@@ -87,6 +87,72 @@ fn pip_latest() {
 }
 
 #[test]
+fn apt_pinned() {
+    let h = host("ubuntu2404");
+    let p = h.pkg(["curl"]);
+    p.pin("8.5.0-2ubuntu10.6");
+    assert!(h.snapshot().errors.is_empty(), "{:?}", h.snapshot().errors);
+    insta::assert_snapshot!(wrapped(&h, p.id()));
+}
+
+#[test]
+fn apt_latest_with_cache_update() {
+    let h = host("ubuntu2404");
+    let p = h.pkg(["curl", "jq"]);
+    p.latest();
+    p.update_cache(true);
+    assert!(h.snapshot().errors.is_empty(), "{:?}", h.snapshot().errors);
+    insta::assert_snapshot!(wrapped(&h, p.id()));
+}
+
+#[test]
+fn dnf_pinned() {
+    let h = host("rockylinux9");
+    let p = h.pkg(["git"]);
+    p.pin("2.43.5-1.el9");
+    assert!(h.snapshot().errors.is_empty(), "{:?}", h.snapshot().errors);
+    insta::assert_snapshot!(wrapped(&h, p.id()));
+}
+
+#[test]
+fn dnf_latest() {
+    let h = host("rockylinux9");
+    let p = h.pkg(["git", "jq"]);
+    p.latest();
+    assert!(h.snapshot().errors.is_empty(), "{:?}", h.snapshot().errors);
+    insta::assert_snapshot!(wrapped(&h, p.id()));
+}
+
+#[test]
+fn yum_pinned_and_latest() {
+    let h = host("amazonlinux2023");
+    let a = h.pkg(["git"]).yum();
+    a.pin("2.40.1-1.amzn2023.0.3");
+    let b = h.pkg(["jq"]).yum();
+    b.latest();
+    assert!(h.snapshot().errors.is_empty(), "{:?}", h.snapshot().errors);
+    insta::assert_snapshot!(format!("{}\n{}", wrapped(&h, a.id()), wrapped(&h, b.id())));
+}
+
+#[test]
+fn pacman_pinned() {
+    let h = host("arch");
+    let p = h.pkg(["jq"]);
+    p.pin("1.7.1-3");
+    assert!(h.snapshot().errors.is_empty(), "{:?}", h.snapshot().errors);
+    insta::assert_snapshot!(wrapped(&h, p.id()));
+}
+
+#[test]
+fn pacman_latest() {
+    let h = host("arch");
+    let p = h.pkg(["jq", "git"]);
+    p.latest();
+    assert!(h.snapshot().errors.is_empty(), "{:?}", h.snapshot().errors);
+    insta::assert_snapshot!(wrapped(&h, p.id()));
+}
+
+#[test]
 fn file_content_mode_owner() {
     let h = host("debian12");
     let id = h

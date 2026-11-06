@@ -21,7 +21,7 @@ use std::collections::BTreeSet;
 
 use crate::engine::Window;
 use crate::facts::os::Os;
-use crate::ops::pkg::{Manager, PkgMode, PkgSpec, Source};
+use crate::ops::pkg::{Manager, PkgMode, PkgSpec, Source, Wanted};
 use crate::pool::{Shell, ShellError};
 use crate::report::{WillChange, WillCreate, WillInstall};
 use crate::sh::quote;
@@ -164,8 +164,44 @@ pub fn source_probe(p: &PkgSpec) -> Option<String> {
             let tc = p.names.first().map(String::as_str).unwrap_or("");
             Some(crate::ops::pkg::rustup_probe(tc, &p.wanted, r))
         }
+        // A pacman pin is checked against the repo here; other distro
+        // wants are not probed (pkg_probe covers presence).
+        Source::Distro(Manager::Pacman) => match (&p.wanted, p.names.first()) {
+            (Wanted::Pinned(_), Some(n)) => {
+                let q = quote(n);
+                Some(format!(
+                    "tp_i=$(pacman -Q {q} 2>/dev/null | cut -d' ' -f2)\ntp_r=$(pacman -Si {q} 2>/dev/null | sed -n 's/^Version *: //p' | head -n1)\necho \"installed ${{tp_i:--}}\"\necho \"repo ${{tp_r:--}}\"\n"
+                ))
+            }
+            _ => None,
+        },
         Source::Distro(_) | Source::Pip => None,
     }
+}
+
+/// The reason a pkg op blocks its host, from its [`source_probe`] output.
+/// A pacman pin that is neither the repo's version nor the installed one
+/// cannot be met (Arch repos hold one version). A failed probe, or a repo
+/// that does not list the package, is unknown, never blocked.
+pub fn source_blocker(window: usize, p: &PkgSpec, out: Option<&str>) -> Option<String> {
+    let (Source::Distro(Manager::Pacman), Wanted::Pinned(pin), Some(out), Some(name)) =
+        (&p.source, &p.wanted, out, p.names.first())
+    else {
+        return None;
+    };
+    let field = |k: &str| {
+        out.lines()
+            .find_map(|l| l.strip_prefix(k))
+            .map(str::trim)
+            .filter(|v| !v.is_empty() && *v != "-")
+    };
+    let repo = field("repo ")?;
+    if repo == pin || field("installed ") == Some(pin.as_str()) {
+        return None;
+    }
+    Some(format!(
+        "pacman: cannot pin {name} to {pin} (window {window}): the repo has {repo}, and Arch repos hold one version per package"
+    ))
 }
 
 /// Parse a [`source_probe`]'s output (`None` when the probe failed) into
@@ -579,6 +615,9 @@ pub async fn prepare_window<S: ShellSet>(
             },
             None => None,
         };
+        if let Some(why) = source_blocker(window.number, p, out.as_deref()) {
+            return Err(why);
+        }
         will.will_change
             .extend(source_changes(window.number, p, out.as_deref()));
     }
@@ -720,5 +759,49 @@ mod tests {
         };
         assert!(svc_after_installers(&w));
         assert_eq!(svc_wants(&w).len(), 1, "a restart is not probed");
+    }
+
+    fn pacman_pin(name: &str, v: &str) -> PkgSpec {
+        let mut p = PkgSpec::new(Manager::Pacman, vec![name.into()]);
+        p.wanted = Wanted::Pinned(v.into());
+        p
+    }
+
+    #[test]
+    fn only_a_pacman_pin_has_a_distro_probe() {
+        let probe = source_probe(&pacman_pin("jq", "1.7-1")).unwrap();
+        assert!(probe.contains("pacman -Si 'jq'"), "{probe}");
+        assert!(probe.contains("pacman -Q 'jq'"), "{probe}");
+        let mut p = PkgSpec::new(Manager::Pacman, vec!["jq".into()]);
+        assert!(source_probe(&p).is_none());
+        p.wanted = Wanted::Latest;
+        assert!(source_probe(&p).is_none());
+        let mut a = pacman_pin("jq", "1");
+        a.source = Source::Distro(Manager::Apt);
+        assert!(source_probe(&a).is_none());
+    }
+
+    #[test]
+    fn a_pacman_pin_not_the_repo_version_blocks() {
+        let p = pacman_pin("jq", "1.6-1");
+        let msg = source_blocker(2, &p, Some("installed -\nrepo 1.7.1-3\n")).unwrap();
+        assert!(
+            msg.contains("jq") && msg.contains("1.6-1") && msg.contains("1.7.1-3"),
+            "{msg}"
+        );
+        assert!(msg.contains("window 2"), "{msg}");
+        // The repo's version, or what is installed already, is fine.
+        assert!(
+            source_blocker(
+                2,
+                &pacman_pin("jq", "1.7.1-3"),
+                Some("installed -\nrepo 1.7.1-3\n")
+            )
+            .is_none()
+        );
+        assert!(source_blocker(2, &p, Some("installed 1.6-1\nrepo 1.7.1-3\n")).is_none());
+        // Unknown is never blocked: failed probe, or no repo version.
+        assert!(source_blocker(2, &p, None).is_none());
+        assert!(source_blocker(2, &p, Some("installed -\nrepo -\n")).is_none());
     }
 }

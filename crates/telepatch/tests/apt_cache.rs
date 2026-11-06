@@ -87,3 +87,27 @@ fn repo_op_forces_one_update_before_the_next_apt_op() {
         "the key and source are under /etc/apt/"
     );
 }
+
+#[test]
+fn a_latest_apt_op_refreshes_once_per_window() {
+    let h = host();
+    h.pkg(["a"]);
+    h.pkg(["b"]).latest();
+    h.pkg(["c"]).latest();
+    h.pkg(["d"]).pin("1");
+    assert_eq!(
+        apt_update_needed(&ops(&h)),
+        [false, true, false, false],
+        "one refresh serves every later candidate lookup"
+    );
+}
+
+#[test]
+fn a_sources_write_after_a_refresh_allows_one_more() {
+    let h = host();
+    h.pkg(["a"]).latest();
+    h.file("/etc/apt/a.list").line("x");
+    h.pkg(["b"]).latest();
+    h.pkg(["c"]).latest();
+    assert_eq!(apt_update_needed(&ops(&h)), [true, false, true, false]);
+}

@@ -237,11 +237,14 @@ impl PkgSpec {
 
     /// May this op ever be folded into another? `Script` and `Rustup` ops
     /// never merge (one toolchain per op, with its own options); a
-    /// pinned `Cargo` op has exactly one name (the pin is for that name).
+    /// pinned `Cargo`, `Mise` or distro op has exactly one name (the pin is for
+    /// that name).
     pub fn mergeable(&self) -> bool {
         match &self.source {
             Source::Script(_) | Source::Rustup(_) => false,
-            Source::Cargo | Source::Mise => !matches!(self.wanted, Wanted::Pinned(_)),
+            Source::Cargo | Source::Mise | Source::Distro(_) => {
+                !matches!(self.wanted, Wanted::Pinned(_))
+            }
             _ => true,
         }
     }
@@ -292,14 +295,29 @@ impl PkgSpec {
             "rc=0; changed=0; installed=()\ntp_want=({})\ntp_missing=()\n",
             names.join(" ")
         );
+        if let (Source::Distro(_), Wanted::Pinned(v)) = (&self.source, &self.wanted) {
+            o.push_str(&format!("tp_pin={}\n", quote(v)));
+        }
         match (&self.source, self.mode) {
             (Source::Distro(Manager::Apt), PkgMode::BuildDep) => self.apt_build_dep(&mut o),
-            (Source::Distro(Manager::Apt), _) => self.apt(&mut o),
-            (Source::Distro(Manager::Dnf), _) => {
-                rpm_like(&mut o, "dnf", "dnf group list --installed")
+            (Source::Distro(Manager::Apt), _) => match &self.wanted {
+                Wanted::Present => self.apt(&mut o),
+                w => self.apt_versioned(&mut o, w),
+            },
+            (Source::Distro(m @ (Manager::Dnf | Manager::Yum)), _) => {
+                let (mgr, groups) = match m {
+                    Manager::Dnf => ("dnf", "dnf group list --installed"),
+                    _ => ("yum", "yum grouplist installed"),
+                };
+                match &self.wanted {
+                    Wanted::Present => rpm_like(&mut o, mgr, groups),
+                    w => rpm_versioned(&mut o, mgr, w),
+                }
             }
-            (Source::Distro(Manager::Yum), _) => rpm_like(&mut o, "yum", "yum grouplist installed"),
-            (Source::Distro(Manager::Pacman), _) => pacman(&mut o),
+            (Source::Distro(Manager::Pacman), _) => match &self.wanted {
+                Wanted::Present => pacman(&mut o),
+                w => pacman_versioned(&mut o, w),
+            },
             (Source::Pip, _) => match &self.wanted {
                 Wanted::Latest => pip_latest(&mut o),
                 Wanted::Pinned(_) => pip_pinned(&mut o),
@@ -332,6 +350,47 @@ impl PkgSpec {
         o.push_str(
             "  if [ \"$rc\" -eq 0 ]; then\n    apt-get -y -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold install \"${tp_missing[@]}\"\n    rc=$?\n    if [ \"$rc\" -eq 0 ]; then changed=1; installed=(\"${tp_missing[@]}\"); fi\n  fi\nfi\n",
         );
+    }
+
+    /// `.pin(v)` and `.latest()` on apt. Pinned: a name is missing when its
+    /// dpkg version is not exactly the string the user wrote; `install
+    /// name=v` (with `--allow-downgrades`) then moves it. Latest: a name
+    /// is installed when missing, and `install --only-upgrade` runs for an
+    /// installed name whose `apt-cache policy` candidate is newer
+    /// (`dpkg --compare-versions`) than the installed version.
+    fn apt_versioned(&self, o: &mut String, w: &Wanted) {
+        const OPTS: &str = "-o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold";
+        o.push_str("export DEBIAN_FRONTEND=noninteractive\ntp_up=()\n");
+        self.apt_update_block(o);
+        match w {
+            Wanted::Pinned(_) => o.push_str(
+                "for tp_n in \"${tp_want[@]}\"; do\n  [ \"$(dpkg-query -W -f='${db:Status-Status}:${Version}' \"$tp_n\" 2>/dev/null)\" = \"installed:$tp_pin\" ] || tp_missing+=(\"$tp_n\")\ndone\n",
+            ),
+            _ => o.push_str(
+                "for tp_n in \"${tp_want[@]}\"; do\n  tp_st=$(dpkg-query -W -f='${db:Status-Status}:${Version}' \"$tp_n\" 2>/dev/null)\n  case \"$tp_st\" in\n    installed:*)\n      tp_cand=$(LC_ALL=C apt-cache policy \"$tp_n\" 2>/dev/null | sed -n 's/^  Candidate: //p')\n      if [ -n \"$tp_cand\" ] && [ \"$tp_cand\" != '(none)' ] && dpkg --compare-versions \"$tp_cand\" gt \"${tp_st#installed:}\"; then tp_up+=(\"$tp_n\"); fi;;\n    *) tp_missing+=(\"$tp_n\");;\n  esac\ndone\n",
+            ),
+        }
+        o.push_str(
+            "if [ \"$rc\" -eq 0 ] && [ \"$(( ${#tp_missing[@]} + ${#tp_up[@]} ))\" -gt 0 ]; then\n",
+        );
+        if !self.update_cache {
+            o.push_str(APT_LISTS_GUARD);
+        }
+        o.push_str("  if [ \"$rc\" -eq 0 ] && [ \"${#tp_missing[@]}\" -gt 0 ]; then\n");
+        match w {
+            Wanted::Pinned(_) => o.push_str(&format!(
+                "    tp_args=(); for tp_n in \"${{tp_missing[@]}}\"; do tp_args+=(\"$tp_n=$tp_pin\"); done\n    apt-get -y --allow-downgrades {OPTS} install \"${{tp_args[@]}}\"\n"
+            )),
+            _ => o.push_str(&format!(
+                "    apt-get -y {OPTS} install \"${{tp_missing[@]}}\"\n"
+            )),
+        }
+        o.push_str(
+            "    rc=$?\n    if [ \"$rc\" -eq 0 ]; then changed=1; installed+=(\"${tp_missing[@]}\"); fi\n  fi\n",
+        );
+        o.push_str(&format!(
+            "  if [ \"$rc\" -eq 0 ] && [ \"${{#tp_up[@]}}\" -gt 0 ]; then\n    apt-get -y {OPTS} install --only-upgrade \"${{tp_up[@]}}\"\n    rc=$?\n    if [ \"$rc\" -eq 0 ]; then changed=1; installed+=(\"${{tp_up[@]}}\"); fi\n  fi\nfi\n"
+        ));
     }
 
     /// Whether build-dep installed anything cannot be checked up front, so
@@ -367,6 +426,51 @@ fn pacman(o: &mut String) {
     o.push_str(
         "for tp_n in \"${tp_want[@]}\"; do\n  if [ -z \"$(pacman -T \"$tp_n\" 2>/dev/null)\" ] || [ -n \"$(pacman -Qqg \"$tp_n\" 2>/dev/null)\" ]; then :; else tp_missing+=(\"$tp_n\"); fi\ndone\nif [ \"${#tp_missing[@]}\" -gt 0 ]; then\n  pacman -S --needed --noconfirm \"${tp_missing[@]}\"\n  rc=$?\n  if [ \"$rc\" -eq 0 ]; then changed=1; installed=(\"${tp_missing[@]}\"); fi\nfi\n",
     );
+}
+
+/// rpm's installed versions of one package, one per line, in the forms a
+/// pin may be written: `V`, `V-R`, and `E:V-R` when there is an epoch.
+const RPM_FORMS: &str =
+    "%{VERSION}\\n%{VERSION}-%{RELEASE}\\n%|EPOCH?{%{EPOCH}:%{VERSION}-%{RELEASE}\\n}|";
+
+/// `.pin(v)` and `.latest()` on dnf and yum. Pinned: a name is missing when
+/// no installed copy matches the pin in any of [`RPM_FORMS`]; `install
+/// name-v` runs, then `downgrade name-v` when that left the name at
+/// another version. Latest: a missing name is installed, and an installed
+/// one for which `check-update` exits 100 is upgraded alone.
+fn rpm_versioned(o: &mut String, mgr: &str, w: &Wanted) {
+    o.push_str("tp_up=()\n");
+    match w {
+        Wanted::Pinned(_) => o.push_str(&format!(
+            "tp_have() {{ rpm -q --qf '{RPM_FORMS}' \"$1\" 2>/dev/null | grep -qxF -- \"$tp_pin\"; }}\nfor tp_n in \"${{tp_want[@]}}\"; do\n  tp_have \"$tp_n\" || tp_missing+=(\"$tp_n\")\ndone\nfor tp_n in \"${{tp_missing[@]}}\"; do\n  {mgr} install -y \"$tp_n-$tp_pin\"\n  rc=$?\n  if [ \"$rc\" -eq 0 ] && ! tp_have \"$tp_n\"; then {mgr} downgrade -y \"$tp_n-$tp_pin\"; rc=$?; fi\n  [ \"$rc\" -eq 0 ] || break\ndone\nif [ \"$rc\" -eq 0 ] && [ \"${{#tp_missing[@]}}\" -gt 0 ]; then changed=1; installed=(\"${{tp_missing[@]}}\"); fi\n"
+        )),
+        _ => o.push_str(&format!(
+            "for tp_n in \"${{tp_want[@]}}\"; do\n  if rpm -q \"$tp_n\" >/dev/null 2>&1; then\n    {mgr} -q check-update \"$tp_n\" >/dev/null 2>&1\n    if [ $? -eq 100 ]; then tp_up+=(\"$tp_n\"); fi\n  else tp_missing+=(\"$tp_n\"); fi\ndone\nif [ \"${{#tp_missing[@]}}\" -gt 0 ]; then\n  {mgr} install -y \"${{tp_missing[@]}}\"\n  rc=$?\n  if [ \"$rc\" -eq 0 ]; then changed=1; installed+=(\"${{tp_missing[@]}}\"); fi\nfi\nif [ \"$rc\" -eq 0 ] && [ \"${{#tp_up[@]}}\" -gt 0 ]; then\n  {mgr} upgrade -y \"${{tp_up[@]}}\"\n  rc=$?\n  if [ \"$rc\" -eq 0 ]; then changed=1; installed+=(\"${{tp_up[@]}}\"); fi\nfi\n"
+        )),
+    }
+}
+
+/// The installed version of a pacman package, empty when not installed.
+const PACMAN_INSTALLED: &str = "pacman -Q \"$tp_n\" 2>/dev/null | cut -d' ' -f2";
+/// The repo's version of a package, empty when no sync db has it.
+const PACMAN_REPO: &str =
+    "pacman -Si \"$tp_n\" 2>/dev/null | sed -n 's/^Version *: //p' | head -n1";
+
+/// `.pin(v)` and `.latest()` on pacman. Arch repos hold one version of a
+/// package, so a pin installs only when it equals the repo's version
+/// (prepare blocks any other; the script refuses too). Latest: `-S
+/// --needed` for what is missing or whose repo version is newer
+/// (`vercmp`).
+fn pacman_versioned(o: &mut String, w: &Wanted) {
+    o.push_str("tp_up=()\n");
+    match w {
+        Wanted::Pinned(_) => o.push_str(&format!(
+            "for tp_n in \"${{tp_want[@]}}\"; do\n  [ \"$({PACMAN_INSTALLED})\" = \"$tp_pin\" ] || tp_missing+=(\"$tp_n\")\ndone\nfor tp_n in \"${{tp_missing[@]}}\"; do\n  tp_repo=$({PACMAN_REPO})\n  if [ \"$tp_repo\" != \"$tp_pin\" ]; then echo \"telepatch: pacman cannot install $tp_n at $tp_pin; the repo has ${{tp_repo:-no such package}}\" >&2; rc=1; fi\ndone\nif [ \"$rc\" -eq 0 ] && [ \"${{#tp_missing[@]}}\" -gt 0 ]; then\n  pacman -S --noconfirm \"${{tp_missing[@]}}\"\n  rc=$?\n  if [ \"$rc\" -eq 0 ]; then changed=1; installed=(\"${{tp_missing[@]}}\"); fi\nfi\n"
+        )),
+        _ => o.push_str(&format!(
+            "for tp_n in \"${{tp_want[@]}}\"; do\n  tp_have=$({PACMAN_INSTALLED})\n  if [ -z \"$tp_have\" ]; then tp_missing+=(\"$tp_n\"); continue; fi\n  tp_repo=$({PACMAN_REPO})\n  if [ -n \"$tp_repo\" ] && [ \"$(vercmp \"$tp_repo\" \"$tp_have\")\" -gt 0 ]; then tp_up+=(\"$tp_n\"); fi\ndone\ntp_todo=(\"${{tp_missing[@]}}\" \"${{tp_up[@]}}\")\nif [ \"${{#tp_todo[@]}}\" -gt 0 ]; then\n  pacman -S --needed --noconfirm \"${{tp_todo[@]}}\"\n  rc=$?\n  if [ \"$rc\" -eq 0 ]; then changed=1; installed=(\"${{tp_todo[@]}}\"); fi\nfi\n"
+        )),
+    }
 }
 
 const PIP_PICK: &str = "if python3 -m pip --version >/dev/null 2>&1; then tp_pip=(python3 -m pip)\nelif command -v pip3 >/dev/null 2>&1; then tp_pip=(pip3)\nelse echo 'telepatch: pip not found' >&2; rc=127; fi\n";
@@ -412,14 +516,23 @@ pub fn apt_update_needed(ops: &[OpNode]) -> Vec<bool> {
 /// returning the state after `ops`, so a caller handling ops in several
 /// windows can carry it over.
 pub fn apt_update_flags(mut stale: bool, ops: &[OpNode]) -> (Vec<bool>, bool) {
+    // A `.latest()` op reads candidates from the lists, so it needs them
+    // refreshed; one refresh serves every later op of the window, until
+    // sources are written again.
+    let mut refreshed = false;
     let flags = ops
         .iter()
         .map(|op| match &op.spec {
             OpSpec::Pkg(p) if p.source == Source::Distro(Manager::Apt) => {
-                std::mem::take(&mut stale)
+                let flag = std::mem::take(&mut stale) || (p.wanted == Wanted::Latest && !refreshed);
+                refreshed |= flag;
+                flag
             }
             _ => {
-                stale |= op.writes.iter().any(writes_apt_sources);
+                if op.writes.iter().any(writes_apt_sources) {
+                    stale = true;
+                    refreshed = false;
+                }
                 false
             }
         })
@@ -609,15 +722,15 @@ impl PkgHandle {
         self.clone()
     }
 
-    /// Want the newest release (pip: `install -U`). Not supported on
-    /// distro packages.
+    /// Want the newest release (pip: `install -U`; distro: upgrade what is
+    /// behind).
     #[track_caller]
     pub fn latest(&self) -> Self {
         self.want(Wanted::Latest)
     }
 
-    /// Want exactly version `v` (pip: `name==v`). Not supported on distro
-    /// packages.
+    /// Want exactly version `v` (pip: `name==v`; distro: one name, the
+    /// manager's own version string).
     #[track_caller]
     pub fn pin(&self, v: impl Into<String>) -> Self {
         self.want(Wanted::Pinned(v.into()))
@@ -704,14 +817,22 @@ impl PkgHandle {
 
     #[track_caller]
     fn want(&self, w: Wanted) -> Self {
-        let mut distro = false;
+        let mut distro_err: Option<&str> = None;
         let mut script_err = None;
         let mut cargo_pin_many = false;
         let mut mise_pin_many = false;
         let mut rustup_pin = false;
         self.spec(|s| {
             if matches!(s.source, Source::Distro(_)) {
-                distro = true;
+                if s.mode == PkgMode::BuildDep {
+                    distro_err = Some("pkg: build-dep cannot be pinned or latest");
+                } else if s.names.iter().any(|n| n.starts_with('@')) {
+                    distro_err = Some("pkg: a @group cannot be pinned or latest");
+                } else if matches!(w, Wanted::Pinned(_)) && s.names.len() != 1 {
+                    distro_err = Some("pkg: a pinned op takes exactly one package name");
+                } else {
+                    s.wanted = w;
+                }
                 return;
             }
             if let (Source::Script(sc), Wanted::Latest) = (&s.source, &w) {
@@ -743,10 +864,8 @@ impl PkgHandle {
                 "cargo: a pinned op takes exactly one package name",
             ));
         }
-        if distro {
-            self.0.record_error(TraceError::new(
-                "pin or latest on distro packages is not supported",
-            ));
+        if let Some(e) = distro_err {
+            self.0.record_error(TraceError::new(e));
         }
         if let Some(e) = script_err {
             self.0.record_error(TraceError::new(e));
@@ -879,13 +998,86 @@ mod tests {
     }
 
     #[test]
-    fn distro_pin_or_latest_is_a_trace_error() {
+    fn distro_pin_and_latest_set_wanted() {
         let h = host();
-        h.pkg(["git"]).pin("1");
+        h.pkg(["git"]).pin("1:2.0-1");
         h.pkg(["git"]).latest();
-        let msg = "pin or latest on distro packages is not supported";
-        assert_eq!(errors(&h), [msg, msg]);
-        assert_eq!(spec_of(&h, 0).wanted, Wanted::Present);
+        assert!(errors(&h).is_empty(), "{:?}", errors(&h));
+        assert_eq!(spec_of(&h, 0).wanted, Wanted::Pinned("1:2.0-1".into()));
+        assert_eq!(spec_of(&h, 1).wanted, Wanted::Latest);
+    }
+
+    #[test]
+    fn distro_pin_takes_one_plain_name() {
+        let h = host();
+        h.pkg(["a", "b"]).pin("1");
+        h.pkg(["@Tools"]).pin("1");
+        h.pkg(["@Tools"]).latest();
+        h.pkg(["a"]).build_dep().latest();
+        assert_eq!(
+            errors(&h),
+            [
+                "pkg: a pinned op takes exactly one package name",
+                "pkg: a @group cannot be pinned or latest",
+                "pkg: a @group cannot be pinned or latest",
+                "pkg: build-dep cannot be pinned or latest",
+            ]
+        );
+    }
+
+    #[test]
+    fn distro_pinned_never_merges_and_latest_not_with_present() {
+        let m = Manager::Apt;
+        let present = PkgSpec::new(m, names(["a"]));
+        let mut latest = PkgSpec::new(m, names(["b"]));
+        latest.wanted = Wanted::Latest;
+        let mut pinned = PkgSpec::new(m, names(["c"]));
+        pinned.wanted = Wanted::Pinned("1".into());
+        assert!(!present.can_merge(&latest));
+        assert!(!latest.can_merge(&present));
+        assert!(latest.can_merge(&latest.clone()));
+        assert!(!pinned.can_merge(&pinned.clone()));
+        assert!(!present.can_merge(&pinned));
+    }
+
+    fn distro(m: Manager, w: Wanted) -> String {
+        let mut p = PkgSpec::new(m, names(["curl"]));
+        p.wanted = w;
+        p.render()
+    }
+
+    #[test]
+    fn distro_pin_renders_per_manager() {
+        let pin = || Wanted::Pinned("1.2-3".into());
+        let apt = distro(Manager::Apt, pin());
+        assert!(apt.contains("tp_pin='1.2-3'"), "{apt}");
+        assert!(apt.contains("${Version}"), "{apt}");
+        assert!(apt.contains("$tp_n=$tp_pin"), "{apt}");
+        assert!(apt.contains("--allow-downgrades"), "{apt}");
+        let dnf = distro(Manager::Dnf, pin());
+        assert!(dnf.contains("tp_pin='1.2-3'"), "{dnf}");
+        assert!(dnf.contains("%{VERSION}-%{RELEASE}"), "{dnf}");
+        assert!(dnf.contains("dnf install -y \"$tp_n-$tp_pin\""), "{dnf}");
+        assert!(dnf.contains("dnf downgrade -y"), "{dnf}");
+        let yum = distro(Manager::Yum, pin());
+        assert!(yum.contains("yum install -y \"$tp_n-$tp_pin\""), "{yum}");
+        let pac = distro(Manager::Pacman, pin());
+        assert!(pac.contains("pacman -Q"), "{pac}");
+        assert!(pac.contains("pacman -Si"), "{pac}");
+        assert!(pac.contains("pacman -S --noconfirm"), "{pac}");
+    }
+
+    #[test]
+    fn distro_latest_upgrades_only_what_is_behind() {
+        let apt = distro(Manager::Apt, Wanted::Latest);
+        assert!(apt.contains("apt-cache policy"), "{apt}");
+        assert!(apt.contains("--only-upgrade"), "{apt}");
+        let dnf = distro(Manager::Dnf, Wanted::Latest);
+        assert!(dnf.contains("dnf -q check-update"), "{dnf}");
+        assert!(dnf.contains("dnf upgrade -y \"${tp_up[@]}\""), "{dnf}");
+        let pac = distro(Manager::Pacman, Wanted::Latest);
+        assert!(pac.contains("vercmp"), "{pac}");
+        assert!(pac.contains("pacman -S --needed --noconfirm"), "{pac}");
     }
 
     #[test]
