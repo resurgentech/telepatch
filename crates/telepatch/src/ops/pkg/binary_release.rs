@@ -311,7 +311,6 @@ impl BinaryRelease {
     /// Shell setting `tp_sum` (empty with no checksum source), or printing
     /// `br block ..` and returning.
     fn sum_shell(&self) -> String {
-        const NO_DL: &str = "  if [ -z \"$tp_dl\" ]; then echo \"br block neither curl nor wget is on the host\"; return 0; fi\n";
         match &self.sha256 {
             None => "tp_sum=\n".to_string(),
             Some(Sum::Value(h)) => format!("tp_sum={}\n", quote(h)),
@@ -357,6 +356,12 @@ impl BinaryRelease {
         s.push_str("echo \"br have $tp_have $tp_v\"\n");
         const SETTLED: &str = "echo \"br settled\"; return 0";
         let resolve_latest = |s: &mut String, l: &Latest| {
+            // A latest read over the network needs a downloader: without
+            // one, say so (a split can then lift it), not "could not
+            // resolve".
+            if matches!(l, Latest::Text(_) | Latest::GithubRelease(_)) {
+                s.push_str(NO_DL);
+            }
             s.push_str(&format!(
                 "tp_want=$( (\n{}\n) 2>/dev/null </dev/null | tp_tok)\nif [ -z \"$tp_want\" ]; then echo \"br block could not resolve the latest version\"; return 0; fi\n",
                 l.render()
@@ -498,6 +503,27 @@ pub fn json_sum_shell(filename_key: &str, sum_key: &str) -> String {
     )
 }
 
+/// The `br block` line of a missing downloader ([`fetch::NO_DOWNLOADER`]).
+const NO_DL: &str = "  if [ -z \"$tp_dl\" ]; then echo \"br block neither curl nor wget is on the host\"; return 0; fi\n";
+
+/// Why prepare blocks the host over a binary release: `why` is the
+/// reason, and `no_downloader` says it is only that a download was needed
+/// and neither curl nor wget is on the host.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Blocked {
+    pub why: String,
+    pub no_downloader: bool,
+}
+
+impl From<&str> for Blocked {
+    fn from(why: &str) -> Blocked {
+        Blocked {
+            why: why.to_string(),
+            no_downloader: false,
+        }
+    }
+}
+
 /// What prepare found for one binary-release op ([`BinaryRelease::prepare`]'s
 /// output; `None` when the probe failed): settled (`Ok(None)`), the
 /// prepare line (`pkg[binary_release] go: 1.27.2 installed, 1.27.3
@@ -506,8 +532,14 @@ pub fn prepared(
     window: usize,
     name: &str,
     out: Option<&str>,
-) -> Result<Option<WillCreate>, String> {
-    let blocked = |why: &str| format!("pkg[binary_release] {name}: {why} (window {window})");
+) -> Result<Option<WillCreate>, Blocked> {
+    let blocked = |why: &str| {
+        Blocked::from(format!("pkg[binary_release] {name}: {why} (window {window})").as_str())
+    };
+    let no_dl = |why: &str| Blocked {
+        no_downloader: true,
+        ..blocked(why)
+    };
     let Some(out) = out else {
         return Err(blocked("the host gave no answer"));
     };
@@ -518,6 +550,9 @@ pub fn prepared(
             .map(str::trim)
     };
     if let Some(why) = field("br block ") {
+        if why == fetch::NO_DOWNLOADER {
+            return Err(no_dl(why));
+        }
         return Err(blocked(why));
     }
     if out.lines().any(|l| l == "br settled") {
@@ -544,6 +579,7 @@ pub fn prepared(
     };
     let state = match fetch::parse(std::slice::from_ref(&item), out).remove(0) {
         Found::Blocked(why) => return Err(blocked(&why)),
+        Found::NoDownloader(why) => return Err(no_dl(&why)),
         Found::Cached => FetchState::Cached,
         Found::Fetched => FetchState::Fetched,
         Found::Staged => FetchState::Unverified,
@@ -672,7 +708,22 @@ mod tests {
         );
         assert_eq!(
             prepared(2, "go", Some("br have 0 \nbr url http://x/a\nbr sum \nfetch 0 notool\n")),
-            Err("pkg[binary_release] go: fetch http://x/a: neither curl nor wget is on the host (window 2)".into())
+            Err(Blocked {
+                why: "pkg[binary_release] go: fetch http://x/a: neither curl nor wget is on the host (window 2)".into(),
+                no_downloader: true
+            })
+        );
+        assert_eq!(
+            prepared(
+                2,
+                "go",
+                Some("br have 0 \nbr block neither curl nor wget is on the host\n")
+            ),
+            Err(Blocked {
+                why: "pkg[binary_release] go: neither curl nor wget is on the host (window 2)"
+                    .into(),
+                no_downloader: true
+            })
         );
         assert_eq!(
             prepared(2, "go", None),

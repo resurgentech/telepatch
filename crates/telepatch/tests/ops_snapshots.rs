@@ -533,3 +533,57 @@ fn plan_shows_rustup_merged() {
         &fx
     ));
 }
+
+/// No script telepatch sends needs `cmp` or `diff` (diffutils is not in
+/// Rocky's minimal image). The rule: in the body of each snapshot (the text
+/// after insta's `---` header block), no line holds the word `cmp` or `diff`
+/// followed by a space, where the word starts the line or follows a char
+/// that is not a letter, digit, `_`, `-`, `.` or `/` (so a name or path
+/// ending in the word does not count; `| cmp -s - f` and `! cmp -s a b` do).
+/// It reads every `.snap` under `tests/snapshots` and
+/// `tests/adversarial/snapshots`, rendered script or plan alike.
+#[test]
+fn no_snapshot_script_calls_cmp_or_diff() {
+    fn calls(line: &str) -> bool {
+        for w in ["cmp ", "diff "] {
+            for (i, _) in line.match_indices(w) {
+                let before = line[..i].chars().next_back();
+                if !before.is_some_and(|c| c.is_alphanumeric() || "_-./".contains(c)) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests");
+    let mut bad = Vec::new();
+    let mut seen = 0;
+    let files = ["snapshots", "adversarial/snapshots"]
+        .iter()
+        .flat_map(|d| std::fs::read_dir(root.join(d)).unwrap().flatten());
+    for e in files {
+        let p = e.path();
+        if p.extension().is_none_or(|x| x != "snap") {
+            continue;
+        }
+        seen += 1;
+        let text = std::fs::read_to_string(&p).unwrap();
+        let body = text.splitn(3, "---\n").nth(2).unwrap_or("");
+        for (n, l) in body.lines().enumerate() {
+            if calls(l) {
+                bad.push(format!(
+                    "{}:{}: {}",
+                    p.file_stem().unwrap().to_string_lossy(),
+                    n + 1,
+                    l.trim()
+                ));
+            }
+        }
+    }
+    assert!(seen > 20, "found only {seen} snapshots");
+    assert!(
+        bad.is_empty(),
+        "cmp/diff in rendered scripts:\n{}",
+        bad.join("\n")
+    );
+}

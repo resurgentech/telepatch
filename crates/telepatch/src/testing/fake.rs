@@ -4,7 +4,7 @@
 use std::collections::BTreeMap;
 use std::fmt::Write;
 
-use crate::engine::{Engine, Executor, HostInfo, Observation, Window, WindowKind};
+use crate::engine::{Applied, Engine, Executor, HostInfo, Observation, Window, WindowKind};
 use crate::facts::query::{Fact, FactQuery};
 use crate::host::Host;
 use crate::key::Value;
@@ -51,6 +51,9 @@ pub struct FakeExecutor {
     pub calls: Vec<(String, Call)>,
     /// Every window applied, with its host, as the engine prepared it.
     pub windows: Vec<(String, Window)>,
+    /// A host with neither curl nor wget, where every download needs one:
+    /// a window with a split candidate is declined for its head, unrecorded.
+    no_downloader: bool,
 }
 
 impl FakeExecutor {
@@ -61,6 +64,14 @@ impl FakeExecutor {
     /// Fixture: what `fact` answers when asked in `run_as`.
     pub fn answer(mut self, run_as: RunAs, fact: Fact, value: Value) -> FakeExecutor {
         self.fixtures.insert((run_as, fact), value);
+        self
+    }
+
+    /// A host with neither `curl` nor `wget`: every window with a split
+    /// candidate is declined for its head ([`Applied::Head`]), as the
+    /// executor does when prepare finds no downloader.
+    pub fn without_downloader(mut self) -> FakeExecutor {
+        self.no_downloader = true;
         self
     }
 
@@ -187,7 +198,12 @@ impl Executor for FakeExecutor {
         values
     }
 
-    async fn apply(&mut self, host: &HostInfo, window: &Window) -> Result<(), String> {
+    async fn apply(&mut self, host: &HostInfo, window: &Window) -> Result<Applied, String> {
+        if self.no_downloader
+            && let Some(s) = &window.split
+        {
+            return Ok(Applied::Head(s.at + 1));
+        }
         self.windows.push((host.name.clone(), window.clone()));
         let ops = window
             .ops
@@ -207,7 +223,7 @@ impl Executor for FakeExecutor {
                 ops,
             },
         ));
-        Ok(())
+        Ok(Applied::All)
     }
 
     fn observe(&mut self, host: &HostInfo, obs: &Observation) {

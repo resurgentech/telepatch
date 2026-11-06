@@ -14,6 +14,12 @@
 //! (`pkg[binary_release] go: 1.27.2 installed, 1.27.3 wanted; fetched,
 //! sha256 ok` is its prepare line).
 //!
+//! A download (a fetch, a binary release) that finds neither `curl` nor
+//! `wget` is the one asserted block an earlier op of the window can lift:
+//! [`Refused::no_downloader`] names the ops it held up, and the executor
+//! then declines the window for its head when they all come after the
+//! window's [`crate::engine::Split`] (the op that installs one).
+//!
 //! Gathering versus asserting: package state is *gathered* and reported
 //! ("will install: ..."); it is never asserted. The pkg templates already
 //! skip what is installed, and an earlier op in the same window may install
@@ -29,7 +35,7 @@ use crate::ops::pkg::{Manager, PkgMode, PkgSpec, Source, Wanted};
 use crate::pool::{Shell, ShellError};
 use crate::report::{FetchLine, FetchState, WillChange, WillCreate, WillInstall};
 use crate::sh::quote;
-use crate::trace::{OpNode, OpSpec, Principal};
+use crate::trace::{NodeId, OpNode, OpSpec, Principal};
 use crate::trailer::{OpKind, wrap};
 
 /// Non-root users the window's ops address (`as_user(u)`).
@@ -302,6 +308,58 @@ pub struct Prepared {
     pub fetches: Vec<FetchLine>,
 }
 
+/// Why prepare blocks a host. `why` is the reason the run prints.
+/// `no_downloader` lists the window's ops (by id) whose download found
+/// neither `curl` nor `wget` on the host, when that is the only reason
+/// found; it is empty otherwise. An op earlier in the window that installs
+/// one can lift it ([`crate::engine::Split`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Refused {
+    pub why: String,
+    pub no_downloader: Vec<NodeId>,
+}
+
+impl From<String> for Refused {
+    fn from(why: String) -> Refused {
+        Refused {
+            why,
+            no_downloader: Vec::new(),
+        }
+    }
+}
+
+/// The first missing-downloader block of a window, while prepare goes on.
+#[derive(Default)]
+struct NoDownloader {
+    why: Option<String>,
+    ops: Vec<NodeId>,
+}
+
+impl NoDownloader {
+    fn note(&mut self, why: String, ops: impl IntoIterator<Item = NodeId>) {
+        self.why.get_or_insert(why);
+        self.ops.extend(ops);
+    }
+
+    /// A block for another reason, `why`: the first block found speaks
+    /// (as it did before a missing downloader could split a window), and
+    /// it no longer splits.
+    fn other(&self, why: String) -> Refused {
+        Refused::from(self.why.clone().unwrap_or(why))
+    }
+
+    /// `Err` once a missing downloader was noted.
+    fn refused(&mut self) -> Result<(), Refused> {
+        match self.why.take() {
+            Some(why) => Err(Refused {
+                why,
+                no_downloader: std::mem::take(&mut self.ops),
+            }),
+            None => Ok(()),
+        }
+    }
+}
+
 /// Names of the groups the window's `group` ops ensure, first-seen order,
 /// without duplicates.
 pub fn group_names(window: &Window) -> Vec<String> {
@@ -417,7 +475,8 @@ fn shell_of<'a, S: ShellSet>(shells: &'a mut S, who: &Principal) -> Result<&'a m
 }
 
 /// Check `window` on the host. Users already verified are in `users_ok`.
-/// `Err` is the reason the host is blocked. On success, the packages the
+/// `Err` is the reason the host is blocked ([`Refused`]: a download that
+/// found no downloader names its ops there). On success, the packages the
 /// window's pkg ops will install or change. `seq` hands out probe ids.
 ///
 /// Order: the `getent` check for users not yet verified (root shell, one
@@ -431,7 +490,7 @@ pub async fn prepare_window<S: ShellSet>(
     os: &Os,
     users_ok: &mut BTreeSet<String>,
     seq: &mut usize,
-) -> Result<Prepared, String> {
+) -> Result<Prepared, Refused> {
     let users = users_in(window);
     let new_users: Vec<String> = users
         .iter()
@@ -454,7 +513,8 @@ pub async fn prepare_window<S: ShellSet>(
                 "user {} does not exist on the host (as_user in window {})",
                 missing.join(", "),
                 window.number
-            ));
+            )
+            .into());
         }
         users_ok.extend(new_users);
     }
@@ -466,6 +526,9 @@ pub async fn prepare_window<S: ShellSet>(
     // probe is sent, since a failure here blocks the host.
     let fetch_items = crate::ops::fetch::items(window);
     let mut fetches = Vec::new();
+    // A missing downloader blocks only once prepare has seen every
+    // download of the window: the engine may split it instead.
+    let mut no_dl = NoDownloader::default();
     if !fetch_items.is_empty() {
         let id = next();
         let root = shell_of(shells, &Principal::Root)?;
@@ -479,7 +542,18 @@ pub async fn prepare_window<S: ShellSet>(
                 Found::Cached => FetchState::Cached,
                 Found::Fetched => FetchState::Fetched,
                 Found::Staged => FetchState::Unverified,
-                Found::Blocked(why) => return Err(format!("{why} (window {})", window.number)),
+                Found::NoDownloader(why) => {
+                    let ops = window
+                        .ops
+                        .iter()
+                        .filter(|o| crate::ops::fetch::uses(&o.node, it))
+                        .map(|o| o.id);
+                    no_dl.note(format!("{why} (window {})", window.number), ops);
+                    continue;
+                }
+                Found::Blocked(why) => {
+                    return Err(no_dl.other(format!("{why} (window {})", window.number)));
+                }
             };
             fetches.push(FetchLine {
                 window: window.number,
@@ -488,6 +562,8 @@ pub async fn prepare_window<S: ShellSet>(
                 state,
             });
         }
+        // Nothing else is probed: the window does not run as it is.
+        no_dl.refused()?;
     }
 
     // Send every query, then collect: one round trip.
@@ -601,7 +677,7 @@ pub async fn prepare_window<S: ShellSet>(
     }
     // Non-distro probes, each in its op's RunAs and principal's shell (as
     // `read_facts` does).
-    let mut src_ids: Vec<(&PkgSpec, &Principal, Option<usize>)> = Vec::new();
+    let mut src_ids: Vec<(NodeId, &PkgSpec, &Principal, Option<usize>)> = Vec::new();
     for op in &window.ops {
         let OpSpec::Pkg(p) = &op.node.spec else {
             continue;
@@ -625,10 +701,10 @@ pub async fn prepare_window<S: ShellSet>(
         let who = &op.node.run_as.principal;
         let sh = shell_of(shells, who)?;
         match sh.send_op(&node, id, os).await {
-            Ok(()) => src_ids.push((p, who, Some(id))),
+            Ok(()) => src_ids.push((op.id, p, who, Some(id))),
             // Not renderable for this shell: unknown, not blocked.
-            Err(ShellError::Render(_)) => src_ids.push((p, who, None)),
-            Err(e) => return Err(e.to_string()),
+            Err(ShellError::Render(_)) => src_ids.push((op.id, p, who, None)),
+            Err(e) => return Err(e.to_string().into()),
         }
     }
 
@@ -651,7 +727,7 @@ pub async fn prepare_window<S: ShellSet>(
             });
         }
     }
-    for (p, who, id) in src_ids {
+    for (op_id, p, who, id) in src_ids {
         let out = match id {
             Some(id) => match collect(shell_of(shells, who)?, id).await {
                 Ok((0, out)) => Some(out),
@@ -662,19 +738,21 @@ pub async fn prepare_window<S: ShellSet>(
         if matches!(p.source, Source::BinaryRelease(_)) {
             // Resolved, fetched and verified on the host: a failure blocks.
             let name = p.names.first().map(String::as_str).unwrap_or("");
-            if let Some(w) =
-                crate::ops::pkg::binary_release_prepared(window.number, name, out.as_deref())?
-            {
-                will.will_create.push(w);
+            match crate::ops::pkg::binary_release_prepared(window.number, name, out.as_deref()) {
+                Ok(Some(w)) => will.will_create.push(w),
+                Ok(None) => {}
+                Err(b) if b.no_downloader => no_dl.note(b.why, [op_id]),
+                Err(b) => return Err(no_dl.other(b.why)),
             }
             continue;
         }
         if let Some(why) = source_blocker(window.number, p, out.as_deref()) {
-            return Err(why);
+            return Err(no_dl.other(why));
         }
         will.will_change
             .extend(source_changes(window.number, p, out.as_deref()));
     }
+    no_dl.refused()?;
     if let Some(id) = group_id {
         // Gather only: a failed probe reports nothing.
         let root = shell_of(shells, &Principal::Root)?;
@@ -810,6 +888,7 @@ mod tests {
                 ),
                 op(2, OpSpec::Svc(started)),
             ],
+            split: None,
         };
         assert!(svc_after_installers(&w));
         assert_eq!(svc_wants(&w).len(), 1, "a restart is not probed");

@@ -222,7 +222,7 @@ fn bare_bin(d: &Path) -> PathBuf {
 }
 
 fn with_path(bin: &Path) -> String {
-    if bin.ends_with("bare") {
+    if bin.ends_with("bare") || bin.ends_with("nocmp") {
         bin.display().to_string()
     } else {
         format!("{}:{}", bin.display(), std::env::var("PATH").unwrap())
@@ -1029,4 +1029,77 @@ fn executor_not_booted_a_changed_unit_alone_does_not_reload() {
     assert_eq!(reloads(&systemctl_calls(d.path())), 0);
     assert!(!out1.contains("daemon-reload"), "{out1}");
     assert!(!r1.render().contains("daemon-reload"), "{}", r1.render());
+}
+
+// --- no cmp, no diff on the host ---
+
+/// Every `/usr/bin` entry except `cmp` and `diff` (Rocky's minimal image has
+/// no diffutils), plus the stub `systemd-analyze` and `systemctl`.
+fn nocmp_bin(d: &Path) -> PathBuf {
+    let stub = stubs(d);
+    let bin = d.join("nocmp");
+    std::fs::create_dir_all(&bin).unwrap();
+    for e in std::fs::read_dir("/usr/bin").unwrap().flatten() {
+        let n = e.file_name();
+        let s = n.to_string_lossy();
+        if matches!(&*s, "cmp" | "diff" | "systemd-analyze" | "systemctl") {
+            continue;
+        }
+        let _ = std::os::unix::fs::symlink(e.path(), bin.join(&n));
+    }
+    for n in ["systemd-analyze", "systemctl"] {
+        std::os::unix::fs::symlink(stub.join(n), bin.join(n)).unwrap();
+    }
+    bin
+}
+
+#[test]
+fn unit_op_and_probe_need_no_cmp_or_diff_on_the_host() {
+    fn run_(h: Host<()>) -> PlaybookFuture {
+        Box::pin(async move {
+            h.unit("a.service")
+                .content("[Service]\nExecStart=/bin/true\n")
+                .mode(0o644);
+            Ok(())
+        })
+    }
+    let pb = Playbook {
+        name: "nocmp",
+        run: run_,
+    };
+    let d = tempfile::tempdir().unwrap();
+    let bin = nocmp_bin(d.path());
+    let target = unit_dir(d.path()).join("a.service");
+    let (r1, out1) = go(&pb, d.path(), &bin, false);
+    assert_eq!(
+        r1.hosts[0].status,
+        HostStatus::Changed,
+        "{}\n{out1}",
+        r1.render()
+    );
+    assert!(!out1.contains("command not found"), "{out1}");
+    assert!(out1.contains("unit a.service: will create"), "{out1}");
+    assert_eq!(
+        std::fs::read_to_string(&target).unwrap(),
+        "[Service]\nExecStart=/bin/true\n"
+    );
+    // settled: the probe finds it the same, the op changes nothing
+    let (r2, out2) = go(&pb, d.path(), &bin, false);
+    assert_eq!(
+        r2.hosts[0].status,
+        HostStatus::Ok,
+        "{}\n{out2}",
+        r2.render()
+    );
+    assert!(!out2.contains("command not found"), "{out2}");
+    assert!(!out2.contains("will change"), "{out2}");
+    // edited: the probe says will change, the op rewrites it
+    std::fs::write(&target, "other\n").unwrap();
+    let (r3, out3) = go(&pb, d.path(), &bin, false);
+    assert_eq!(r3.hosts[0].status, HostStatus::Changed, "{out3}");
+    assert!(out3.contains("unit a.service: will change"), "{out3}");
+    assert_eq!(
+        std::fs::read_to_string(&target).unwrap(),
+        "[Service]\nExecStart=/bin/true\n"
+    );
 }

@@ -22,7 +22,7 @@ role (none)
       |   return 1
       | }
       | tp_put() {
-      |   if tp_render "$2" | cmp -s - "$1"; then return 0; fi
+      |   if [ -f "$1" ] && [ "$(tp_render "$2" | sha256sum | cut -d' ' -f1)" = "$(sha256sum < "$1" | cut -d' ' -f1)" ]; then return 0; fi
       |   (umask 022; mkdir -p -- "$(dirname -- "$1")") || return 1
       |   tp_t=$(mktemp "$1.XXXXXX") || return 1
       |   if tp_render "$2" > "$tp_t" && chmod 0644 "$tp_t" && mv -f -- "$tp_t" "$1"; then

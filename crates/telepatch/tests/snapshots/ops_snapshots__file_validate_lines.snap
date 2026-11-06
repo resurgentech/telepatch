@@ -49,7 +49,7 @@ if [ "$rc" -eq 0 ]; then
   fi
 fi
   changed=0
-  if [ "$rc" -eq 0 ] && { [ ! -e "$tp_p" ] || ! cmp -s "$tp_c" "$tp_p"; }; then
+  if [ "$rc" -eq 0 ] && { [ ! -e "$tp_p" ] || [ "$(sha256sum < "$tp_c" | cut -d' ' -f1)" != "$(sha256sum < "$tp_p" | cut -d' ' -f1)" ]; }; then
     if [ -e "$tp_p" ]; then chmod --reference="$tp_p" "$tp_c" || rc=$?; else chmod 644 "$tp_c" || rc=$?; fi
     if [ "$rc" -eq 0 ] && [ -e "$tp_p" ]; then chown --reference="$tp_p" "$tp_c" 2>/dev/null; fi
     if [ "$rc" -eq 0 ]; then

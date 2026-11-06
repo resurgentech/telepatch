@@ -975,3 +975,228 @@ fn a_host_that_halts_before_the_op_leaves_nothing_staged() {
     assert!(!e.p("out/go").exists(), "{out}");
     e.assert_clean();
 }
+
+// --- a binary release after the op that installs curl (T83a) ---
+
+/// `h.pkg(["curl"])` (when `curl`) then the binary release of `v`.
+#[derive(Clone)]
+struct VC {
+    v: V,
+    curl: bool,
+}
+
+fn pb_curl(h: Host<VC>) -> PlaybookFuture {
+    Box::pin(async move {
+        let vc = h.vars.clone();
+        if vc.curl {
+            h.pkg(["curl"]);
+        }
+        let v = &vc.v;
+        let o = h.pkg([v.name.as_str()]).binary_release(v.br.clone());
+        match &v.want {
+            Want::Present => {}
+            Want::Pin(p) => {
+                o.pin(p);
+            }
+            Want::Latest => {
+                o.latest();
+            }
+        }
+        Ok(())
+    })
+}
+
+impl Env {
+    /// No curl or wget on the PATH, and a fake package manager for every
+    /// distro family in `<d>/pm` whose install of `curl` puts the fake
+    /// curl into `<d>/inst`, already on the PATH (each install logged to
+    /// `<d>/pmlog`). Returns the PATH: `<d>/pm:<d>/inst:<d>/bin:<farm>`.
+    fn pm_path(&self) -> String {
+        std::fs::rename(self.p("bin/curl"), self.p("curl.pkg")).unwrap();
+        std::fs::remove_file(self.p("bin/wget")).unwrap();
+        let pm = self.p("pm");
+        let inst = self.p("inst");
+        let farm = self.p("farm");
+        for d in [&pm, &inst, &farm] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        let dd = self.d.path().display();
+        let body = format!(
+            r#"#!/bin/bash
+D={dd}
+me=${{0##*/}}
+inst() {{ for n; do if [ "$n" = curl ]; then cp "$D/curl.pkg" "$D/inst/curl"; echo "$me install curl" >> "$D/pmlog"; fi; done; }}
+has() {{ [ -e "$D/inst/$1" ]; }}
+last=${{@: -1}}
+case "$me" in
+  dpkg-query) if has "$last"; then echo installed; else exit 1; fi;;
+  rpm) has "$last" || exit 1;;
+  apt-get|dnf|yum) case " $* " in *" install "*) inst "$@";; esac;;
+  pacman)
+    case "$1" in
+      -T) has "$last" || {{ echo "$last"; exit 127; }};;
+      -S) inst "$@";;
+      *) exit 1;;
+    esac;;
+esac
+"#
+        );
+        for t in ["dpkg-query", "apt-get", "rpm", "dnf", "yum", "pacman"] {
+            exe(&pm.join(t), &body);
+        }
+        for ent in std::fs::read_dir("/usr/bin").unwrap().flatten() {
+            let n = ent.file_name().to_string_lossy().to_string();
+            if n != "curl" && n != "wget" {
+                let _ = std::os::unix::fs::symlink(ent.path(), farm.join(&n));
+            }
+        }
+        format!(
+            "{}:{}:{}:{}",
+            pm.display(),
+            inst.display(),
+            self.p("bin").display(),
+            farm.display()
+        )
+    }
+    fn pmlog(&self) -> String {
+        std::fs::read_to_string(self.p("pmlog")).unwrap_or_default()
+    }
+    fn go_c(&self, v: &VC, path: &str) -> (Report, String, Vec<serde_json::Value>) {
+        let _ = std::fs::remove_file(self.p("log"));
+        let pb = Playbook {
+            name: "curl_binary_release",
+            run: pb_curl,
+        };
+        let out = Rc::new(RefCell::new(String::new()));
+        let events = self.p("events.jsonl");
+        let report = run(
+            &pb,
+            vec![HostSpec {
+                name: "h1".into(),
+                target: Target::Local(
+                    LocalTransport::new()
+                        .uid(0)
+                        .env("PATH", path)
+                        .env("TMPDIR", &self.p("tmp").display().to_string())
+                        .env("TP_FETCH_STAGE", &self.p("stage").display().to_string())
+                        .env("TP_FETCH_CACHE", &self.p("cache").display().to_string()),
+                ),
+                vars: v.clone(),
+            }],
+            RunOpts {
+                log: Some(events.clone()),
+                stdout: Stdout::Capture(out.clone()),
+            },
+        );
+        let text = out.borrow().clone();
+        let evs = std::fs::read_to_string(&events)
+            .unwrap_or_default()
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        (report, text, evs)
+    }
+    /// A go 1.27.2 release, its json and VERSION, served; `go_v(want)`.
+    fn go_served(&self, want: Want) -> V {
+        let s2 = self.go_release("1.27.2", "amd64");
+        self.go_json(&[("go1.27.2.linux-amd64.tar.gz", &s2)]);
+        self.serve("VERSION", b"go1.27.2\n");
+        self.go_v(want)
+    }
+}
+
+/// `(window number, op ids)` of every `window` event.
+fn windows(evs: &[serde_json::Value]) -> Vec<(u64, Vec<u64>)> {
+    evs.iter()
+        .filter(|e| e["ev"] == "window")
+        .map(|e| {
+            (
+                e["n"].as_u64().unwrap(),
+                e["ops"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|i| i.as_u64().unwrap())
+                    .collect(),
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn a_binary_release_after_the_pkg_op_that_installs_curl_runs_after_it() {
+    let e = Env::new();
+    let path = e.pm_path();
+    let v = VC {
+        v: e.go_served(Want::Latest),
+        curl: true,
+    };
+    let (r, out, evs) = e.go_c(&v, &path);
+    assert_eq!(status(&r), &HostStatus::Changed, "{out}\n{}", r.render());
+    assert_eq!(e.pmlog().lines().count(), 1, "{}", e.pmlog());
+    assert_eq!(
+        e.log(),
+        "curl http://fake/VERSION\ncurl http://fake/dl.json\ncurl http://fake/go1.27.2.linux-amd64.tar.gz\n"
+    );
+    assert_eq!(
+        run_bin(&e.p("out/go/bin/go"), "version"),
+        "go version go1.27.2 linux/amd64"
+    );
+    let split = out
+        .find("== h1 [prepare] window 1: neither curl nor wget is on the host; split after #0 (pkg curl): #1 runs in window 2 ==")
+        .unwrap_or_else(|| panic!("no split line:\n{out}"));
+    let prep = out
+        .find("== h1 [prepare] pkg[binary_release] go: not installed, 1.27.2 wanted; fetched, sha256 ok ==")
+        .unwrap_or_else(|| panic!("no prepare line:\n{out}"));
+    assert!(split < prep, "{out}");
+    assert_eq!(windows(&evs), [(1, vec![0]), (2, vec![1])], "{evs:#?}");
+    assert_eq!(
+        r.hosts[0]
+            .ops
+            .iter()
+            .map(|o| (o.id, o.changed))
+            .collect::<Vec<_>>(),
+        [(0, true), (1, true)]
+    );
+    e.assert_clean();
+}
+
+#[test]
+fn a_binary_release_with_curl_on_the_host_is_not_split() {
+    let e = Env::new();
+    let path = e.pm_path();
+    std::fs::copy(e.p("curl.pkg"), e.p("inst/curl")).unwrap();
+    let v = VC {
+        v: e.go_served(Want::Latest),
+        curl: true,
+    };
+    let (r, out, evs) = e.go_c(&v, &path);
+    assert_eq!(status(&r), &HostStatus::Changed, "{out}\n{}", r.render());
+    assert_eq!(e.pmlog(), "");
+    assert!(!out.contains("split"), "{out}");
+    assert_eq!(windows(&evs), [(1, vec![0, 1])], "{evs:#?}");
+    e.assert_clean();
+}
+
+#[test]
+fn a_binary_release_with_no_downloader_and_none_installed_blocks_naming_them() {
+    for want in [Want::Latest, Want::Pin("1.27.2".into())] {
+        let e = Env::new();
+        let path = e.pm_path();
+        let v = VC {
+            v: e.go_served(want.clone()),
+            curl: false,
+        };
+        let (r, out, _) = e.go_c(&v, &path);
+        let HostStatus::Blocked(why) = status(&r) else {
+            panic!("{want:?}: {:?}\n{out}", status(&r));
+        };
+        assert_eq!(
+            why, "pkg[binary_release] go: neither curl nor wget is on the host (window 1)",
+            "{want:?}"
+        );
+        assert!(!out.contains("split"), "{out}");
+        assert!(!e.p("out/go").exists());
+        e.assert_clean();
+    }
+}

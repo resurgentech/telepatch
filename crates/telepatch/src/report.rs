@@ -210,6 +210,35 @@ impl FetchLine {
     }
 }
 
+/// A window prepare split ([`crate::engine::Split`]): neither curl nor
+/// wget was on the host, so the ops up to the one installing a downloader
+/// ran as the window and the rest as the next. Nothing of the window had
+/// been sent when it split.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WindowSplit {
+    pub window: usize,
+    /// The installing op's id, and the downloader it names.
+    pub after: usize,
+    pub tool: String,
+    /// The first op after it that needs a download.
+    pub consumer: usize,
+}
+
+impl WindowSplit {
+    /// `window 1: neither curl nor wget is on the host; split after #0
+    /// (pkg curl): #1 runs in window 2`.
+    pub fn line(&self) -> String {
+        format!(
+            "window {}: neither curl nor wget is on the host; split after #{} (pkg {}): #{} runs in window {}",
+            self.window,
+            self.after,
+            self.tool,
+            self.consumer,
+            self.window + 1
+        )
+    }
+}
+
 /// The `systemctl daemon-reload` run at the end of a window, after a
 /// unit changed (`h.unit`) with no `svc` op after it in the window (the
 /// flush; see [`crate::executor`]). Not an op: it is not counted in the
@@ -253,6 +282,8 @@ pub struct HostReport {
     pub sh_sites: Vec<crate::trace::Site>,
     /// Each end-of-window `daemon-reload` that ran, in order.
     pub daemon_reloads: Vec<DaemonReload>,
+    /// Each window prepare split for a missing downloader, in order.
+    pub splits: Vec<WindowSplit>,
 }
 
 impl HostReport {
@@ -268,6 +299,7 @@ impl HostReport {
             fetches: Vec::new(),
             sh_sites: Vec::new(),
             daemon_reloads: Vec::new(),
+            splits: Vec::new(),
         }
     }
 
@@ -344,6 +376,15 @@ impl Report {
     pub fn render(&self) -> String {
         let mut out = self.table();
         for h in &self.hosts {
+            for sp in &h.splits {
+                let _ = writeln!(
+                    out,
+                    "
+{}: {}",
+                    h.name,
+                    sp.line()
+                );
+            }
             for w in &h.will_install {
                 let _ = writeln!(
                     out,

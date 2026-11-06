@@ -7,6 +7,13 @@
 //! (3) read the facts in one round trip, store them as confirmed, and poll
 //! again. Explicit `barrier()` nodes never force execution; they only fence
 //! hoisting of non-mutating nodes (and are edges for the optimizer, T8).
+//!
+//! A window whose op installs `curl` or `wget` before an op that downloads
+//! carries a [`Split`]. The executor may decline such a window for its head
+//! ([`Applied::Head`]) when prepare finds no downloader on the host; the
+//! engine then applies the head as that window and forms the rest again as
+//! the next. A declined window leaves no trace in the engine's carried
+//! state.
 
 use std::collections::BTreeSet;
 use std::rc::Rc;
@@ -88,6 +95,80 @@ pub struct Window {
     pub number: usize,
     pub kind: WindowKind,
     pub ops: Vec<WindowOp>,
+    /// Where the window splits when prepare finds neither `curl` nor
+    /// `wget` on the host ([`split_candidate`]).
+    pub split: Option<Split>,
+}
+
+/// A window's split candidate: an op of the window installs a downloader
+/// that a later op of the window needs. Decided in prepare: with `curl` or
+/// `wget` on the host the window runs whole; without, the executor declines
+/// it ([`Applied::Head`]) and the engine runs `ops[..=at]` as this window
+/// and the rest, formed again, as the next.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Split {
+    /// The index in `ops` of the installing op: the head is `ops[..=at]`.
+    pub at: usize,
+    /// The installing op's id.
+    pub installer: NodeId,
+    /// The downloader it names: `curl` (when it names both) or `wget`.
+    pub tool: String,
+    /// The first op after it that needs a download.
+    pub consumer: NodeId,
+}
+
+/// What the executor did with a window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Applied {
+    /// It ran (or, on a halted host, reported its ops not run).
+    All,
+    /// Nothing of it was sent or reported: prepare found no downloader,
+    /// and only ops after the window's [`Split`] needed one. The engine
+    /// applies the first `n` ops (`ops[..n]`) as this window, then the
+    /// rest as the next.
+    Head(usize),
+}
+
+/// Does `op` need a download in prepare: a file op placing or unpacking a
+/// fetch, or a binary release?
+pub fn needs_download(op: &OpNode) -> bool {
+    match &op.spec {
+        OpSpec::File(f) => f.src.is_some(),
+        OpSpec::Pkg(p) => matches!(p.source, crate::ops::pkg::Source::BinaryRelease(_)),
+        _ => false,
+    }
+}
+
+/// The downloader `op` installs: a distro `pkg` op (not build-dep) naming
+/// `curl` or `wget`.
+fn installs_downloader(op: &OpNode) -> Option<&'static str> {
+    let OpSpec::Pkg(p) = &op.spec else {
+        return None;
+    };
+    if !matches!(p.source, crate::ops::pkg::Source::Distro(_))
+        || p.mode != crate::ops::pkg::PkgMode::Install
+    {
+        return None;
+    }
+    ["curl", "wget"]
+        .into_iter()
+        .find(|t| p.names.iter().any(|n| n == t))
+}
+
+/// The split candidate of a scheduled window: the first op that installs
+/// `curl` or `wget` ([`installs_downloader`]), when an op after it needs a
+/// download ([`needs_download`]).
+pub fn split_candidate(ops: &[WindowOp]) -> Option<Split> {
+    let at = ops
+        .iter()
+        .position(|o| installs_downloader(&o.node).is_some())?;
+    let consumer = ops[at + 1..].iter().find(|o| needs_download(&o.node))?;
+    Some(Split {
+        at,
+        installer: ops[at].id,
+        tool: installs_downloader(&ops[at].node)?.to_string(),
+        consumer: consumer.id,
+    })
 }
 
 /// The seam where the optimizer plugs in: turn the items being flushed (ops
@@ -110,7 +191,13 @@ pub fn prepare_window(
             p.update_cache = flag;
         }
     }
-    Window { number, kind, ops }
+    let split = split_candidate(&ops);
+    Window {
+        number,
+        kind,
+        ops,
+        split,
+    }
 }
 
 /// What the engine carries from window to window of one host.
@@ -174,8 +261,10 @@ pub trait Executor {
         queries: &[FactQuery],
     ) -> Vec<Value>;
 
-    /// Run the ops of `window` in order.
-    async fn apply(&mut self, host: &HostInfo, window: &Window) -> Result<(), String>;
+    /// Run the ops of `window` in order, or decline it for its head
+    /// ([`Applied::Head`]; only for a window with a [`Split`]), having
+    /// sent and reported nothing of it.
+    async fn apply(&mut self, host: &HostInfo, window: &Window) -> Result<Applied, String>;
 
     fn observe(&mut self, _host: &HostInfo, _obs: &Observation) {}
 }
@@ -352,8 +441,23 @@ impl<E: Executor> Engine<E> {
         while !ids.is_empty() {
             let cut = user_split(host, &ids);
             let rest = ids.split_off(cut);
-            self.apply_one(info, host, *window, kind, ids, carry)
-                .await?;
+            // A piece the executor declines for its head (no downloader on
+            // the host, and an op of the piece installs one) becomes two
+            // windows: the head, then the rest.
+            let mut todo = vec![ids];
+            while let Some(piece) = todo.pop() {
+                if let Some((head, tail)) = self
+                    .apply_one(info, host, *window, kind, piece, carry)
+                    .await?
+                {
+                    todo.push(tail);
+                    todo.push(head);
+                    continue;
+                }
+                if !todo.is_empty() {
+                    *window += 1;
+                }
+            }
             ids = rest;
             if !ids.is_empty() {
                 *window += 1;
@@ -362,6 +466,10 @@ impl<E: Executor> Engine<E> {
         Ok(())
     }
 
+    /// Form the window of `ids` and hand it to the executor. `Some((head,
+    /// tail))` when the executor declined it for its head: nothing of it
+    /// ran or was noted, and `head` (the trace ids of the head's ops) then
+    /// `tail` (the others), each in trace order, are applied in its place.
     async fn apply_one<V>(
         &mut self,
         info: &HostInfo,
@@ -370,9 +478,9 @@ impl<E: Executor> Engine<E> {
         kind: WindowKind,
         ids: Vec<NodeId>,
         carry: &mut Carry,
-    ) -> Result<(), EngineError> {
+    ) -> Result<Option<(Vec<NodeId>, Vec<NodeId>)>, EngineError> {
         let (Some(first), Some(last)) = (ids.first(), ids.last()) else {
-            return Ok(());
+            return Ok(None);
         };
         // The window's ops plus every explicit barrier traced between them.
         let items: Vec<Item> = {
@@ -407,18 +515,38 @@ impl<E: Executor> Engine<E> {
             }
             items
         };
-        let w = prepare_window(window, kind, items, &mut carry.apt_stale);
+        // What the window notes is kept only if the executor runs it.
+        let mut next = carry.clone();
+        let w = prepare_window(window, kind, items, &mut next.apt_stale);
         for o in &w.ops {
-            carry.note(o);
+            next.note(o);
         }
-        self.executor
+        let applied = self
+            .executor
             .apply(info, &w)
             .await
             .map_err(EngineError::Exec)?;
+        if let Applied::Head(n) = applied {
+            let head: BTreeSet<NodeId> = w
+                .ops
+                .iter()
+                .take(n)
+                .flat_map(|o| o.members.iter().map(|m| m.id))
+                .collect();
+            let (h, t): (Vec<NodeId>, Vec<NodeId>) = ids.iter().partition(|id| head.contains(id));
+            if h.is_empty() || t.is_empty() {
+                return Err(EngineError::Exec(format!(
+                    "window {window}: declined for a head of {n} of its {} ops",
+                    w.ops.len()
+                )));
+            }
+            return Ok(Some((h, t)));
+        }
+        *carry = next;
         host.resolver_cell()
             .borrow_mut()
             .mark_applied(&host.trace_cell().borrow(), &ids);
-        Ok(())
+        Ok(None)
     }
 }
 

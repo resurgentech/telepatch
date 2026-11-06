@@ -161,7 +161,7 @@ impl FileSpec {
         o.push_str(&edits.replace("$tp_p", "$tp_c"));
         o.push_str("  changed=0\n");
         o.push_str(
-            "  if [ \"$rc\" -eq 0 ] && { [ ! -e \"$tp_p\" ] || ! cmp -s \"$tp_c\" \"$tp_p\"; }; then\n",
+            "  if [ \"$rc\" -eq 0 ] && { [ ! -e \"$tp_p\" ] || [ \"$(sha256sum < \"$tp_c\" | cut -d' ' -f1)\" != \"$(sha256sum < \"$tp_p\" | cut -d' ' -f1)\" ]; }; then\n",
         );
         match self.mode {
             Some(m) => o.push_str(&format!("    chmod {m:o} \"$tp_c\" || rc=$?\n")),
@@ -198,7 +198,7 @@ impl FileSpec {
         }
         if let Some(c) = &self.content {
             o.push_str(&format!(
-                "tp_b={}\nif [ \"$rc\" -eq 0 ] && ! {{ [ -f \"$tp_p\" ] && printf %s \"$tp_b\" | base64 -d | cmp -s - \"$tp_p\"; }}; then\n  tp_t=$(mktemp \"$tp_p.tpXXXXXX\") || rc=$?\n  if [ \"$rc\" -eq 0 ]; then\n    if printf %s \"$tp_b\" | base64 -d > \"$tp_t\"; then\n      if [ -e \"$tp_p\" ]; then\n        chmod --reference=\"$tp_p\" \"$tp_t\"; chown --reference=\"$tp_p\" \"$tp_t\" 2>/dev/null\n      else\n        chmod 644 \"$tp_t\"\n      fi\n      mv -f \"$tp_t\" \"$tp_p\"; rc=$?\n    else\n      rc=$?\n    fi\n    if [ \"$rc\" -eq 0 ]; then changed=1; else rm -f \"$tp_t\"; fi\n  fi\nfi\n",
+                "tp_b={}\nif [ \"$rc\" -eq 0 ] && ! {{ [ -f \"$tp_p\" ] && [ \"$(printf %s \"$tp_b\" | base64 -d | sha256sum | cut -d' ' -f1)\" = \"$(sha256sum < \"$tp_p\" | cut -d' ' -f1)\" ]; }}; then\n  tp_t=$(mktemp \"$tp_p.tpXXXXXX\") || rc=$?\n  if [ \"$rc\" -eq 0 ]; then\n    if printf %s \"$tp_b\" | base64 -d > \"$tp_t\"; then\n      if [ -e \"$tp_p\" ]; then\n        chmod --reference=\"$tp_p\" \"$tp_t\"; chown --reference=\"$tp_p\" \"$tp_t\" 2>/dev/null\n      else\n        chmod 644 \"$tp_t\"\n      fi\n      mv -f \"$tp_t\" \"$tp_p\"; rc=$?\n    else\n      rc=$?\n    fi\n    if [ \"$rc\" -eq 0 ]; then changed=1; else rm -f \"$tp_t\"; fi\n  fi\nfi\n",
                 quote(&STANDARD.encode(c))
             ));
         }

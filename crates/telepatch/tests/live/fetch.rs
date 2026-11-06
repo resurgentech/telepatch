@@ -21,6 +21,11 @@
 //! And the `binary_release` pkg source (`fetch_*_binary_release`): a
 //! tarball with a JSON checksum and a single binary with a sidecar, served
 //! the same way (see [`fetch_binary_release_from_a_local_server`]).
+//!
+//! And a host with no `curl`, `wget` or `cmp` (`fetch_*_after_the_op_that_installs_curl`):
+//! a `pkg` op installing `curl`, then a `.from` and a binary release in the
+//! same window; the window splits after the pkg op (see
+//! [`fetch_after_the_op_that_installs_curl`]).
 
 use std::cell::RefCell;
 use std::process::{Command, Stdio};
@@ -518,4 +523,193 @@ fn fetch_ubuntu_from_a_local_server() {
 #[ignore = "needs docker"]
 fn fetch_rocky_from_a_local_server() {
     fetch_from_a_local_server("rockylinux/rockylinux:10");
+}
+
+/// A host with no `curl`, `wget` or `cmp` (T83a): one window holds a `pkg`
+/// op installing `curl`, then a `.from` and a binary release served from
+/// the container. Prepare finds no downloader, so the window splits after
+/// the pkg op: `curl` is installed as window 1, and the download and the
+/// release run as window 2 with the curl just installed.
+#[derive(Clone)]
+struct T {
+    plain_sum: String,
+}
+
+fn pb_after_curl(h: Host<T>) -> PlaybookFuture {
+    Box::pin(async move {
+        let base = format!("http://127.0.0.1:{PORT}");
+        h.pkg(["curl"]);
+        let plain = h
+            .fetch(format!("{base}/plain.txt"))
+            .sha256(&h.vars.plain_sum);
+        h.file("/etc/tp-after-curl.txt").from(&plain);
+        h.pkg(["tool"])
+            .binary_release(
+                BinaryRelease::new()
+                    .url(format!("{base}/tool-{{version}}.linux-{{arch}}.tar.gz"))
+                    .sha256(Sum::json(
+                        format!("{base}/releases.json"),
+                        "filename",
+                        "sha256",
+                    ))
+                    .unpack_to("/opt/tool")
+                    .strip(1)
+                    .bin("/opt/tool/bin/tool")
+                    .version("tool --version")
+                    .latest(Latest::text(format!("{base}/VERSION"))),
+            )
+            .latest();
+        Ok(())
+    })
+}
+
+fn fetch_after_the_op_that_installs_curl(image: &str) {
+    let ctr = Container::start(image);
+    // python3 for the server, installed while the image's own curl (if
+    // any) is still there
+    let v = V {
+        install: vec!["python3".into()],
+        plain_sum: String::new(),
+        tgz_sum: String::new(),
+    };
+    let (r, out) = go(&ctr, "install", &v, pb_install);
+    assert_eq!(r.exit_code(), 0, "install:\n{out}\n{}", r.render());
+    // then no curl, wget or cmp: the packages removed (Rocky's
+    // curl-minimal provides `curl`, so it goes too, without its libcurl
+    // that dnf needs), and the cmp binary deleted (diffutils is essential
+    // on Ubuntu)
+    let (rc, o) = exec(
+        &ctr,
+        "if command -v dpkg >/dev/null 2>&1; then \
+           for p in curl wget; do if dpkg -s $p >/dev/null 2>&1; then dpkg --purge --force-depends $p || exit 1; fi; done; \
+         else \
+           for p in curl curl-minimal wget wget2 wget2-wget; do if rpm -q $p >/dev/null 2>&1; then rpm -e --nodeps $p || exit 1; fi; done; \
+         fi; rm -f /usr/bin/cmp /bin/cmp",
+    );
+    assert_eq!(rc, 0, "removing curl, wget and cmp: {o}");
+    for t in ["curl", "wget", "cmp"] {
+        let (rc, _) = exec(&ctr, &format!("command -v {t}"));
+        assert_ne!(rc, 0, "{image}: {t} is gone");
+    }
+
+    let (_, machine) = exec(&ctr, "uname -m");
+    let arch = match machine.as_str() {
+        "x86_64" => "amd64",
+        "aarch64" => "arm64",
+        m => panic!("no default {{arch}} for {m}"),
+    }
+    .to_string();
+    let (rc, o) = exec(
+        &ctr,
+        "mkdir -p /srv/www && printf 'served by the test\\n' > /srv/www/plain.txt",
+    );
+    assert_eq!(rc, 0, "writing the served file: {o}");
+    let (_, plain) = exec(&ctr, "sha256sum /srv/www/plain.txt | cut -d' ' -f1");
+    let (t1, _) = publish(&ctr, &arch, "1.2.3", 1);
+    let o = Command::new("docker")
+        .args([
+            "exec",
+            "-d",
+            &ctr.name,
+            "sh",
+            "-c",
+            &format!(
+                "cd /srv/www && exec python3 -m http.server {PORT} --bind 127.0.0.1 > /srv/httpd.log 2>&1"
+            ),
+        ])
+        .stdin(Stdio::null())
+        .output()
+        .expect("docker exec -d");
+    assert!(o.status.success(), "starting the server");
+    // readiness without curl: python3's urllib
+    let (rc, o) = exec(
+        &ctr,
+        &format!(
+            "for i in $(seq 1 50); do python3 -c 'import urllib.request; urllib.request.urlopen(\"http://127.0.0.1:{PORT}/VERSION\")' 2>/dev/null && exit 0; sleep 0.2; done; exit 1"
+        ),
+    );
+    assert_eq!(rc, 0, "the server did not come up: {o}");
+    let (_, tmp_before) = exec(&ctr, "ls -A /tmp");
+
+    let pb = Playbook {
+        name: "after_curl",
+        run: pb_after_curl,
+    };
+    let out = Rc::new(RefCell::new(String::new()));
+    let r = run(
+        &pb,
+        vec![HostSpec {
+            name: "c".into(),
+            target: Target::Docker(DockerTransport::new().container("c", &ctr.name)),
+            vars: T {
+                plain_sum: plain.clone(),
+            },
+        }],
+        RunOpts {
+            log: None,
+            stdout: Stdout::Capture(out.clone()),
+        },
+    );
+    let out = out.borrow().clone();
+    println!("{out}\n{}", r.render());
+    assert_eq!(
+        r.hosts[0].status,
+        HostStatus::Changed,
+        "{out}\n{}",
+        r.render()
+    );
+    let split = "== c [prepare] window 1: neither curl nor wget is on the host; split after #0 (pkg curl): #1 runs in window 2 ==";
+    let at = out.find(split).unwrap_or_else(|| panic!("{split}\n{out}"));
+    for l in [
+        format!("== c [prepare] fetch http://127.0.0.1:{PORT}/plain.txt: fetched, sha256 ok =="),
+        "== c [prepare] pkg[binary_release] tool: not installed, 1.2.3 wanted; fetched, sha256 ok =="
+            .to_string(),
+    ] {
+        let i = out.find(&l).unwrap_or_else(|| panic!("{l}\n{out}"));
+        assert!(i > at, "{l} comes after the split:\n{out}");
+    }
+    assert!(
+        r.hosts[0].fetches.iter().all(|f| f.window == 2),
+        "{}",
+        r.render()
+    );
+    assert_eq!(
+        r.hosts[0]
+            .ops
+            .iter()
+            .map(|o| (o.id, o.changed))
+            .collect::<Vec<_>>(),
+        [(0, true), (1, true), (2, true)],
+        "{}",
+        r.render()
+    );
+    let (rc, _) = exec(&ctr, "command -v curl");
+    assert_eq!(rc, 0, "the pkg op installed curl");
+    assert_eq!(
+        exec(&ctr, "cat /etc/tp-after-curl.txt").1,
+        "served by the test"
+    );
+    assert_eq!(exec(&ctr, "/opt/tool/bin/tool").1, "tool version 1.2.3");
+    let (_, cache) = exec(&ctr, "ls /var/cache/telepatch/sha256");
+    assert!(
+        cache.contains(&plain) && cache.contains(&t1),
+        "cached: {cache}"
+    );
+    let (_, stage) = exec(&ctr, "ls -A /var/tmp/telepatch 2>/dev/null");
+    assert_eq!(stage, "", "the staging dir is cleaned");
+    let (_, tmp_after) = exec(&ctr, "ls -A /tmp");
+    assert_eq!(tmp_after, tmp_before, "nothing left in /tmp");
+    assert!(!out.contains("command not found"), "{out}");
+}
+
+#[test]
+#[ignore = "needs docker"]
+fn fetch_ubuntu_after_the_op_that_installs_curl() {
+    fetch_after_the_op_that_installs_curl("ubuntu:24.04");
+}
+
+#[test]
+#[ignore = "needs docker"]
+fn fetch_rocky_after_the_op_that_installs_curl() {
+    fetch_after_the_op_that_installs_curl("rockylinux/rockylinux:10");
 }

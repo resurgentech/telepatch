@@ -300,8 +300,22 @@ pub enum Found {
     Fetched,
     /// Downloaded without a checksum, staged for the op.
     Staged,
+    /// Not in the cache, and neither `curl` nor `wget` is on the host: the
+    /// host is blocked, with this reason (no window suffix yet), unless an
+    /// earlier op of the window installs one ([`crate::engine::Split`]).
+    NoDownloader(String),
     /// The host is blocked, with this reason (no window suffix yet).
     Blocked(String),
+}
+
+/// The words a missing downloader blocks with: `fetch <url>: neither curl
+/// nor wget is on the host`, `pkg[binary_release] go: neither ..`.
+pub const NO_DOWNLOADER: &str = "neither curl nor wget is on the host";
+
+/// Does `op` (a window op) fetch `it`?
+pub fn uses(op: &crate::trace::OpNode, it: &Item) -> bool {
+    matches!(&op.spec, OpSpec::File(f) if f.src.as_ref().is_some_and(|s|
+        s.fetched.url == it.url && s.fetched.sha256 == it.sum))
 }
 
 /// Parse [`prepare_script`]'s output, one [`Found`] per item. An item with
@@ -325,10 +339,7 @@ pub fn parse(items: &[Item], out: &str) -> Vec<Found> {
                     it.url,
                     it.sum.as_deref().unwrap_or("")
                 )),
-                "notool" => Found::Blocked(format!(
-                    "fetch {}: neither curl nor wget is on the host",
-                    it.url
-                )),
+                "notool" => Found::NoDownloader(format!("fetch {}: {NO_DOWNLOADER}", it.url)),
                 "badarchive" => Found::Blocked(format!(
                     "unpack {}: not a tar (gz, xz, zst) or zip archive",
                     it.url
@@ -494,8 +505,14 @@ mod tests {
             sum: sum.map(str::to_string),
             unpack: false,
         };
-        let items = [it(Some("w")), it(None), it(Some("w2")), it(Some("w3"))];
-        let out = "fetch 0 cached\nfetch 1 staged\nfetch 2 mismatch g\nfetch 3 fail curl 22 curl: (22) 404\n";
+        let items = [
+            it(Some("w")),
+            it(None),
+            it(Some("w2")),
+            it(Some("w3")),
+            it(Some("w4")),
+        ];
+        let out = "fetch 0 cached\nfetch 1 staged\nfetch 2 mismatch g\nfetch 3 fail curl 22 curl: (22) 404\nfetch 4 notool\n";
         assert_eq!(
             parse(&items, out),
             [
@@ -504,6 +521,9 @@ mod tests {
                 Found::Blocked("fetch http://x/a: sha256 mismatch: want w2 got g".into()),
                 Found::Blocked(
                     "fetch http://x/a: download failed (curl rc 22): curl: (22) 404".into()
+                ),
+                Found::NoDownloader(
+                    "fetch http://x/a: neither curl nor wget is on the host".into()
                 ),
             ]
         );

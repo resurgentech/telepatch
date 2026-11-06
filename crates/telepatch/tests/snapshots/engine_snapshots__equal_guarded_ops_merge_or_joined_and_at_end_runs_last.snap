@@ -1,6 +1,5 @@
 ---
 source: crates/telepatch/tests/engine_snapshots.rs
-assertion_line: 266
 expression: "telepatch::testing::plan(&pb(run), &host())"
 ---
 host web1 (os: Debian/Debian 12)
@@ -29,7 +28,7 @@ role (none)
       | tp_p='/etc/docker/daemon.json'
       | if [ -d "$tp_p" ]; then echo "telepatch: $tp_p is a directory" >&2; rc=1; fi
       | tp_b='e30K'
-      | if [ "$rc" -eq 0 ] && ! { [ -f "$tp_p" ] && printf %s "$tp_b" | base64 -d | cmp -s - "$tp_p"; }; then
+      | if [ "$rc" -eq 0 ] && ! { [ -f "$tp_p" ] && [ "$(printf %s "$tp_b" | base64 -d | sha256sum | cut -d' ' -f1)" = "$(sha256sum < "$tp_p" | cut -d' ' -f1)" ]; }; then
       |   tp_t=$(mktemp "$tp_p.tpXXXXXX") || rc=$?
       |   if [ "$rc" -eq 0 ]; then
       |     if printf %s "$tp_b" | base64 -d > "$tp_t"; then

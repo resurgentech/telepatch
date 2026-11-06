@@ -392,7 +392,7 @@ pub fn probe(specs: &[&UnitSpec]) -> String {
             .map(|c| c.bytes.clone())
             .unwrap_or_default();
         let mut same = format!(
-            "printf %s {} | base64 -d | cmp -s - \"$tp_p\"",
+            "[ -f \"$tp_p\" ] && [ \"$(printf %s {} | base64 -d | sha256sum | cut -d' ' -f1)\" = \"$(sha256sum < \"$tp_p\" | cut -d' ' -f1)\" ]",
             quote(&STANDARD.encode(bytes))
         );
         if let Some(m) = u.mode {

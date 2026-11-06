@@ -127,7 +127,9 @@ use std::rc::Rc;
 
 use serde_json::json;
 
-use crate::engine::{Engine, EngineError, Executor, HostInfo, Window, WindowKind, WindowOp};
+use crate::engine::{
+    Applied, Engine, EngineError, Executor, HostInfo, Split, Window, WindowKind, WindowOp,
+};
 use crate::facts::query::FactQuery;
 use crate::host::Host;
 use crate::key::Value;
@@ -1079,6 +1081,21 @@ impl HostExec {
         }
     }
 
+    /// The prepare line, event and report entry of a window split at `s`.
+    fn split(&mut self, window: &Window, s: &Split) {
+        let sp = crate::report::WindowSplit {
+            window: window.number,
+            after: s.installer.0,
+            tool: s.tool.clone(),
+            consumer: s.consumer.0,
+        };
+        self.sink
+            .line(&format!("== {} [prepare] {} ==", self.name, sp.line()));
+        self.sink.event(json!({"ev":"window_split","host":self.name,
+            "window":sp.window,"after":sp.after,"tool":sp.tool,"consumer":sp.consumer}));
+        self.report.splits.push(sp);
+    }
+
     fn block(&mut self, why: String) {
         self.halted = true;
         if self.verdict.is_none() {
@@ -1302,6 +1319,20 @@ impl HostExec {
     }
 }
 
+/// Does prepare's missing-downloader block of `window` (the ops in
+/// `no_downloader`) lift by splitting it at `s`: every op that needed a
+/// downloader comes after the one that installs it?
+fn splits_at(window: &Window, s: &Split, no_downloader: &[NodeId]) -> bool {
+    !no_downloader.is_empty()
+        && no_downloader.iter().all(|id| {
+            window
+                .ops
+                .iter()
+                .position(|o| o.id == *id)
+                .is_some_and(|i| i > s.at)
+        })
+}
+
 /// The skip trailer an op emits instead of running once the host halted.
 fn skip_script(op: &OpNode, id: usize, nonce: &str) -> String {
     wrap(op.spec.op_kind(), "rc=0\nskipped=1\n", id, nonce)
@@ -1390,12 +1421,45 @@ impl Executor for HostExec {
         values
     }
 
-    async fn apply(&mut self, host: &HostInfo, window: &Window) -> Result<(), String> {
+    async fn apply(&mut self, host: &HostInfo, window: &Window) -> Result<Applied, String> {
         let kind = match window.kind {
             WindowKind::NonMutating => "non-mutating",
             WindowKind::ImplicitBarrier => "implicit barrier",
             WindowKind::Final => "final",
             WindowKind::AtEnd => "at end",
+        };
+        // Prepare first: a window declined for its head (no downloader on
+        // the host, and an op of the window installs one) is sent,
+        // reported and recorded nowhere, so nothing below runs for it.
+        let prepared = if window.ops.is_empty() || self.halted {
+            None
+        } else {
+            // A fetch or a binary release stages under the run's
+            // directory; removed when the host is done, even if its op
+            // never ran.
+            let binary_release = window.ops.iter().any(|o| {
+                matches!(&o.node.spec, OpSpec::Pkg(p)
+                    if matches!(p.source, crate::ops::pkg::Source::BinaryRelease(_)))
+            });
+            if binary_release || !crate::ops::fetch::items(window).is_empty() {
+                self.fetch_staged = true;
+            }
+            // Prepare: nothing is sent to be applied until all of it passes.
+            let prepared = prepare::prepare_window(
+                &mut self.shells,
+                window,
+                &host.os,
+                &mut self.users_ok,
+                &mut self.seq,
+            )
+            .await;
+            if let (Err(r), Some(s)) = (&prepared, &window.split)
+                && splits_at(window, s, &r.no_downloader)
+            {
+                self.split(window, s);
+                return Ok(Applied::Head(s.at + 1));
+            }
+            Some(prepared)
         };
         self.sink.event(
             json!({"ev":"window","host":self.name,"n":window.number,"kind":kind,
@@ -1406,35 +1470,14 @@ impl Executor for HostExec {
                 self.report.sh_sites.push(site);
             }
         }
-        if window.ops.is_empty() {
-            return Ok(());
-        }
-        if self.halted {
+        let Some(prepared) = prepared else {
+            // Empty, or the host halted: its ops do not run.
             for w in &window.ops {
                 self.not_run(w);
             }
-            return Ok(());
-        }
+            return Ok(Applied::All);
+        };
         let actions = self.and_not_starts(window);
-        // A fetch or a binary release stages under the run's directory;
-        // removed when the host is done, even if its op never ran.
-        let binary_release = window.ops.iter().any(|o| {
-            matches!(&o.node.spec, OpSpec::Pkg(p)
-                if matches!(p.source, crate::ops::pkg::Source::BinaryRelease(_)))
-        });
-        if binary_release || !crate::ops::fetch::items(window).is_empty() {
-            self.fetch_staged = true;
-        }
-
-        // Prepare: nothing is sent to be applied until all of it passes.
-        let prepared = prepare::prepare_window(
-            &mut self.shells,
-            window,
-            &host.os,
-            &mut self.users_ok,
-            &mut self.seq,
-        )
-        .await;
         match prepared {
             Ok(mut will) => {
                 will.will_create.extend(actions);
@@ -1481,9 +1524,9 @@ impl Executor for HostExec {
                     self.report.will_change.push(w);
                 }
             }
-            Err(why) => {
-                self.block(why.clone());
-                return Err(why);
+            Err(r) => {
+                self.block(r.why.clone());
+                return Err(r.why);
             }
         }
 
@@ -1738,7 +1781,7 @@ impl Executor for HostExec {
         if !failed_seen && !self.halted {
             self.flush(window).await;
         }
-        Ok(())
+        Ok(Applied::All)
     }
 }
 

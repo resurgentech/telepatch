@@ -1047,3 +1047,344 @@ fn from_needs_no_cmp_on_the_host() {
     assert_eq!(std::fs::read(&target).unwrap(), b"key bytes\n");
     e.assert_clean();
 }
+
+// --- a fetch after the op that installs curl (T83a) ---
+
+/// `h.pkg(["curl"])` (when `curl`) then `h.file(target).from(f)`; `early`
+/// places the same fetch before the pkg op.
+#[derive(Clone)]
+struct C {
+    url: String,
+    sum: String,
+    target: String,
+    curl: bool,
+    early: Option<String>,
+}
+
+fn pb_curl(h: Host<C>) -> PlaybookFuture {
+    Box::pin(async move {
+        let v = h.vars.clone();
+        let f = h.fetch(&v.url).sha256(&v.sum);
+        if let Some(p) = &v.early {
+            h.file(p).from(&f);
+        }
+        if v.curl {
+            h.pkg(["curl"]);
+        }
+        h.file(&v.target).from(&f);
+        Ok(())
+    })
+}
+
+impl Env {
+    /// A fake package manager for every distro family in `<d>/pm`
+    /// (`dpkg-query`, `apt-get`, `rpm`, `dnf`, `yum`, `pacman`): a name is
+    /// installed when `<d>/inst/<name>` exists, and installing `curl` copies
+    /// the fake curl (`<d>/bin/curl`) into `<d>/inst`, a directory already
+    /// on the PATH. Each install is logged to `<d>/pmlog`. Returns the
+    /// PATH: `<d>/pm:<d>/inst:<farm without curl, wget>`.
+    fn pm_path(&self) -> String {
+        self.fakes(&["curl"]);
+        let pm = self.p("pm");
+        let inst = self.p("inst");
+        std::fs::create_dir_all(&pm).unwrap();
+        std::fs::create_dir_all(&inst).unwrap();
+        let dd = self.d.path().display();
+        let body = format!(
+            r#"#!/bin/bash
+D={dd}
+me=${{0##*/}}
+inst() {{ for n; do if [ "$n" = curl ]; then cp "$D/bin/curl" "$D/inst/curl"; echo "$me install curl" >> "$D/pmlog"; fi; done; }}
+has() {{ [ -e "$D/inst/$1" ]; }}
+last=${{@: -1}}
+case "$me" in
+  dpkg-query) if has "$last"; then echo installed; else exit 1; fi;;
+  rpm) has "$last" || exit 1;;
+  apt-get|dnf|yum) case " $* " in *" install "*) inst "$@";; esac;;
+  pacman)
+    case "$1" in
+      -T) has "$last" || {{ echo "$last"; exit 127; }};;
+      -S) inst "$@";;
+      *) exit 1;;
+    esac;;
+esac
+"#
+        );
+        for t in ["dpkg-query", "apt-get", "rpm", "dnf", "yum", "pacman"] {
+            let p = pm.join(t);
+            std::fs::write(&p, &body).unwrap();
+            std::fs::set_permissions(&p, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+                .unwrap();
+        }
+        let farm = self.farm_without(&["curl", "wget"]);
+        format!("{}:{}:{}", pm.display(), inst.display(), farm.display())
+    }
+    fn pmlog(&self) -> String {
+        std::fs::read_to_string(self.p("pmlog")).unwrap_or_default()
+    }
+    /// Run `pb_curl` on one local host with `path` as the whole PATH; the
+    /// report, the output and the JSON events.
+    fn go_c(&self, v: &C, path: &str) -> (Report, String, Vec<serde_json::Value>) {
+        self.clear_log();
+        let pb = Playbook {
+            name: "curl_fetch",
+            run: pb_curl,
+        };
+        let out = Rc::new(RefCell::new(String::new()));
+        let events = self.p("events.jsonl");
+        let report = run(
+            &pb,
+            vec![HostSpec {
+                name: "h1".into(),
+                target: Target::Local(
+                    LocalTransport::new()
+                        .uid(0)
+                        .env("PATH", path)
+                        .env("TMPDIR", &self.p("tmp").display().to_string())
+                        .env("TP_FETCH_STAGE", &self.p("stage").display().to_string())
+                        .env("TP_FETCH_CACHE", &self.p("cache").display().to_string()),
+                ),
+                vars: v.clone(),
+            }],
+            RunOpts {
+                log: Some(events.clone()),
+                stdout: Stdout::Capture(out.clone()),
+            },
+        );
+        let text = out.borrow().clone();
+        let evs = std::fs::read_to_string(&events)
+            .unwrap_or_default()
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        (report, text, evs)
+    }
+    fn c(&self, curl: bool) -> C {
+        self.serve("a.txt", FILE.as_bytes());
+        C {
+            url: "http://fake/a.txt".into(),
+            sum: sha256(FILE.as_bytes()),
+            target: self.p("out/a.txt").display().to_string(),
+            curl,
+            early: None,
+        }
+    }
+}
+
+/// `(window number, op ids)` of every `window` event.
+fn windows(evs: &[serde_json::Value]) -> Vec<(u64, Vec<u64>)> {
+    evs.iter()
+        .filter(|e| e["ev"] == "window")
+        .map(|e| {
+            (
+                e["n"].as_u64().unwrap(),
+                e["ops"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|i| i.as_u64().unwrap())
+                    .collect(),
+            )
+        })
+        .collect()
+}
+
+const SPLIT_LINE: &str = "== h1 [prepare] window 1: neither curl nor wget is on the host; split after #0 (pkg curl): #1 runs in window 2 ==";
+
+#[test]
+fn a_fetch_after_the_pkg_op_that_installs_curl_runs_after_it() {
+    let e = Env::new();
+    let path = e.pm_path();
+    let v = e.c(true);
+    let (r, out, evs) = e.go_c(&v, &path);
+    assert_eq!(status(&r), &HostStatus::Changed, "{out}\n{}", r.render());
+    assert_eq!(
+        e.pmlog().lines().count(),
+        1,
+        "curl installed once: {}",
+        e.pmlog()
+    );
+    assert_eq!(
+        e.log(),
+        "curl http://fake/a.txt\n",
+        "the installed curl downloads"
+    );
+    assert_eq!(std::fs::read_to_string(&v.target).unwrap(), FILE);
+    // the split, then the rest's prepare line, in that order
+    let split = out
+        .find(SPLIT_LINE)
+        .unwrap_or_else(|| panic!("no split line:\n{out}"));
+    let fetch = out
+        .find("== h1 [prepare] fetch http://fake/a.txt: fetched, sha256 ok ==")
+        .unwrap_or_else(|| panic!("no fetch line:\n{out}"));
+    assert!(split < fetch, "{out}");
+    // both ran, in order, in windows 1 and 2; no phantom window 1 of both
+    assert_eq!(windows(&evs), [(1, vec![0]), (2, vec![1])], "{evs:#?}");
+    let ops = &r.hosts[0].ops;
+    assert_eq!(
+        ops.iter().map(|o| (o.id, o.changed)).collect::<Vec<_>>(),
+        [(0, true), (1, true)],
+        "{}",
+        r.render()
+    );
+    assert_eq!(r.hosts[0].fetches.len(), 1, "{}", r.render());
+    assert_eq!(r.hosts[0].fetches[0].window, 2);
+    let s: Vec<&serde_json::Value> = evs.iter().filter(|e| e["ev"] == "window_split").collect();
+    assert_eq!(s.len(), 1, "{evs:#?}");
+    assert_eq!(s[0]["window"], 1);
+    assert_eq!(s[0]["after"], 0);
+    assert_eq!(s[0]["tool"], "curl");
+    assert_eq!(s[0]["consumer"], 1);
+    assert!(
+        r.render().contains(
+            "\nh1: window 1: neither curl nor wget is on the host; split after #0 (pkg curl): #1 runs in window 2\n"
+        ),
+        "{}",
+        r.render()
+    );
+    e.assert_clean();
+}
+
+#[test]
+fn with_curl_on_the_host_the_window_is_not_split() {
+    let e = Env::new();
+    let path = e.pm_path();
+    // curl is already installed (the package and the tool)
+    std::fs::copy(e.p("bin/curl"), e.p("inst/curl")).unwrap();
+    let v = e.c(true);
+    let (r, out, evs) = e.go_c(&v, &path);
+    assert_eq!(status(&r), &HostStatus::Changed, "{out}\n{}", r.render());
+    assert_eq!(e.pmlog(), "", "nothing installed");
+    assert_eq!(std::fs::read_to_string(&v.target).unwrap(), FILE);
+    assert!(!out.contains("split"), "{out}");
+    assert!(!r.render().contains("split"), "{}", r.render());
+    assert_eq!(windows(&evs), [(1, vec![0, 1])], "{evs:#?}");
+    assert!(evs.iter().all(|e| e["ev"] != "window_split"));
+    assert_eq!(r.hosts[0].fetches[0].window, 1);
+    assert!(
+        out.contains("== h1 [prepare] fetch http://fake/a.txt: fetched, sha256 ok =="),
+        "{out}"
+    );
+    e.assert_clean();
+}
+
+#[test]
+fn no_downloader_and_none_installed_blocks_as_before() {
+    let e = Env::new();
+    let path = e.pm_path();
+    let v = e.c(false);
+    let (r, out, evs) = e.go_c(&v, &path);
+    let HostStatus::Blocked(why) = status(&r) else {
+        panic!("{:?}\n{out}", status(&r));
+    };
+    assert_eq!(
+        why,
+        "fetch http://fake/a.txt: neither curl nor wget is on the host (window 1)"
+    );
+    assert!(!out.contains("split"), "{out}");
+    assert_eq!(windows(&evs), [(1, vec![0])]);
+    assert!(!Path::new(&v.target).exists());
+    e.assert_clean();
+}
+
+#[test]
+fn a_fetch_before_the_pkg_op_that_installs_curl_blocks_as_before() {
+    let e = Env::new();
+    let path = e.pm_path();
+    let mut v = e.c(true);
+    v.early = Some(e.p("out/early.txt").display().to_string());
+    let (r, out, _) = e.go_c(&v, &path);
+    let HostStatus::Blocked(why) = status(&r) else {
+        panic!("{:?}\n{out}", status(&r));
+    };
+    assert_eq!(
+        why,
+        "fetch http://fake/a.txt: neither curl nor wget is on the host (window 1)"
+    );
+    assert!(!out.contains("split after"), "{out}");
+    assert_eq!(e.pmlog(), "", "nothing applied");
+    assert!(!e.p("out/early.txt").exists());
+    e.assert_clean();
+}
+
+#[test]
+fn the_plan_shows_where_a_window_would_split_and_why() {
+    let e = Env::new();
+    let pb = Playbook {
+        name: "curl_fetch",
+        run: pb_curl,
+    };
+    let fh = |v: C| telepatch::testing::FixtureHost::new("h1", os(), Rc::new(v));
+    let plan = telepatch::testing::plan(&pb, &fh(e.c(true)));
+    let line = "  -- split after #0 (pkg curl) when the host has neither curl nor wget: #1 needs a download --";
+    assert!(plan.contains(&format!("\n{line}\n")), "{plan}");
+    // printed right after the installing op
+    let at = plan.find(line).unwrap();
+    assert!(plan.find("  #1 file").unwrap() > at, "{plan}");
+    // no installer, or no consumer after it: no line
+    assert!(!telepatch::testing::plan(&pb, &fh(e.c(false))).contains("split"));
+    let mut early = e.c(false);
+    early.early = Some("/x".into());
+    assert!(!telepatch::testing::plan(&pb, &fh(early)).contains("split"));
+}
+
+/// `pkg curl`, a `.from`, then an `sh!` (it writes `*`: the apt cache is
+/// stale after it).
+fn pb_stale(h: Host<C>) -> PlaybookFuture {
+    Box::pin(async move {
+        let v = h.vars.clone();
+        let f = h.fetch(&v.url).sha256(&v.sum);
+        h.pkg(["curl"]);
+        h.file(&v.target).from(&f);
+        telepatch::sh!(h, "true");
+        Ok(())
+    })
+}
+
+#[test]
+fn the_engine_runs_the_head_then_the_rest_and_a_declined_window_notes_nothing() {
+    let e = Env::new();
+    let pb = Playbook {
+        name: "stale",
+        run: pb_stale,
+    };
+    let fh = telepatch::testing::FixtureHost::new("h1", os(), Rc::new(e.c(true)));
+    let whole = telepatch::testing::plan(&pb, &fh);
+    assert!(whole.contains("\nwindow 1 (final)\n"), "{whole}");
+    assert!(!whole.contains("\nwindow 2"), "{whole}");
+    assert!(whole.contains("  -- split after #0 (pkg curl)"), "{whole}");
+
+    let split = telepatch::testing::plan_with(
+        &pb,
+        &fh,
+        telepatch::testing::fake::FakeExecutor::new().without_downloader(),
+    );
+    let (w1, w2) = split
+        .split_once("\nwindow 2 (final)\n")
+        .unwrap_or_else(|| panic!("no window 2:\n{split}"));
+    assert!(w1.contains("\nwindow 1 (final)\n"), "{split}");
+    assert!(w1.contains("  #0 pkg"), "{split}");
+    assert!(
+        !w1.contains("  #1 file") && !w1.contains("  #2 sh"),
+        "{split}"
+    );
+    assert!(
+        w2.contains("  #1 file") && w2.contains("  #2 sh"),
+        "{split}"
+    );
+    assert!(
+        !split.contains("-- split"),
+        "neither piece splits again:\n{split}"
+    );
+    // the declined window's `sh!` made the apt cache stale; the head did
+    // not inherit that: its pkg op does not update first
+    assert!(
+        !w1.contains("      | apt-get -q update || rc=$?"),
+        "{split}"
+    );
+    assert_eq!(
+        whole.matches("      | apt-get -q update || rc=$?").count(),
+        0,
+        "{whole}"
+    );
+}

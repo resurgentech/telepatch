@@ -276,7 +276,17 @@ fn repo_without_curl_errors_clearly_and_installs_nothing() {
     let tools = d.path().join("tools");
     std::fs::create_dir_all(&tools).unwrap();
     for t in [
-        "bash", "env", "mktemp", "cmp", "mv", "rm", "chmod", "mkdir", "dirname", "cat",
+        "bash",
+        "env",
+        "mktemp",
+        "sha256sum",
+        "cut",
+        "mv",
+        "rm",
+        "chmod",
+        "mkdir",
+        "dirname",
+        "cat",
     ] {
         let found = std::env::var("PATH")
             .unwrap()
@@ -627,4 +637,63 @@ fn repo_will_create_line_reads_will_add() {
         detail: Some("will add".into()),
     };
     assert_eq!(w.line(), "repo docker: will add");
+}
+
+// --- no cmp, no diff on the host ---
+
+/// Every `/usr/bin` entry except `cmp` and `diff`, with the stub `curl` and
+/// `dpkg` in front.
+fn nocmp_path(d: &Path) -> String {
+    stubs(d);
+    let farm = d.join("nocmp");
+    std::fs::create_dir_all(&farm).unwrap();
+    for e in std::fs::read_dir("/usr/bin").unwrap().flatten() {
+        let n = e.file_name();
+        if matches!(n.to_str(), Some("cmp" | "diff")) {
+            continue;
+        }
+        let _ = std::os::unix::fs::symlink(e.path(), farm.join(&n));
+    }
+    format!("{}:{}", d.join("bin").display(), farm.display())
+}
+
+#[test]
+fn repo_op_and_probe_need_no_cmp_or_diff_on_the_host() {
+    for (os, dnf) in [(ubuntu(), false), (fedora(), true)] {
+        let d = tempfile::tempdir().unwrap();
+        let path = nocmp_path(d.path());
+        let h = host(os);
+        let id = if dnf {
+            h.repo("other").dnf(dnf_struct()).id()
+        } else {
+            h.repo("docker").apt(docker_apt(&h)).id()
+        };
+        let spec = spec_of(&h, id);
+        let run = |d: &Path| {
+            let out = bash(&wrapped(&h, id), d, &path);
+            let stream = String::from_utf8(out.stdout).unwrap();
+            let err = String::from_utf8(out.stderr).unwrap();
+            assert!(!err.contains("command not found"), "{err}");
+            let (_, t) = split_stream(&stream, NONCE).remove(0);
+            t.typed::<RepoResult>().unwrap()
+        };
+        let probed = |d: &Path| {
+            let out = bash(&probe(&[&spec]), d, &path);
+            let err = String::from_utf8(out.stderr).unwrap();
+            assert!(!err.contains("command not found"), "{err}");
+            String::from_utf8(out.stdout).unwrap()
+        };
+        assert!(!probed(d.path()).is_empty(), "absent: will add");
+        assert_eq!(run(d.path()), res(0, true));
+        assert_eq!(run(d.path()), res(0, false), "settled: quiet");
+        assert_eq!(probed(d.path()), "", "settled: nothing to add");
+        let file = if dnf {
+            "etc/yum.repos.d/other.repo"
+        } else {
+            SRC
+        };
+        std::fs::write(d.path().join(file), "edited\n").unwrap();
+        assert!(!probed(d.path()).is_empty(), "edited: will add");
+        assert_eq!(run(d.path()), res(0, true), "edited: rewritten");
+    }
 }

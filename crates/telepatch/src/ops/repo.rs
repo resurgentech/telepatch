@@ -84,7 +84,7 @@ const FETCH: &str = "tp_fetch() {
 ";
 
 const PUT: &str = "tp_put() {
-  if tp_render \"$2\" | cmp -s - \"$1\"; then return 0; fi
+  if [ -f \"$1\" ] && [ \"$(tp_render \"$2\" | sha256sum | cut -d' ' -f1)\" = \"$(sha256sum < \"$1\" | cut -d' ' -f1)\" ]; then return 0; fi
   (umask 022; mkdir -p -- \"$(dirname -- \"$1\")\") || return 1
   tp_t=$(mktemp \"$1.XXXXXX\") || return 1
   if tp_render \"$2\" > \"$tp_t\" && chmod 0644 \"$tp_t\" && mv -f -- \"$tp_t\" \"$1\"; then
@@ -95,6 +95,15 @@ const PUT: &str = "tp_put() {
   return 1
 }
 ";
+
+/// A test, true when the file `file` (already quoted) holds what
+/// `tp_render <arg>` prints. Compared by `sha256sum` (coreutils): no `cmp`
+/// on the host. A missing file is "not the same", quietly.
+fn same_as(arg: &str, file: &str) -> String {
+    format!(
+        "{{ [ -f {file} ] && [ \"$(tp_render {arg} | sha256sum | cut -d' ' -f1)\" = \"$(sha256sum < {file} | cut -d' ' -f1)\" ]; }}"
+    )
+}
 
 impl RepoSpec {
     pub fn new(name: impl Into<String>) -> RepoSpec {
@@ -217,8 +226,8 @@ impl RepoSpec {
                 s.push_str(&self.render_fn().unwrap_or_default());
                 s.push_str(&format!("[ -e {} ] || tp_add=1\n", quote(&self.key_path())));
                 s.push_str(&format!(
-                    "tp_arch=$(dpkg --print-architecture 2>/dev/null) && [ -n \"$tp_arch\" ] && {{ tp_render \"$tp_arch\" | cmp -s - {} || tp_add=1; }}\n",
-                    quote(&self.source_path())
+                    "tp_arch=$(dpkg --print-architecture 2>/dev/null) && [ -n \"$tp_arch\" ] && {{ {} || tp_add=1; }}\n",
+                    same_as("\"$tp_arch\"", &quote(&self.source_path()))
                 ));
             }
             RepoKind::DnfUrl(_) => {
@@ -227,8 +236,8 @@ impl RepoSpec {
             RepoKind::Dnf(_) => {
                 s.push_str(&self.render_fn().unwrap_or_default());
                 s.push_str(&format!(
-                    "tp_render '' | cmp -s - {} || tp_add=1\n",
-                    quote(&self.dnf_path())
+                    "{} || tp_add=1\n",
+                    same_as("''", &quote(&self.dnf_path()))
                 ));
             }
         }

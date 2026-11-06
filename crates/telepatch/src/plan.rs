@@ -3,7 +3,7 @@
 
 use std::fmt::Write;
 
-use crate::engine::{Window, WindowKind};
+use crate::engine::{Split, Window, WindowKind};
 use crate::facts::os::Os;
 use crate::key::Key;
 use crate::trace::{Node, OpNode, Site, Trace, sh_sites};
@@ -138,9 +138,20 @@ fn window_kind(k: WindowKind) -> &'static str {
     }
 }
 
+/// The plan's line for a window's split candidate, printed after the
+/// installing op: `  -- split after #3 (pkg curl) when the host has neither
+/// curl nor wget: #5 needs a download --`.
+fn split_line(s: &Split) -> String {
+    format!(
+        "  -- split after {} (pkg {}) when the host has neither curl nor wget: {} needs a download --",
+        s.installer, s.tool, s.consumer
+    )
+}
+
 /// Render the windows an executor received for one host: per window, its
 /// ops in order under role headings; a merged op lists the member ops and
-/// the roles they came from.
+/// the roles they came from; a split candidate is a line after the op that
+/// installs the downloader.
 pub fn render_windows(name: &str, os: &Os, blocking_reads: usize, windows: &[Window]) -> String {
     let mut out = String::new();
     let _ = writeln!(
@@ -152,7 +163,7 @@ pub fn render_windows(name: &str, os: &Os, blocking_reads: usize, windows: &[Win
     for w in windows {
         let _ = writeln!(out, "\nwindow {} ({})", w.number, window_kind(w.kind));
         let mut role: Option<&str> = None;
-        for op in &w.ops {
+        for (i, op) in w.ops.iter().enumerate() {
             // The role of the member whose position the op takes.
             let r = op
                 .members
@@ -173,6 +184,9 @@ pub fn render_windows(name: &str, os: &Os, blocking_reads: usize, windows: &[Win
                     .map(|m| format!("{} {}", role_name(&m.role), m.id))
                     .collect();
                 let _ = writeln!(out, "      merged from {}", from.join(", "));
+            }
+            if let Some(s) = w.split.as_ref().filter(|s| s.at == i) {
+                let _ = writeln!(out, "{}", split_line(s));
             }
         }
     }
