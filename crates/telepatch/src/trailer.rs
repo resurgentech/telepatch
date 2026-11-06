@@ -102,11 +102,22 @@ pub struct ShellResult {
 
 /// A `svc` op: `skipped` is true when the op did nothing because the host
 /// has no `systemctl` or no running systemd (rc 0, never `changed`).
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+///
+/// `was_*` are the unit's state before the op ran, the inverse data
+/// (restore enabled, active and masked as captured); `None` when the host
+/// could not say (no `systemctl`, `active` without a running systemd, a
+/// guard that skipped the op).
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
 pub struct SvcResult {
     pub rc: i32,
     pub changed: bool,
     pub skipped: bool,
+    #[serde(default)]
+    pub was_enabled: Option<bool>,
+    #[serde(default)]
+    pub was_active: Option<bool>,
+    #[serde(default)]
+    pub was_masked: Option<bool>,
 }
 
 impl OpResult for PkgResult {
@@ -197,6 +208,7 @@ pub fn render_op(op: &OpNode, id: usize, nonce: &str, os: &Os) -> String {
 fn render_op_with(op: &OpNode, id: usize, nonce: &str, os: &Os, record: bool) -> String {
     let body = match &op.spec {
         crate::trace::OpSpec::Raw { script } => crate::ops::shell::raw_body(script),
+        crate::trace::OpSpec::Svc(s) => s.render_exec(),
         spec => spec.exec_script(os),
     };
     wrap_with(op.spec.op_kind(), &body, id, nonce, record)
@@ -249,13 +261,19 @@ fn wrap_with(kind: OpKind, body: &str, id: usize, nonce: &str, record: bool) -> 
         OpKind::Pkg => r#"{"rc":%s,"changed":%s,"installed":[%s]}"#,
         OpKind::File | OpKind::Repo => r#"{"rc":%s,"changed":%s}"#,
         OpKind::Group | OpKind::User => r#"{"rc":%s,"changed":%s,"created":%s}"#,
-        OpKind::Sh | OpKind::Svc => r#"{"rc":%s,"changed":%s,"skipped":%s}"#,
+        OpKind::Sh => r#"{"rc":%s,"changed":%s,"skipped":%s}"#,
+        OpKind::Svc => {
+            r#"{"rc":%s,"changed":%s,"skipped":%s,"was_enabled":%s,"was_active":%s,"was_masked":%s}"#
+        }
     };
     let args = match kind {
         OpKind::Pkg => r#""$rc" "$__tp_c" "$__tp_i""#,
         OpKind::File | OpKind::Repo => r#""$rc" "$__tp_c""#,
         OpKind::Group | OpKind::User => r#""$rc" "$__tp_c" "$__tp_k""#,
-        OpKind::Sh | OpKind::Svc => r#""$rc" "$__tp_c" "$__tp_s""#,
+        OpKind::Sh => r#""$rc" "$__tp_c" "$__tp_s""#,
+        OpKind::Svc => {
+            r#""$rc" "$__tp_c" "$__tp_s" "${tp_was_e:-null}" "${tp_was_a:-null}" "${tp_was_m:-null}""#
+        }
     };
     let mut o = String::from("(\n");
     o.push_str(PRELUDE);

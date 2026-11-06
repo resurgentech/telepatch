@@ -9,6 +9,9 @@
 //!   first): run 1 says `will enable; no running systemd: start skipped` and
 //!   enables the unit offline (plain `systemctl enable`, no `--root=/`);
 //!   run 2 changes nothing.
+//! * Disabled and masked are applied offline too (`will disable; no running
+//!   systemd: stop skipped`, `will mask; ...`), twice with nothing changed
+//!   the second time; enabling a masked unit fails.
 
 use std::process::{Command, Stdio};
 
@@ -151,4 +154,96 @@ fn svc_ubuntu_enable_offline_then_unchanged() {
 #[ignore = "needs docker"]
 fn svc_rocky_enable_offline_then_unchanged() {
     twice("rockylinux/rockylinux:10", "crond");
+}
+
+fn pb_disable(h: Host<()>) -> PlaybookFuture {
+    Box::pin(async move {
+        h.svc(unit(&h)).disabled().stopped();
+        Ok(())
+    })
+}
+
+fn pb_mask(h: Host<()>) -> PlaybookFuture {
+    Box::pin(async move {
+        h.svc(unit(&h)).masked().stopped();
+        Ok(())
+    })
+}
+
+/// Disable and mask are unit-file operations, so they apply offline; stop
+/// has no running systemd to talk to, so it is skipped and prepare says so.
+fn states(image: &str, unit: &str) {
+    let ctr = Container::start(image);
+    let r = go(&ctr, "install", pb_install);
+    assert_eq!(r.exit_code(), 0, "install:\n{}", r.render());
+    let (rc, out) = exec(&ctr, "test -d /run/systemd/system && echo booted");
+    assert_ne!(rc, 0, "a plain container is not booted: {out}");
+    // the package enables its unit; make sure of it
+    exec(&ctr, &format!("systemctl enable {unit} >/dev/null 2>&1"));
+    let (rc, out) = exec(&ctr, &format!("systemctl is-enabled {unit}"));
+    assert_eq!((rc, out.as_str()), (0, "enabled"));
+
+    // disabled + stopped: disable applied offline, stop skipped.
+    let r1 = go(&ctr, "disable", pb_disable);
+    println!("{}", r1.render());
+    assert_eq!(r1.exit_code(), 0, "disable run 1:\n{}", r1.render());
+    assert_eq!(r1.hosts[0].status, HostStatus::Changed);
+    assert!(
+        r1.render().contains(&format!(
+            "svc {unit}.service: will disable; no running systemd: stop skipped"
+        )),
+        "{}",
+        r1.render()
+    );
+    let (rc, out) = exec(&ctr, &format!("systemctl is-enabled {unit}"));
+    assert_ne!(rc, 0, "{unit} still enabled: {out}");
+    assert_eq!(out, "disabled");
+    let r2 = go(&ctr, "disable", pb_disable);
+    println!("{}", r2.render());
+    assert_eq!(r2.exit_code(), 0, "disable run 2:\n{}", r2.render());
+    assert_eq!(r2.hosts[0].status, HostStatus::Ok);
+    assert!(r2.hosts[0].will_create.is_empty(), "{}", r2.render());
+    nothing_changed(&r2, "disable run 2");
+
+    // masked + stopped: mask applied offline, stop skipped.
+    let r3 = go(&ctr, "mask", pb_mask);
+    println!("{}", r3.render());
+    assert_eq!(r3.exit_code(), 0, "mask run 1:\n{}", r3.render());
+    assert_eq!(r3.hosts[0].status, HostStatus::Changed);
+    assert!(
+        r3.render().contains(&format!(
+            "svc {unit}.service: will mask; no running systemd: stop skipped"
+        )),
+        "{}",
+        r3.render()
+    );
+    let (_, out) = exec(&ctr, &format!("systemctl is-enabled {unit}"));
+    assert_eq!(out, "masked");
+    let r4 = go(&ctr, "mask", pb_mask);
+    println!("{}", r4.render());
+    assert_eq!(r4.exit_code(), 0, "mask run 2:\n{}", r4.render());
+    assert_eq!(r4.hosts[0].status, HostStatus::Ok);
+    assert!(r4.hosts[0].will_create.is_empty(), "{}", r4.render());
+    nothing_changed(&r4, "mask run 2");
+
+    // enabled on a masked unit fails with systemctl's own message.
+    let r5 = go(&ctr, "svc", pb_svc);
+    assert_ne!(
+        r5.exit_code(),
+        0,
+        "enable of a masked unit:\n{}",
+        r5.render()
+    );
+}
+
+#[test]
+#[ignore = "needs docker"]
+fn svc_ubuntu_disable_and_mask_offline() {
+    states("ubuntu:24.04", "cron");
+}
+
+#[test]
+#[ignore = "needs docker"]
+fn svc_rocky_disable_and_mask_offline() {
+    states("rockylinux/rockylinux:10", "crond");
 }

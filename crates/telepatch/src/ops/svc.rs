@@ -1,7 +1,15 @@
 //! `svc(unit)`: a systemd unit the host should have enabled and/or started.
-//! `.enabled()` and `.started()` are the only wants built; at least one is
-//! required (`svc(docker): nothing wanted` is a trace error otherwise). Root
-//! only, as `group`.
+//! Wants: `.enabled()` / `.disabled()` / `.masked()` (exclusive) and
+//! `.started()` / `.stopped()` (exclusive); at least one is required
+//! (`svc(docker): nothing wanted`, and `svc(docker): .enabled() and
+//! .masked() are exclusive`, are trace errors). Root only, as `group`.
+//! `disabled` disables an enabled unit and leaves a masked, static or
+//! missing one alone; `masked` masks a unit that is not masked. Stop runs
+//! first, then disable/mask; enable runs before stop, start last.
+//!
+//! The script sent to the host also records the unit's state before it
+//! acts (`was_enabled`, `was_active`, `was_masked` in the trailer: the
+//! inverse data; there is no undo log).
 //!
 //! The unit is passed to `systemctl` as given; the key is `svc:<unit>` with
 //! `.service` appended when the name has no unit suffix, so `svc("docker")`
@@ -27,7 +35,7 @@
 //!
 //! So: `systemctl` present, not booted: `enabled` is applied (a unit-file
 //! operation, so an image booted later runs the service), `started` is
-//! skipped. No `systemctl`: the whole op is skipped. A skip is rc 0,
+//! skipped (as is `stopped`). No `systemctl`: the whole op is skipped. A skip is rc 0,
 //! `skipped=1`, never `changed`. On a booted host `start` is preceded by
 //! `systemctl daemon-reload` when systemd says `NeedDaemonReload=yes` for the
 //! unit. The decision is made by the script at run time from the host's real
@@ -55,12 +63,33 @@ const SUFFIXES: [&str; 11] = [
     ".scope",
 ];
 
+/// Run in the script's `else` (systemctl exists), before anything changes:
+/// the unit's state, as the three `tp_was_*` words (`true`, `false`; unset
+/// when unknown) the trailer reports. Booted: one `systemctl show`. Not
+/// booted (`show` fails offline): `is-enabled`, and `active` stays unknown.
+const CAPTURE: &str = concat!(
+    "  if [ -d \"$tp_run\" ]; then\n",
+    "    tp_sh=$(systemctl show -p UnitFileState,ActiveState -- \"$tp_u\" 2>/dev/null)\n",
+    "    tp_ue=$(printf '%s\\n' \"$tp_sh\" | sed -n 's/^UnitFileState=//p')\n",
+    "    tp_as=$(printf '%s\\n' \"$tp_sh\" | sed -n 's/^ActiveState=//p')\n",
+    "  else\n",
+    "    tp_ue=$(systemctl is-enabled -- \"$tp_u\" 2>/dev/null | head -n 1)\n",
+    "    tp_as=\n",
+    "  fi\n",
+    "  case \"$tp_ue\" in enabled|enabled-runtime|static|alias) tp_was_e=true;; ?*) tp_was_e=false;; esac\n",
+    "  case \"$tp_ue\" in masked|masked-runtime) tp_was_m=true;; ?*) tp_was_m=false;; esac\n",
+    "  case \"$tp_as\" in active) tp_was_a=true;; ?*) tp_was_a=false;; esac\n",
+);
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SvcSpec {
     /// The unit as the role wrote it (passed to `systemctl` unchanged).
     pub unit: String,
     pub enabled: bool,
+    pub disabled: bool,
+    pub masked: bool,
     pub started: bool,
+    pub stopped: bool,
 }
 
 impl SvcSpec {
@@ -68,7 +97,10 @@ impl SvcSpec {
         SvcSpec {
             unit: unit.into(),
             enabled: false,
+            disabled: false,
+            masked: false,
             started: false,
+            stopped: false,
         }
     }
 
@@ -78,11 +110,26 @@ impl SvcSpec {
         key_name(&self.unit)
     }
 
+    /// The op's script as the plan shows it.
     pub fn render(&self) -> String {
+        self.script(false)
+    }
+
+    /// The script as sent to the host: [`SvcSpec::render`] plus the capture
+    /// of the unit's state before anything changes (the trailer's
+    /// `was_enabled`, `was_active` and `was_masked`: the inverse data).
+    pub fn render_exec(&self) -> String {
+        self.script(true)
+    }
+
+    fn script(&self, capture: bool) -> String {
         let mut s = format!(
             "tp_u={}\ntp_run=\"${{TP_SVC_RUNDIR:-/run/systemd/system}}\"\ntp_skip=0\nif ! command -v systemctl >/dev/null 2>&1; then\n  skipped=1\nelse\n",
             quote(&self.unit)
         );
+        if capture {
+            s.push_str(CAPTURE);
+        }
         if self.enabled {
             s.push_str(concat!(
                 "  case \"$(systemctl is-enabled -- \"$tp_u\" 2>/dev/null)\" in\n",
@@ -93,6 +140,48 @@ impl SvcSpec {
                 "      if [ \"$rc\" -eq 0 ]; then changed=1; fi\n",
                 "      ;;\n",
                 "  esac\n",
+            ));
+        }
+        if self.stopped {
+            s.push_str(concat!(
+                "  if [ \"$rc\" -eq 0 ]; then\n",
+                "    if [ -d \"$tp_run\" ]; then\n",
+                "      if systemctl is-active --quiet -- \"$tp_u\"; then\n",
+                "        systemctl stop -- \"$tp_u\"\n",
+                "        rc=$?\n",
+                "        if [ \"$rc\" -eq 0 ]; then changed=1; fi\n",
+                "      fi\n",
+                "    else\n",
+                "      tp_skip=1\n",
+                "    fi\n",
+                "  fi\n",
+            ));
+        }
+        if self.disabled {
+            s.push_str(concat!(
+                "  if [ \"$rc\" -eq 0 ]; then\n",
+                "    case \"$(systemctl is-enabled -- \"$tp_u\" 2>/dev/null)\" in\n",
+                "      enabled|enabled-runtime)\n",
+                "        systemctl disable -- \"$tp_u\"\n",
+                "        rc=$?\n",
+                "        if [ \"$rc\" -eq 0 ]; then changed=1; fi\n",
+                "        ;;\n",
+                "    esac\n",
+                "  fi\n",
+            ));
+        }
+        if self.masked {
+            s.push_str(concat!(
+                "  if [ \"$rc\" -eq 0 ]; then\n",
+                "    case \"$(systemctl is-enabled -- \"$tp_u\" 2>/dev/null)\" in\n",
+                "      masked|masked-runtime) ;;\n",
+                "      *)\n",
+                "        systemctl mask -- \"$tp_u\"\n",
+                "        rc=$?\n",
+                "        if [ \"$rc\" -eq 0 ]; then changed=1; fi\n",
+                "        ;;\n",
+                "    esac\n",
+                "  fi\n",
             ));
         }
         if self.started {
@@ -114,8 +203,10 @@ impl SvcSpec {
                 "      tp_skip=1\n",
                 "    fi\n",
                 "  fi\n",
-                "  if [ \"$rc\" -eq 0 ] && [ \"$changed\" -eq 0 ] && [ \"$tp_skip\" -eq 1 ]; then skipped=1; fi\n",
             ));
+        }
+        if self.started || self.stopped {
+            s.push_str("  if [ \"$rc\" -eq 0 ] && [ \"$changed\" -eq 0 ] && [ \"$tp_skip\" -eq 1 ]; then skipped=1; fi\n");
         }
         s.push_str("fi\n");
         s
@@ -154,6 +245,40 @@ impl SvcHandle {
         self
     }
 
+    /// Want the unit disabled (`systemctl disable`): an enabled unit is
+    /// disabled; a masked, static or missing one is left as it is.
+    #[track_caller]
+    pub fn disabled(&self) -> &Self {
+        self.0.edit(|op| {
+            if let OpSpec::Svc(s) = &mut op.spec {
+                s.disabled = true;
+            }
+        });
+        self
+    }
+
+    /// Want the unit masked (`systemctl mask`).
+    #[track_caller]
+    pub fn masked(&self) -> &Self {
+        self.0.edit(|op| {
+            if let OpSpec::Svc(s) = &mut op.spec {
+                s.masked = true;
+            }
+        });
+        self
+    }
+
+    /// Want the unit stopped (`systemctl stop`).
+    #[track_caller]
+    pub fn stopped(&self) -> &Self {
+        self.0.edit(|op| {
+            if let OpSpec::Svc(s) = &mut op.spec {
+                s.stopped = true;
+            }
+        });
+        self
+    }
+
     /// Want the unit started (`systemctl start`).
     #[track_caller]
     pub fn started(&self) -> &Self {
@@ -167,7 +292,8 @@ impl SvcHandle {
 }
 
 impl<V> Host<V> {
-    /// A systemd unit: chain `.enabled()` and/or `.started()`. Root only.
+    /// A systemd unit: chain `.enabled()` / `.disabled()` / `.masked()` and
+    /// `.started()` / `.stopped()`. Root only.
     #[track_caller]
     pub fn svc(&self, unit: &str) -> SvcHandle {
         let h = self.op(OpSpec::Svc(SvcSpec::new(unit)));
@@ -181,25 +307,52 @@ impl<V> Host<V> {
 }
 
 /// Trace errors found only once an op is complete: an `svc` that wants
-/// nothing. Derived from the nodes, so a chain split over statements is
-/// fine as long as it is finished by the time the trace is read.
+/// nothing, or wants two states that exclude each other (enabled, disabled
+/// and masked; started and stopped). Derived from the nodes, so a chain
+/// split over statements is fine as long as it is finished by the time the
+/// trace is read.
 pub fn nothing_wanted(trace: &Trace) -> Vec<TraceError> {
-    trace
-        .nodes
-        .iter()
-        .enumerate()
-        .filter_map(|(i, n)| match n {
-            crate::trace::Node::Op(op) => match &op.spec {
-                OpSpec::Svc(s) if !s.enabled && !s.started => {
-                    let mut e = TraceError::new(format!("svc({}): nothing wanted", s.unit));
-                    e.site = None;
-                    Some(trace.locate(crate::trace::NodeId(i), e))
-                }
-                _ => None,
-            },
-            _ => None,
-        })
-        .collect()
+    let mut out = Vec::new();
+    for (i, n) in trace.nodes.iter().enumerate() {
+        let crate::trace::Node::Op(op) = n else {
+            continue;
+        };
+        let OpSpec::Svc(s) = &op.spec else {
+            continue;
+        };
+        let mut errs = Vec::new();
+        if !(s.enabled || s.disabled || s.masked || s.started || s.stopped) {
+            errs.push(format!("svc({}): nothing wanted", s.unit));
+        }
+        let names = |v: &[(bool, &str)]| -> Vec<String> {
+            v.iter()
+                .filter(|(on, _)| *on)
+                .map(|(_, n)| format!(".{n}()"))
+                .collect()
+        };
+        for set in [
+            names(&[
+                (s.enabled, "enabled"),
+                (s.disabled, "disabled"),
+                (s.masked, "masked"),
+            ]),
+            names(&[(s.started, "started"), (s.stopped, "stopped")]),
+        ] {
+            if set.len() > 1 {
+                errs.push(format!(
+                    "svc({}): {} are exclusive",
+                    s.unit,
+                    set.join(" and ")
+                ));
+            }
+        }
+        for m in errs {
+            let mut e = TraceError::new(m);
+            e.site = None;
+            out.push(trace.locate(crate::trace::NodeId(i), e));
+        }
+    }
+    out
 }
 
 /// What one unit of a window wants, merged over the window's ops that name
@@ -210,7 +363,10 @@ pub struct Want {
     pub unit: String,
     pub key: String,
     pub enabled: bool,
+    pub disabled: bool,
+    pub masked: bool,
     pub started: bool,
+    pub stopped: bool,
 }
 
 /// Merge specs by key, first-seen order.
@@ -221,46 +377,73 @@ pub fn wants<'a>(specs: impl IntoIterator<Item = &'a SvcSpec>) -> Vec<Want> {
         match out.iter_mut().find(|w| w.key == key) {
             Some(w) => {
                 w.enabled |= s.enabled;
+                w.disabled |= s.disabled;
+                w.masked |= s.masked;
                 w.started |= s.started;
+                w.stopped |= s.stopped;
             }
             None => out.push(Want {
                 unit: s.unit.clone(),
                 key,
                 enabled: s.enabled,
+                disabled: s.disabled,
+                masked: s.masked,
                 started: s.started,
+                stopped: s.stopped,
             }),
         }
     }
     out
 }
 
-/// A prepare probe. Prints `systemctl yes|no`, `booted yes|no`, and per
-/// unit `enabled <state> <unit>` and (booted only) `active <state> <unit>`;
-/// `-` is an empty answer.
+/// A prepare probe, one round trip. Prints `systemctl yes|no` and `booted
+/// yes|no`; then, booted, one `systemctl show -p
+/// Id,UnitFileState,ActiveState,LoadState` for every unit (its blocks, in
+/// argument order, are parsed by [`findings_after`]). Offline `show` fails,
+/// and a booted `show` that answers nothing falls back to the per-unit
+/// lines `enabled <state> <unit>` and (booted only) `active <state>
+/// <unit>`; `-` is an empty answer.
 pub fn probe(wants: &[Want]) -> String {
     let mut s = String::from(
-        "tp_run=\"${TP_SVC_RUNDIR:-/run/systemd/system}\"\nif command -v systemctl >/dev/null 2>&1; then echo \"systemctl yes\"; else echo \"systemctl no\"; fi\nif [ -d \"$tp_run\" ]; then echo \"booted yes\"; else echo \"booted no\"; fi\nif command -v systemctl >/dev/null 2>&1; then\n",
+        "tp_run=\"${TP_SVC_RUNDIR:-/run/systemd/system}\"\nif command -v systemctl >/dev/null 2>&1; then echo \"systemctl yes\"; else echo \"systemctl no\"; fi\nif [ -d \"$tp_run\" ]; then echo \"booted yes\"; else echo \"booted no\"; fi\nif command -v systemctl >/dev/null 2>&1; then\n  tp_o=\n",
     );
+    let units: Vec<String> = wants.iter().map(|w| quote(&w.unit)).collect();
+    s.push_str(&format!(
+        "  if [ -d \"$tp_run\" ]; then tp_o=$(systemctl show -p Id,UnitFileState,ActiveState,LoadState -- {} 2>/dev/null); fi\n  if [ -n \"$tp_o\" ]; then\n    printf '%s\\n' \"$tp_o\"\n  else\n",
+        units.join(" ")
+    ));
     for w in wants {
         let q = quote(&w.unit);
         s.push_str(&format!(
-            "  tp_s=$(systemctl is-enabled -- {q} 2>/dev/null | head -n 1); echo \"enabled ${{tp_s:--}} \"{q}\n"
+            "    tp_s=$(systemctl is-enabled -- {q} 2>/dev/null | head -n 1); echo \"enabled ${{tp_s:--}} \"{q}\n"
         ));
-        if w.started {
+        if w.started || w.stopped {
             s.push_str(&format!(
-                "  if [ -d \"$tp_run\" ]; then tp_s=$(systemctl is-active -- {q} 2>/dev/null | head -n 1); echo \"active ${{tp_s:--}} \"{q}; fi\n"
+                "    if [ -d \"$tp_run\" ]; then tp_s=$(systemctl is-active -- {q} 2>/dev/null | head -n 1); echo \"active ${{tp_s:--}} \"{q}; fi\n"
             ));
         }
     }
-    s.push_str("fi\n");
+    s.push_str("  fi\nfi\n");
     s
 }
 
-fn state<'a>(v: &[(&'a str, &'a str)], u: &str) -> Option<&'a str> {
+fn state<'a>(v: &'a [(String, String)], u: &str) -> Option<&'a str> {
     v.iter()
-        .find(|(n, _)| *n == u)
-        .map(|(_, s)| *s)
+        .find(|(n, _)| n == u)
+        .map(|(_, s)| s.as_str())
         .filter(|s| *s != "-")
+}
+
+/// The unit-file state, `enabled <state> <unit>` style, from one `show`
+/// block: `UnitFileState`, else `masked` / `not-found` from `LoadState`.
+fn block_enabled(unit_file: &str, load: &str) -> String {
+    if !unit_file.is_empty() {
+        unit_file.to_string()
+    } else if load == "not-found" {
+        "not-found".to_string()
+    } else {
+        "-".to_string()
+    }
 }
 
 /// `(key, detail)` per unit that has something to say, from [`probe`]'s
@@ -277,21 +460,50 @@ pub fn findings(wants: &[Want], output: &str) -> Vec<(String, String)> {
 pub fn findings_after(wants: &[Want], output: &str, earlier: bool) -> Vec<(String, String)> {
     let mut systemctl = None;
     let mut booted = None;
-    let mut en: Vec<(&str, &str)> = Vec::new();
-    let mut act: Vec<(&str, &str)> = Vec::new();
+    let mut en: Vec<(String, String)> = Vec::new();
+    let mut act: Vec<(String, String)> = Vec::new();
+    // `show` blocks: property lines, separated by a blank line.
+    let mut blocks: Vec<[String; 3]> = Vec::new();
+    let mut cur: Option<[String; 3]> = None;
     for l in output.lines() {
-        if let Some(v) = l.strip_prefix("systemctl ") {
+        if l.is_empty() {
+            blocks.extend(cur.take());
+        } else if let Some(v) = l.strip_prefix("systemctl ") {
             systemctl = Some(v == "yes");
         } else if let Some(v) = l.strip_prefix("booted ") {
             booted = Some(v == "yes");
         } else if let Some(r) = l.strip_prefix("enabled ")
             && let Some((st, u)) = r.split_once(' ')
         {
-            en.push((u, st));
+            en.push((u.to_string(), st.to_string()));
         } else if let Some(r) = l.strip_prefix("active ")
             && let Some((st, u)) = r.split_once(' ')
         {
-            act.push((u, st));
+            act.push((u.to_string(), st.to_string()));
+        } else if let Some((k, v)) = l.split_once('=') {
+            let slot = match k {
+                "UnitFileState" => 0,
+                "ActiveState" => 1,
+                "LoadState" => 2,
+                "Id" => {
+                    cur.get_or_insert_with(Default::default);
+                    continue;
+                }
+                _ => continue,
+            };
+            cur.get_or_insert_with(Default::default)[slot] = v.to_string();
+        }
+    }
+    blocks.extend(cur.take());
+    // One block per unit, in the probe's argument order; any other count
+    // is not trusted.
+    if blocks.len() == wants.len() {
+        for (w, [uf, active, load]) in wants.iter().zip(&blocks) {
+            en.push((w.unit.clone(), block_enabled(uf, load)));
+            act.push((
+                w.unit.clone(),
+                if active.is_empty() { "-" } else { active }.to_string(),
+            ));
         }
     }
     let (Some(systemctl), Some(booted)) = (systemctl, booted) else {
@@ -308,7 +520,8 @@ pub fn findings_after(wants: &[Want], output: &str, earlier: bool) -> Vec<(Strin
             out.push((w.key.clone(), detail.to_string()));
             continue;
         }
-        if earlier && state(&en, &w.unit) == Some("not-found") {
+        let e = state(&en, &w.unit);
+        if earlier && e == Some("not-found") {
             out.push((
                 w.key.clone(),
                 "unit not found yet: decided at run time, after this window's earlier ops"
@@ -316,24 +529,41 @@ pub fn findings_after(wants: &[Want], output: &str, earlier: bool) -> Vec<(Strin
             ));
             continue;
         }
-        let en_needed = w.enabled
-            && state(&en, &w.unit)
-                .is_some_and(|s| !matches!(s, "enabled" | "enabled-runtime" | "static" | "alias"));
-        let start_needed =
-            w.started && booted && state(&act, &w.unit).is_some_and(|s| s != "active");
+        let a = state(&act, &w.unit);
+        let enabled_now = |s: &str| matches!(s, "enabled" | "enabled-runtime");
+        // In the order the script runs them.
         let mut parts = Vec::new();
-        if en_needed {
+        if w.enabled
+            && e.is_some_and(|s| !matches!(s, "enabled" | "enabled-runtime" | "static" | "alias"))
+        {
             parts.push("will enable");
         }
-        if start_needed {
+        if w.stopped && booted && a == Some("active") {
+            parts.push("will stop");
+        }
+        if w.disabled && e.is_some_and(enabled_now) {
+            parts.push("will disable");
+        }
+        if w.masked && e.is_some_and(|s| !matches!(s, "masked" | "masked-runtime")) {
+            parts.push("will mask");
+        }
+        if w.started && booted && a.is_some_and(|s| s != "active") {
             parts.push("will start");
         }
         if parts.is_empty() {
             continue;
         }
+        let acts = parts
+            .iter()
+            .any(|p| matches!(*p, "will enable" | "will disable" | "will mask"));
         let mut detail = parts.join(", ");
-        if en_needed && w.started && !booted {
-            detail.push_str("; no running systemd: start skipped");
+        if acts && !booted {
+            if w.started {
+                detail.push_str("; no running systemd: start skipped");
+            }
+            if w.stopped {
+                detail.push_str("; no running systemd: stop skipped");
+            }
         }
         out.push((w.key.clone(), detail));
     }
@@ -355,9 +585,9 @@ mod tests {
     #[test]
     fn findings_parse_probe_output() {
         let w = wants(&[SvcSpec {
-            unit: "docker".into(),
             enabled: true,
             started: true,
+            ..SvcSpec::new("docker")
         }]);
         let f = findings(
             &w,
@@ -378,9 +608,9 @@ mod tests {
     #[test]
     fn findings_unit_not_found_after_earlier_ops_is_decided_at_run_time() {
         let w = wants(&[SvcSpec {
-            unit: "docker".into(),
             enabled: true,
             started: true,
+            ..SvcSpec::new("docker")
         }]);
         let out = "systemctl yes\nbooted yes\nenabled not-found docker\nactive inactive docker\n";
         assert_eq!(
@@ -399,9 +629,9 @@ mod tests {
     #[test]
     fn findings_no_systemctl_after_earlier_ops_is_not_a_skip() {
         let w = wants(&[SvcSpec {
-            unit: "docker".into(),
             enabled: true,
             started: true,
+            ..SvcSpec::new("docker")
         }]);
         let out = "systemctl no\nbooted no\n";
         assert_eq!(
@@ -415,5 +645,53 @@ mod tests {
                 "no systemctl yet: decided at run time, after this window's earlier ops".into()
             )]
         );
+    }
+
+    #[test]
+    fn findings_read_show_blocks_in_unit_order() {
+        let w = wants(&[
+            SvcSpec {
+                masked: true,
+                stopped: true,
+                ..SvcSpec::new("a")
+            },
+            SvcSpec {
+                disabled: true,
+                ..SvcSpec::new("b")
+            },
+            SvcSpec {
+                enabled: true,
+                ..SvcSpec::new("tigervncserver@:1")
+            },
+        ]);
+        let out = "systemctl yes\nbooted yes\n\
+            Id=a.service\nLoadState=loaded\nActiveState=active\nUnitFileState=enabled\n\n\
+            Id=b.service\nLoadState=masked\nActiveState=inactive\nUnitFileState=masked\n\n\
+            Id=tigervncserver@:1.service\nLoadState=not-found\nActiveState=inactive\nUnitFileState=\n";
+        assert_eq!(
+            findings(&w, out),
+            [
+                ("a.service".into(), "will stop, will mask".into()),
+                ("tigervncserver@:1.service".into(), "will enable".into()),
+            ]
+        );
+        // a block count that does not match the units is not trusted
+        assert!(findings(&w, "systemctl yes\nbooted yes\nId=a.service\n").is_empty());
+    }
+
+    #[test]
+    fn exclusive_wants_are_trace_errors_only_per_op() {
+        let w = wants(&[
+            SvcSpec {
+                enabled: true,
+                ..SvcSpec::new("x")
+            },
+            SvcSpec {
+                masked: true,
+                ..SvcSpec::new("x")
+            },
+        ]);
+        assert_eq!(w.len(), 1);
+        assert!(w[0].enabled && w[0].masked);
     }
 }

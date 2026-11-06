@@ -1,0 +1,174 @@
+---
+source: crates/telepatch/tests/svc.rs
+expression: "format!(\"{}\\n{}\\n{}\", wrapped(&h, a), wrapped(&h, b), wrapped(&h, c))"
+---
+(
+__tp_esc() { local s=${1//\\/\\\\}; s=${s//\"/\\\"}; printf %s "$s"; }
+__tp_emit() {
+  if [ "$1" -ne 0 ]; then rc=$1; fi
+  case "$rc" in ''|*[!0-9]*) rc=1;; esac
+  case "$changed" in 1) __tp_c=true;; *) __tp_c=false;; esac
+  case "$skipped" in 1) __tp_s=true;; *) __tp_s=false;; esac
+  __tp_i=
+  for __tp_x in "${installed[@]}"; do __tp_i="$__tp_i${__tp_i:+,}\"$(__tp_esc "$__tp_x")\""; done
+  printf '\n__tp_t0n 0 {"rc":%s,"changed":%s,"skipped":%s,"was_enabled":%s,"was_active":%s,"was_masked":%s}\n' "$rc" "$__tp_c" "$__tp_s" "${tp_was_e:-null}" "${tp_was_a:-null}" "${tp_was_m:-null}"
+}
+trap '__tp_emit $?' EXIT
+rc=0; changed=0; skipped=0; installed=()
+tp_u='bluetooth'
+tp_run="${TP_SVC_RUNDIR:-/run/systemd/system}"
+tp_skip=0
+if ! command -v systemctl >/dev/null 2>&1; then
+  skipped=1
+else
+  if [ -d "$tp_run" ]; then
+    tp_sh=$(systemctl show -p UnitFileState,ActiveState -- "$tp_u" 2>/dev/null)
+    tp_ue=$(printf '%s\n' "$tp_sh" | sed -n 's/^UnitFileState=//p')
+    tp_as=$(printf '%s\n' "$tp_sh" | sed -n 's/^ActiveState=//p')
+  else
+    tp_ue=$(systemctl is-enabled -- "$tp_u" 2>/dev/null | head -n 1)
+    tp_as=
+  fi
+  case "$tp_ue" in enabled|enabled-runtime|static|alias) tp_was_e=true;; ?*) tp_was_e=false;; esac
+  case "$tp_ue" in masked|masked-runtime) tp_was_m=true;; ?*) tp_was_m=false;; esac
+  case "$tp_as" in active) tp_was_a=true;; ?*) tp_was_a=false;; esac
+  if [ "$rc" -eq 0 ]; then
+    if [ -d "$tp_run" ]; then
+      if systemctl is-active --quiet -- "$tp_u"; then
+        systemctl stop -- "$tp_u"
+        rc=$?
+        if [ "$rc" -eq 0 ]; then changed=1; fi
+      fi
+    else
+      tp_skip=1
+    fi
+  fi
+  if [ "$rc" -eq 0 ]; then
+    case "$(systemctl is-enabled -- "$tp_u" 2>/dev/null)" in
+      enabled|enabled-runtime)
+        systemctl disable -- "$tp_u"
+        rc=$?
+        if [ "$rc" -eq 0 ]; then changed=1; fi
+        ;;
+    esac
+  fi
+  if [ "$rc" -eq 0 ] && [ "$changed" -eq 0 ] && [ "$tp_skip" -eq 1 ]; then skipped=1; fi
+fi
+exit "$rc"
+) </dev/null
+
+(
+__tp_esc() { local s=${1//\\/\\\\}; s=${s//\"/\\\"}; printf %s "$s"; }
+__tp_emit() {
+  if [ "$1" -ne 0 ]; then rc=$1; fi
+  case "$rc" in ''|*[!0-9]*) rc=1;; esac
+  case "$changed" in 1) __tp_c=true;; *) __tp_c=false;; esac
+  case "$skipped" in 1) __tp_s=true;; *) __tp_s=false;; esac
+  __tp_i=
+  for __tp_x in "${installed[@]}"; do __tp_i="$__tp_i${__tp_i:+,}\"$(__tp_esc "$__tp_x")\""; done
+  printf '\n__tp_t0n 1 {"rc":%s,"changed":%s,"skipped":%s,"was_enabled":%s,"was_active":%s,"was_masked":%s}\n' "$rc" "$__tp_c" "$__tp_s" "${tp_was_e:-null}" "${tp_was_a:-null}" "${tp_was_m:-null}"
+}
+trap '__tp_emit $?' EXIT
+rc=0; changed=0; skipped=0; installed=()
+tp_u='systemd-networkd-wait-online'
+tp_run="${TP_SVC_RUNDIR:-/run/systemd/system}"
+tp_skip=0
+if ! command -v systemctl >/dev/null 2>&1; then
+  skipped=1
+else
+  if [ -d "$tp_run" ]; then
+    tp_sh=$(systemctl show -p UnitFileState,ActiveState -- "$tp_u" 2>/dev/null)
+    tp_ue=$(printf '%s\n' "$tp_sh" | sed -n 's/^UnitFileState=//p')
+    tp_as=$(printf '%s\n' "$tp_sh" | sed -n 's/^ActiveState=//p')
+  else
+    tp_ue=$(systemctl is-enabled -- "$tp_u" 2>/dev/null | head -n 1)
+    tp_as=
+  fi
+  case "$tp_ue" in enabled|enabled-runtime|static|alias) tp_was_e=true;; ?*) tp_was_e=false;; esac
+  case "$tp_ue" in masked|masked-runtime) tp_was_m=true;; ?*) tp_was_m=false;; esac
+  case "$tp_as" in active) tp_was_a=true;; ?*) tp_was_a=false;; esac
+  if [ "$rc" -eq 0 ]; then
+    if [ -d "$tp_run" ]; then
+      if systemctl is-active --quiet -- "$tp_u"; then
+        systemctl stop -- "$tp_u"
+        rc=$?
+        if [ "$rc" -eq 0 ]; then changed=1; fi
+      fi
+    else
+      tp_skip=1
+    fi
+  fi
+  if [ "$rc" -eq 0 ]; then
+    case "$(systemctl is-enabled -- "$tp_u" 2>/dev/null)" in
+      masked|masked-runtime) ;;
+      *)
+        systemctl mask -- "$tp_u"
+        rc=$?
+        if [ "$rc" -eq 0 ]; then changed=1; fi
+        ;;
+    esac
+  fi
+  if [ "$rc" -eq 0 ] && [ "$changed" -eq 0 ] && [ "$tp_skip" -eq 1 ]; then skipped=1; fi
+fi
+exit "$rc"
+) </dev/null
+
+(
+__tp_esc() { local s=${1//\\/\\\\}; s=${s//\"/\\\"}; printf %s "$s"; }
+__tp_emit() {
+  if [ "$1" -ne 0 ]; then rc=$1; fi
+  case "$rc" in ''|*[!0-9]*) rc=1;; esac
+  case "$changed" in 1) __tp_c=true;; *) __tp_c=false;; esac
+  case "$skipped" in 1) __tp_s=true;; *) __tp_s=false;; esac
+  __tp_i=
+  for __tp_x in "${installed[@]}"; do __tp_i="$__tp_i${__tp_i:+,}\"$(__tp_esc "$__tp_x")\""; done
+  printf '\n__tp_t0n 2 {"rc":%s,"changed":%s,"skipped":%s,"was_enabled":%s,"was_active":%s,"was_masked":%s}\n' "$rc" "$__tp_c" "$__tp_s" "${tp_was_e:-null}" "${tp_was_a:-null}" "${tp_was_m:-null}"
+}
+trap '__tp_emit $?' EXIT
+rc=0; changed=0; skipped=0; installed=()
+tp_u='tigervncserver@:1'
+tp_run="${TP_SVC_RUNDIR:-/run/systemd/system}"
+tp_skip=0
+if ! command -v systemctl >/dev/null 2>&1; then
+  skipped=1
+else
+  if [ -d "$tp_run" ]; then
+    tp_sh=$(systemctl show -p UnitFileState,ActiveState -- "$tp_u" 2>/dev/null)
+    tp_ue=$(printf '%s\n' "$tp_sh" | sed -n 's/^UnitFileState=//p')
+    tp_as=$(printf '%s\n' "$tp_sh" | sed -n 's/^ActiveState=//p')
+  else
+    tp_ue=$(systemctl is-enabled -- "$tp_u" 2>/dev/null | head -n 1)
+    tp_as=
+  fi
+  case "$tp_ue" in enabled|enabled-runtime|static|alias) tp_was_e=true;; ?*) tp_was_e=false;; esac
+  case "$tp_ue" in masked|masked-runtime) tp_was_m=true;; ?*) tp_was_m=false;; esac
+  case "$tp_as" in active) tp_was_a=true;; ?*) tp_was_a=false;; esac
+  case "$(systemctl is-enabled -- "$tp_u" 2>/dev/null)" in
+    enabled|enabled-runtime|static|alias) ;;
+    *)
+      systemctl enable -- "$tp_u"
+      rc=$?
+      if [ "$rc" -eq 0 ]; then changed=1; fi
+      ;;
+  esac
+  if [ "$rc" -eq 0 ]; then
+    if [ -d "$tp_run" ]; then
+      if ! systemctl is-active --quiet -- "$tp_u"; then
+        if [ "$(systemctl show -p NeedDaemonReload --value -- "$tp_u" 2>/dev/null)" = yes ]; then
+          systemctl daemon-reload
+          rc=$?
+        fi
+        if [ "$rc" -eq 0 ]; then
+          systemctl start -- "$tp_u"
+          rc=$?
+          if [ "$rc" -eq 0 ]; then changed=1; fi
+        fi
+      fi
+    else
+      tp_skip=1
+    fi
+  fi
+  if [ "$rc" -eq 0 ] && [ "$changed" -eq 0 ] && [ "$tp_skip" -eq 1 ]; then skipped=1; fi
+fi
+exit "$rc"
+) </dev/null

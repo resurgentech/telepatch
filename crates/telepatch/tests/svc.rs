@@ -64,9 +64,27 @@ case "$1" in
     esac
     echo enabled > $D/state;;
   is-active) if [ -e $D/active ]; then echo active; exit 0; else echo inactive; exit 3; fi;;
-  show) if [ -e $D/reload ]; then echo yes; else echo no; fi;;
+  show)
+    case "$*" in
+      *UnitFileState*)
+        if [ -e $D/showfail ]; then exit 1; fi
+        # one block per unit, in argument order, blank-line separated
+        first=1
+        for u in "${{@:5}}"; do
+          if [ $first = 0 ]; then echo; fi
+          first=0
+          echo "Id=$u.service"
+          echo "UnitFileState=$s"
+          if [ -e $D/active ]; then echo ActiveState=active; else echo ActiveState=inactive; fi
+          if [ "$s" = masked ]; then echo LoadState=masked; else echo LoadState=loaded; fi
+        done;;
+      *) if [ -e $D/reload ]; then echo yes; else echo no; fi;;
+    esac;;
   daemon-reload) rm -f $D/reload;;
   start) touch $D/active;;
+  stop) rm -f $D/active;;
+  disable) echo disabled > $D/state;;
+  mask) echo masked > $D/state;;
   *) exit 64;;
 esac"#
         ),
@@ -111,7 +129,17 @@ fn with_path(bin: &Path) -> String {
     }
 }
 
+/// As [`run_script_full`], with the inverse data cleared so a result
+/// compares against `r(rc, changed, skipped)`.
 fn run_script(script: &str, d: &Path, path: &Path, booted: bool) -> (String, SvcResult) {
+    let (text, mut res) = run_script_full(script, d, path, booted);
+    res.was_enabled = None;
+    res.was_active = None;
+    res.was_masked = None;
+    (text, res)
+}
+
+fn run_script_full(script: &str, d: &Path, path: &Path, booted: bool) -> (String, SvcResult) {
     let out = Command::new("/bin/bash")
         .arg("-c")
         .arg(script)
@@ -138,6 +166,7 @@ fn r(rc: i32, changed: bool, skipped: bool) -> SvcResult {
         rc,
         changed,
         skipped,
+        ..SvcResult::default()
     }
 }
 
@@ -150,9 +179,15 @@ fn enabled_disabled_is_enabled_then_rerun_changes_nothing() {
         let id = h.svc("docker").enabled().id();
         let (_, res) = run_script(&wrapped(&h, id), d.path(), &bin, booted);
         assert_eq!(res, r(0, true, false), "booted={booted}");
+        // the capture of the inverse data comes first
+        let cap = if booted {
+            "systemctl show -p UnitFileState,ActiveState -- docker\n"
+        } else {
+            "systemctl is-enabled -- docker\n"
+        };
         assert_eq!(
             log(d.path()),
-            "systemctl is-enabled -- docker\nsystemctl enable -- docker\n"
+            format!("{cap}systemctl is-enabled -- docker\nsystemctl enable -- docker\n")
         );
         let (_, res) = run_script(&wrapped(&h, id), d.path(), &bin, booted);
         assert_eq!(res, r(0, false, false), "booted={booted}");
@@ -170,7 +205,11 @@ fn already_enabled_states_need_no_action() {
         let id = h.svc("docker").enabled().id();
         let (_, res) = run_script(&wrapped(&h, id), d.path(), &bin, true);
         assert_eq!(res, r(0, false, false), "{st}");
-        assert_eq!(log(d.path()), "systemctl is-enabled -- docker\n", "{st}");
+        assert_eq!(
+            log(d.path()),
+            "systemctl show -p UnitFileState,ActiveState -- docker\nsystemctl is-enabled -- docker\n",
+            "{st}"
+        );
     }
 }
 
@@ -209,7 +248,7 @@ fn started_inactive_starts_then_active_changes_nothing() {
     assert_eq!(res, r(0, true, false));
     assert_eq!(
         log(d.path()),
-        "systemctl is-active --quiet -- docker\nsystemctl show -p NeedDaemonReload --value -- docker\nsystemctl start -- docker\n"
+        "systemctl show -p UnitFileState,ActiveState -- docker\nsystemctl is-active --quiet -- docker\nsystemctl show -p NeedDaemonReload --value -- docker\nsystemctl start -- docker\n"
     );
     let (_, res) = run_script(&wrapped(&h, id), d.path(), &bin, true);
     assert_eq!(res, r(0, false, false));
@@ -275,7 +314,11 @@ fn not_booted_applies_enable_and_skips_start() {
     let id = h.svc("docker").started().id();
     let (_, res) = run_script(&wrapped(&h, id), d2.path(), &bin2, false);
     assert_eq!(res, r(0, false, true));
-    assert_eq!(log(d2.path()), "");
+    assert_eq!(
+        log(d2.path()),
+        "systemctl is-enabled -- docker\n",
+        "capture only"
+    );
 }
 
 #[test]
@@ -610,5 +653,333 @@ fn executor_no_systemctl_yet_is_decided_at_run_time() {
             .unwrap()
             .trim(),
         "enabled"
+    );
+}
+
+// --- T75: disabled, masked, stopped ---
+
+fn state_of(d: &Path) -> String {
+    std::fs::read_to_string(d.join("state"))
+        .unwrap_or_default()
+        .trim()
+        .to_string()
+}
+
+#[test]
+fn disabled_disables_an_enabled_unit_once() {
+    for booted in [true, false] {
+        let d = tempfile::tempdir().unwrap();
+        let bin = stubs(d.path());
+        set(d.path(), "state", "enabled");
+        let h = host();
+        let id = h.svc("docker").disabled().id();
+        let (_, res) = run_script(&wrapped(&h, id), d.path(), &bin, booted);
+        assert_eq!(res, r(0, true, false), "booted={booted}");
+        assert_eq!(state_of(d.path()), "disabled");
+        let (_, res) = run_script(&wrapped(&h, id), d.path(), &bin, booted);
+        assert_eq!(res, r(0, false, false), "booted={booted}");
+        assert_eq!(log(d.path()).matches("disable --").count(), 1);
+    }
+}
+
+#[test]
+fn disabled_leaves_masked_static_and_missing_units_alone() {
+    for st in ["masked", "static", "not-found", "disabled"] {
+        let d = tempfile::tempdir().unwrap();
+        let bin = stubs(d.path());
+        set(d.path(), "state", st);
+        let h = host();
+        let id = h.svc("docker").disabled().id();
+        let (_, res) = run_script(&wrapped(&h, id), d.path(), &bin, false);
+        assert_eq!(res, r(0, false, false), "{st}");
+        assert!(!log(d.path()).contains("disable --"), "{st}");
+    }
+}
+
+#[test]
+fn masked_masks_once_offline_and_booted() {
+    for booted in [true, false] {
+        let d = tempfile::tempdir().unwrap();
+        let bin = stubs(d.path());
+        let h = host();
+        let id = h.svc("docker").masked().id();
+        let (_, res) = run_script(&wrapped(&h, id), d.path(), &bin, booted);
+        assert_eq!(res, r(0, true, false), "booted={booted}");
+        assert_eq!(state_of(d.path()), "masked");
+        let (_, res) = run_script(&wrapped(&h, id), d.path(), &bin, booted);
+        assert_eq!(res, r(0, false, false), "booted={booted}");
+        assert_eq!(log(d.path()).matches("mask --").count(), 1);
+    }
+}
+
+#[test]
+fn stopped_stops_an_active_unit_then_changes_nothing() {
+    let d = tempfile::tempdir().unwrap();
+    let bin = stubs(d.path());
+    set(d.path(), "active", "");
+    let h = host();
+    let id = h.svc("docker").stopped().id();
+    let (_, res) = run_script(&wrapped(&h, id), d.path(), &bin, true);
+    assert_eq!(res, r(0, true, false));
+    assert!(!d.path().join("active").exists());
+    let (_, res) = run_script(&wrapped(&h, id), d.path(), &bin, true);
+    assert_eq!(res, r(0, false, false));
+    assert_eq!(log(d.path()).matches("stop --").count(), 1);
+}
+
+#[test]
+fn not_booted_stopped_is_skipped_but_mask_is_applied() {
+    let d = tempfile::tempdir().unwrap();
+    let bin = stubs(d.path());
+    let h = host();
+    let id = h.svc("docker").stopped().id();
+    let (_, res) = run_script(&wrapped(&h, id), d.path(), &bin, false);
+    assert_eq!(res, r(0, false, true));
+    let id = h.svc("docker").masked().stopped().id();
+    let (_, res) = run_script(&wrapped(&h, id), d.path(), &bin, false);
+    assert_eq!(res, r(0, true, false), "mask applied");
+    let l = log(d.path());
+    assert!(l.contains("mask -- docker"), "{l}");
+    for never in ["is-active", "stop --", "show"] {
+        assert!(!l.contains(never), "{never} offline: {l}");
+    }
+}
+
+#[test]
+fn no_systemctl_skips_new_states_too() {
+    let d = tempfile::tempdir().unwrap();
+    let bin = no_systemctl_bin(d.path());
+    let h = host();
+    let id = h.svc("docker").masked().stopped().id();
+    for booted in [true, false] {
+        let (_, res) = run_script(&wrapped(&h, id), d.path(), &bin, booted);
+        assert_eq!(res, r(0, false, true), "booted={booted}");
+    }
+}
+
+#[test]
+fn masked_and_stopped_stops_before_it_masks() {
+    let d = tempfile::tempdir().unwrap();
+    let bin = stubs(d.path());
+    set(d.path(), "active", "");
+    let h = host();
+    let id = h.svc("docker").masked().stopped().id();
+    let (_, res) = run_script(&wrapped(&h, id), d.path(), &bin, true);
+    assert_eq!(res, r(0, true, false));
+    let l = log(d.path());
+    assert!(
+        l.find("stop --").unwrap() < l.find("mask --").unwrap(),
+        "{l}"
+    );
+}
+
+#[test]
+fn inverse_data_is_captured_before_the_change() {
+    // booted: from one `systemctl show`
+    let d = tempfile::tempdir().unwrap();
+    let bin = stubs(d.path());
+    set(d.path(), "state", "enabled");
+    set(d.path(), "active", "");
+    let h = host();
+    let id = h.svc("docker").masked().stopped().id();
+    let (_, res) = run_script_full(&wrapped(&h, id), d.path(), &bin, true);
+    assert_eq!(
+        (res.was_enabled, res.was_active, res.was_masked),
+        (Some(true), Some(true), Some(false))
+    );
+    // masked now: the next run's capture says so
+    let (_, res) = run_script_full(&wrapped(&h, id), d.path(), &bin, true);
+    assert_eq!(
+        (res.was_enabled, res.was_active, res.was_masked),
+        (Some(false), Some(false), Some(true))
+    );
+    // not booted: enabled and masked from is-enabled, active unknown
+    let d = tempfile::tempdir().unwrap();
+    let bin = stubs(d.path());
+    set(d.path(), "state", "enabled");
+    let id = h.svc("docker").disabled().id();
+    let (_, res) = run_script_full(&wrapped(&h, id), d.path(), &bin, false);
+    assert_eq!(
+        (res.was_enabled, res.was_active, res.was_masked),
+        (Some(true), None, Some(false))
+    );
+    // no systemctl: nothing known
+    let bin = no_systemctl_bin(d.path());
+    let (_, res) = run_script_full(&wrapped(&h, id), d.path(), &bin, false);
+    assert_eq!(
+        (res.was_enabled, res.was_active, res.was_masked),
+        (None, None, None)
+    );
+}
+
+#[test]
+fn exclusive_states_are_trace_errors() {
+    let h = host();
+    h.svc("a").enabled().disabled();
+    h.svc("b").enabled().masked();
+    h.svc("c").disabled().masked().stopped();
+    h.svc("d").started().stopped();
+    let errs: Vec<String> = h
+        .snapshot()
+        .errors
+        .iter()
+        .map(|e| e.message().to_string())
+        .collect();
+    assert_eq!(
+        errs,
+        [
+            "svc(a): .enabled() and .disabled() are exclusive",
+            "svc(b): .enabled() and .masked() are exclusive",
+            "svc(c): .disabled() and .masked() are exclusive",
+            "svc(d): .started() and .stopped() are exclusive",
+        ]
+    );
+    let ok = host();
+    ok.svc("a").enabled().started();
+    ok.svc("b").disabled().stopped();
+    ok.svc("c").masked().stopped();
+    assert!(ok.snapshot().errors.is_empty());
+}
+
+#[test]
+fn stopped_or_masked_alone_is_something_wanted() {
+    let h = host();
+    h.svc("a").stopped();
+    h.svc("b").masked();
+    h.svc("c").disabled();
+    assert!(h.snapshot().errors.is_empty());
+}
+
+#[test]
+fn template_instance_keeps_its_name_and_key() {
+    let h = host();
+    let id = h.svc("tigervncserver@:1").enabled().id();
+    let snap = h.snapshot();
+    let Node::Op(op) = &snap.nodes[id.0] else {
+        panic!()
+    };
+    assert_eq!(
+        op.writes,
+        [Key::svc("tigervncserver@:1.service")]
+            .into_iter()
+            .collect()
+    );
+    assert_eq!(
+        Key::svc("tigervncserver@:1.service").to_string(),
+        "svc:tigervncserver@:1.service"
+    );
+    let d = tempfile::tempdir().unwrap();
+    let bin = stubs(d.path());
+    let (_, res) = run_script(&wrapped(&h, id), d.path(), &bin, false);
+    assert_eq!(res, r(0, true, false));
+    assert!(
+        log(d.path()).contains("enable -- tigervncserver@:1\n"),
+        "{}",
+        log(d.path())
+    );
+}
+
+#[test]
+fn svc_new_states_template_snapshots() {
+    let h = host();
+    let a = h.svc("bluetooth").disabled().stopped().id();
+    let b = h
+        .svc("systemd-networkd-wait-online")
+        .masked()
+        .stopped()
+        .id();
+    let c = h.svc("tigervncserver@:1").enabled().started().id();
+    insta::assert_snapshot!(format!(
+        "{}\n{}\n{}",
+        wrapped(&h, a),
+        wrapped(&h, b),
+        wrapped(&h, c)
+    ));
+}
+
+#[test]
+fn svc_new_states_plan_shows_effects() {
+    let h = host();
+    h.svc("bluetooth").disabled().stopped();
+    h.svc("wait-online").masked();
+    insta::assert_snapshot!(render_host("h", &h.os, &h.snapshot()));
+}
+
+fn pb_off() -> Playbook<PathBuf> {
+    fn run_(h: Host<PathBuf>) -> PlaybookFuture {
+        Box::pin(async move {
+            h.svc("wait-online").masked().stopped();
+            h.svc("bluetooth").disabled().stopped();
+            Ok(())
+        })
+    }
+    Playbook {
+        name: "svc",
+        run: run_,
+    }
+}
+
+#[test]
+fn executor_booted_says_will_stop_will_mask_with_one_show() {
+    let d = tempfile::tempdir().unwrap();
+    let bin = stubs(d.path());
+    set(d.path(), "state", "enabled");
+    set(d.path(), "active", "");
+    let (r1, out1) = go(&pb_off(), d.path(), &bin, true);
+    assert_eq!(r1.exit_code(), 0, "{}\n{out1}", r1.render());
+    assert!(
+        out1.contains("== h1 [prepare] svc wait-online.service: will stop, will mask =="),
+        "{out1}"
+    );
+    assert!(
+        out1.contains("== h1 [prepare] svc bluetooth.service: will stop, will disable =="),
+        "{out1}"
+    );
+    // the probe: one systemctl show for both units, no per-unit queries
+    let l = log(d.path());
+    let probe =
+        "systemctl show -p Id,UnitFileState,ActiveState,LoadState -- wait-online bluetooth\n";
+    assert_eq!(l.matches(probe).count(), 1, "{l}");
+    let before_run = l.find(probe).unwrap();
+    assert!(
+        !l[..before_run].contains("is-enabled") && !l[..before_run].contains("is-active"),
+        "{l}"
+    );
+    // second run: the unit is masked, so nothing is left to say
+    let (r2, out2) = go(&pb_off(), d.path(), &bin, true);
+    assert_eq!(
+        r2.hosts[0].status,
+        HostStatus::Ok,
+        "{}\n{out2}",
+        r2.render()
+    );
+    assert!(r2.hosts[0].will_create.is_empty(), "{out2}");
+}
+
+#[test]
+fn executor_offline_applies_mask_and_says_stop_is_skipped() {
+    let d = tempfile::tempdir().unwrap();
+    let bin = stubs(d.path());
+    let (r1, out1) = go(&pb_off(), d.path(), &bin, false);
+    assert_eq!(r1.exit_code(), 0, "{}\n{out1}", r1.render());
+    assert!(
+        out1.contains(
+            "== h1 [prepare] svc wait-online.service: will mask; no running systemd: stop skipped =="
+        ),
+        "{out1}"
+    );
+    assert!(!log(d.path()).contains("show -p Id"), "{}", log(d.path()));
+    assert_eq!(state_of(d.path()), "masked");
+}
+
+#[test]
+fn executor_falls_back_to_is_enabled_when_show_fails() {
+    let d = tempfile::tempdir().unwrap();
+    let bin = stubs(d.path());
+    set(d.path(), "showfail", "");
+    let (_, out) = go(&pb_docker(), d.path(), &bin, true);
+    assert!(
+        out.contains("== h1 [prepare] svc docker.service: will enable, will start =="),
+        "{out}"
     );
 }
