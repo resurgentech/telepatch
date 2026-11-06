@@ -829,3 +829,47 @@ are appended, never edited in; a hook refuses rewrites.
   merge. Zypper not built (no zypper manager exists). `just docker-vm
   test-live-pkg` 9/9 on ubuntu2404, rockylinux10, arch.
 - Commits: telepatch 8536933
+
+## 2026-11-06 — T77b state and restart on one svc chain (telepatch)
+
+- `h.svc(u).enabled().started().restart_on(&x)` (and `.restart().when(g)`,
+  `.reload().when(g)` after a state want) traces the action as a second
+  svc op and returns its handle: the same plan, prepare lines, report,
+  merges and suppression as the two-call form. `.when(g)` guards the op
+  the handle names when called; a state after the action, and restart
+  with reload, stay trace errors. `just docker-vm test-live-svc` 4/4.
+- Commits: telepatch ac3d877
+
+## 2026-11-06 — T83 vars per role, four layers (telepatch, tp_basic)
+
+- `telepatch::vars` loads `V` as a struct of role sections: the role's
+  `[section]`, then a top-level key of the same name, then the playbook's
+  defaults (TOML text, `cli::main_with_defaults`), then the role's own
+  `Default`; field names from a probing serde deserializer; an unknown
+  key, a top-level key no role has, or a wrong type fails at load naming
+  file and line. tp_basic: one vars struct per role; `rustup_version` and
+  `cargo_version` dropped; the 91 plan snapshots unchanged.
+- Commits: telepatch 3a546df, tp_basic 764c52d
+
+## 2026-11-06 — T81 fetch, prepare-phase downloads (telepatch, tp_basic)
+
+- `h.fetch(url).sha256(sum)` is a value; `h.file(p).from(&f)` places it,
+  `.unpack(&f).strip(n)` unpacks tar (gz, xz, zst) or zip and swaps the
+  directory in. Prepare downloads on the host to `/var/tmp/telepatch/<run>/`,
+  verifies and caches under `/var/cache/telepatch/sha256/<sum>`; a cache
+  hit makes no call; any failure, or no curl/wget, blocks the host. No
+  checksum is `Unverified`. `just docker-vm test-live-fetch` 2/2 (ubuntu,
+  rocky; red first on rocky's missing `cmp`, fixed in 3d8a500).
+- Commits: telepatch e4dd4ff, 3d8a500; tp_basic a88d80b
+
+## 2026-11-06 — T82 binary_release source (telepatch)
+
+- `h.pkg([n]).binary_release(BinaryRelease::new()...)`: `{version}` and
+  `{arch}` resolved on the host in prepare (present, pin, latest by
+  `Latest::text`/`github_release`, or by published checksum with no
+  `{version}`); `Sum::json|sidecar|value`; download and verify through
+  T81's staging; a tarball swapped into `unpack_to`, a binary over `bin`;
+  no checksum source is `Unverified`. A merged op carries every member's
+  allowances, each tagged with its member. `just docker-vm
+  test-live-fetch` 4/4 (ubuntu, rocky).
+- Commits: telepatch 42d920a
