@@ -105,6 +105,7 @@ impl Os {
     pub fn parse(text: &str) -> Result<Os, OsParseError> {
         let (mut id, mut id_like, mut version_id) = (None, String::new(), String::new());
         let (mut ubuntu_codename, mut version_codename) = (String::new(), String::new());
+        let mut build_id = String::new();
         for line in text.lines() {
             let line = line.trim();
             if line.starts_with('#') {
@@ -120,6 +121,7 @@ impl Os {
                 "VERSION_ID" => version_id = v,
                 "UBUNTU_CODENAME" => ubuntu_codename = v,
                 "VERSION_CODENAME" => version_codename = v,
+                "BUILD_ID" => build_id = v,
                 _ => {}
             }
         }
@@ -130,6 +132,11 @@ impl Os {
             .chain(id_like.split_whitespace())
             .find_map(family_of)
             .unwrap_or_else(|| Family::Other(id.clone()));
+        // A rolling distro's VERSION_ID is a build date that drifts every
+        // week and that nothing reads; the version is `rolling` (T70c).
+        if build_id == "rolling" {
+            version_id = "rolling".to_string();
+        }
         let major = if family == Family::Arch {
             None
         } else {
@@ -263,8 +270,8 @@ mod tests {
             ("almalinux9",      F::RedHat, D::Alma,   "9.8",        Some(9)),
             ("almalinux10",     F::RedHat, D::Alma,   "10.2",       Some(10)),
             ("amazonlinux2023", F::RedHat, D::Amazon, "2023",       Some(2023)),
-            ("arch",            F::Arch,   D::Arch,   "20261025.0.616225", None),
-            ("omarchy",         F::Arch,   D::Arch,   "20261025.0.616225", None),
+            ("arch",            F::Arch,   D::Arch,   "rolling",    None),
+            ("omarchy",         F::Arch,   D::Arch,   "rolling",    None),
             ("omarchy-host",    F::Arch,   other("omarchy"), "4.0.6", None),
         ];
         for (name, family, distro, version, major) in table {
@@ -274,6 +281,35 @@ mod tests {
             assert_eq!(os.version.as_str(), version, "{name} version");
             assert_eq!(os.version.major(), major, "{name} major");
         }
+    }
+
+    #[test]
+    fn rolling_build_date_is_not_part_of_os() {
+        let p = format!(
+            "{}/tests/fixtures/os-release/arch",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let text = std::fs::read_to_string(&p).unwrap();
+        assert!(
+            text.contains("BUILD_ID=rolling"),
+            "the arch fixture is rolling"
+        );
+        let later: String = text
+            .lines()
+            .map(|l| {
+                if l.starts_with("VERSION_ID=") {
+                    "VERSION_ID=20261101.0.620205".to_string()
+                } else {
+                    l.to_string()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_ne!(text.trim(), later.trim(), "the date was replaced");
+        let (a, b) = (Os::parse(&text).unwrap(), Os::parse(&later).unwrap());
+        assert_eq!(a, b);
+        assert_eq!(a.version.as_str(), "rolling");
+        assert_eq!(a.version.major(), None);
     }
 
     #[test]
