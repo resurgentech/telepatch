@@ -1163,7 +1163,7 @@ h.file("/etc/profile.d/android.sh").content(include_str!("../templates/android.s
 <section class="prose" id="d-role-vars">
 <h3>Vars per role</h3>
 <p>Each role owns a vars struct. A value comes from the nearest of four layers.</p>
-<p class="status">Status: <strong>designed</strong>: today the vars file deserializes into one flat struct</p>
+<p class="status">Status: <strong>built</strong>: the four layers (<code>telepatch::vars</code>; the playbook's defaults are a TOML text the playbook binary passes to <code>cli::main_with_defaults</code>), field names from a probing serde deserializer, errors naming the file and line at load, before any host is traced. <strong>designed</strong>: host and group vars from an inventory (T99)</p>
 <div class="eyebrow">the roles</div>
 <pre><code>#[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]

@@ -425,3 +425,97 @@ fn ssh_key_and_options_reach_every_host() {
         }
     }
 }
+
+// ---- vars per role (four layers) through `--vars` ----
+
+mod sectioned {
+    use super::*;
+    use telepatch::cli::run_with_args_and_defaults;
+
+    #[derive(Deserialize, Clone)]
+    #[serde(deny_unknown_fields, default)]
+    struct Hello {
+        greeting: String,
+        who: Vec<String>,
+    }
+    impl Default for Hello {
+        fn default() -> Self {
+            Hello {
+                greeting: "hi".into(),
+                who: vec!["root".into()],
+            }
+        }
+    }
+
+    #[derive(Deserialize, Default, Clone)]
+    #[serde(deny_unknown_fields, default)]
+    struct Vars {
+        hello: Hello,
+    }
+
+    #[role]
+    async fn hello(h: &Host<Vars>) -> Result<(), TraceError> {
+        h.file("/tmp/g").content(format!(
+            "{} {}\n",
+            h.vars.hello.greeting,
+            h.vars.hello.who.join(",")
+        ));
+        Ok(())
+    }
+
+    fn entry(h: Host<Vars>) -> PlaybookFuture {
+        Box::pin(async move { hello(&h).await })
+    }
+
+    fn go(defaults: &str, a: &[&str]) -> (String, i32) {
+        run_with_args_and_defaults(
+            &args(a),
+            &[Playbook {
+                name: "hello",
+                run: entry,
+            }],
+            defaults,
+            || LocalTransport::new().uid(0),
+            SshTransport::new,
+        )
+    }
+
+    #[test]
+    fn layers_reach_the_plan() {
+        let d = tempfile::tempdir().unwrap();
+        let v = vars_file(d.path(), "who = [\"a\"]\n[hello]\ngreeting = \"yo\"\n");
+        let (out, code) = go(
+            "who = [\"x\"]\n[hello]\ngreeting = \"def\"\n",
+            &["plan", "hello", "--distro", "arch", "--vars", &v],
+        );
+        assert_eq!(code, 0, "{out}");
+        // the plan carries the file body base64: "yo a\n"
+        assert!(out.contains("eW8gYQo="), "{out}");
+        // no file: the playbook defaults, then the role's own
+        let (out, code) = go("who = [\"x\"]\n", &["plan", "hello", "--distro", "arch"]);
+        assert_eq!(code, 0, "{out}");
+        // "hi x\n"
+        assert!(out.contains("aGkgeAo="), "{out}");
+    }
+
+    #[test]
+    fn errors_name_file_and_line_and_exit_2() {
+        let d = tempfile::tempdir().unwrap();
+        for (body, line, what) in [
+            ("\n\nnope = 1\n", 3, "nope"),
+            ("[hello]\nwho = [\"a\"]\nnope = 1\n", 3, "nope"),
+            ("\n[hello]\ngreeting = 5\n", 3, "invalid type"),
+        ] {
+            let v = vars_file(d.path(), body);
+            let (out, code) = go("", &["plan", "hello", "--distro", "arch", "--vars", &v]);
+            assert_eq!(code, 2, "{out}");
+            assert!(
+                out.starts_with(&format!("{v}:{line}:")) && out.contains(what),
+                "{out}"
+            );
+            let (out, code) = go("", &["run", "hello", "--local", "--vars", &v]);
+            assert_eq!(code, 2, "{out}");
+            assert!(out.starts_with(&format!("{v}:{line}:")), "{out}");
+        }
+    }
+}

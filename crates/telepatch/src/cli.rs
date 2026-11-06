@@ -9,11 +9,11 @@
 //! run in parallel, each with the same vars. `--ssh-key` and `--ssh-option`
 //! apply to every `--host` and need at least one.
 //!
-//! Vars are TOML deserialized into the playbook repo's `V`; without
-//! `--vars`, `V::default()`.
+//! Vars are TOML layered into the playbook repo's `V` per role section
+//! (see [`crate::vars`]); without `--vars` and defaults, `V::default()`.
 
 use std::cell::RefCell;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::ExitCode;
 use std::rc::Rc;
 
@@ -87,10 +87,20 @@ fn parse_ssh_option(s: &str) -> Result<String, String> {
 
 /// Parse `std::env::args`, run, print, return the exit code.
 pub fn main<V: DeserializeOwned + Default + 'static>(playbooks: &[Playbook<V>]) -> ExitCode {
+    main_with_defaults(playbooks, "")
+}
+
+/// [`main`] with the playbook's vars defaults: TOML of the same shape as
+/// a vars file, the third of the four layers (see [`crate::vars`]).
+pub fn main_with_defaults<V: DeserializeOwned + Default + 'static>(
+    playbooks: &[Playbook<V>],
+    defaults: &str,
+) -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
     let (text, code) = dispatch(
         &args,
         playbooks,
+        defaults,
         LocalTransport::new,
         SshTransport::new,
         Stdout::Inherit,
@@ -111,8 +121,27 @@ pub fn run_with_args<V: DeserializeOwned + Default + 'static>(
     local: impl Fn() -> LocalTransport,
     ssh: impl Fn() -> SshTransport,
 ) -> (String, i32) {
+    run_with_args_and_defaults(args, playbooks, "", local, ssh)
+}
+
+/// [`run_with_args`] with the playbook's vars defaults (see
+/// [`main_with_defaults`]).
+pub fn run_with_args_and_defaults<V: DeserializeOwned + Default + 'static>(
+    args: &[String],
+    playbooks: &[Playbook<V>],
+    defaults: &str,
+    local: impl Fn() -> LocalTransport,
+    ssh: impl Fn() -> SshTransport,
+) -> (String, i32) {
     let buf = Rc::new(RefCell::new(String::new()));
-    let (text, code) = dispatch(args, playbooks, local, ssh, Stdout::Capture(buf.clone()));
+    let (text, code) = dispatch(
+        args,
+        playbooks,
+        defaults,
+        local,
+        ssh,
+        Stdout::Capture(buf.clone()),
+    );
     let streamed = buf.borrow().clone();
     (streamed + &text, code)
 }
@@ -120,6 +149,7 @@ pub fn run_with_args<V: DeserializeOwned + Default + 'static>(
 fn dispatch<V: DeserializeOwned + Default + 'static>(
     args: &[String],
     playbooks: &[Playbook<V>],
+    defaults: &str,
     local: impl Fn() -> LocalTransport,
     ssh: impl Fn() -> SshTransport,
     stdout: Stdout,
@@ -145,7 +175,7 @@ fn dispatch<V: DeserializeOwned + Default + 'static>(
                 Ok(p) => p,
                 Err(m) => return err(m),
             };
-            let vars = match load_vars::<V>(vars.as_deref()) {
+            let vars = match crate::vars::load_file::<V>(vars.as_deref(), defaults) {
                 Ok(v) => v,
                 Err(m) => return err(m),
             };
@@ -192,7 +222,7 @@ fn dispatch<V: DeserializeOwned + Default + 'static>(
             // Vars are loaded once per host so `V` needs no `Clone`.
             let mut hosts = Vec::new();
             if dests.is_empty() {
-                match load_vars::<V>(vars.as_deref()) {
+                match crate::vars::load_file::<V>(vars.as_deref(), defaults) {
                     Ok(vars) => hosts.push(HostSpec {
                         name: "local".into(),
                         target: Target::Local(local()),
@@ -202,7 +232,7 @@ fn dispatch<V: DeserializeOwned + Default + 'static>(
                 }
             }
             for dest in dests {
-                let vars = match load_vars::<V>(vars.as_deref()) {
+                let vars = match crate::vars::load_file::<V>(vars.as_deref(), defaults) {
                     Ok(v) => v,
                     Err(m) => return err(m),
                 };
@@ -223,15 +253,6 @@ fn dispatch<V: DeserializeOwned + Default + 'static>(
             (format!("\n{}", report.render()), report.exit_code())
         }
     }
-}
-
-fn load_vars<V: DeserializeOwned + Default>(path: Option<&Path>) -> Result<V, String> {
-    let Some(path) = path else {
-        return Ok(V::default());
-    };
-    let text = std::fs::read_to_string(path)
-        .map_err(|e| format!("cannot read vars file {}: {e}", path.display()))?;
-    toml::from_str(&text).map_err(|e| format!("cannot parse vars file {}: {e}", path.display()))
 }
 
 fn local_os() -> Result<Os, String> {

@@ -26,6 +26,7 @@ pub mod testing;
 pub mod trace;
 pub mod trailer;
 pub mod transport;
+pub mod vars;
 
 pub use host::{Host, OpHandle, Scope, TraceError};
 pub use key::{Key, Value};
