@@ -737,3 +737,55 @@ are appended, never edited in; a hook refuses rewrites.
   (kernel_build debian family, latest_kernel_build) and 7 telepatch
   test snapshots gain warning lines, additions only.
 - Commits: telepatch 3893696, tp_basic 13d6828
+
+## 2026-11-06 — T70c a rolling distro's version is `rolling` (telepatch, tp_basic)
+
+- `Os::parse`: `BUILD_ID=rolling` makes the version `rolling` whatever
+  `VERSION_ID` says; other os-release unchanged. The 14 arch/omarchy
+  tp_basic snapshots move only their header line. `just docker-vm
+  test-live-os` 13/13.
+- Commits: telepatch cc4ce96, tp_basic 9ae5225
+
+## 2026-11-06 — T70d test-acceptance prunes each cell's images in the VM (tp_basic)
+
+- `test-container.sh --prune` (passed by `test-acceptance`) removes
+  exactly the images a cell built after its compare, guard checked
+  again first, bases kept, `docker builder prune -f`; disk before and
+  after printed. Guard self-test drops the docker_images cases (XO
+  amendment: the user reverted that guard) and adds `test-live-unit`.
+  `just docker-vm test-acceptance` 7/7 identical in one 60 GB VM.
+- Commits: tp_basic da91c38
+
+## 2026-11-06 — T74 guards and change triggers (telepatch)
+
+- `.changed()`/`.ok()` on every handle; `Guard` gains `Or`/`And` with
+  `| & !`. The executor evaluates guards in the shell (variables for a
+  source in the same run, constants for one already reported); a false
+  guard is `Outcome::Skipped`. Equal guarded ops merge with guards
+  or-joined; merged pkg member rule; `.at_end()` window.
+- Commits: telepatch e10176d
+
+## 2026-11-06 — T75 service states (telepatch)
+
+- svc `.disabled()`, `.masked()`, `.stopped()` (exclusive sets); one
+  `systemctl show` probe per window with an offline fallback; offline
+  enable/disable/mask, start/stop skipped; was_enabled/was_active/
+  was_masked in the result. `just docker-vm test-live-svc` 4/4.
+- Commits: telepatch 5ab910f
+
+## 2026-11-06 — T76 restart and reload carry a guard (telepatch)
+
+- `.restart()`, `.reload()`, `.restart_on(&h)`; unguarded is
+  `UnguardedRestart`, allowed prints `will restart, every run; allowed
+  unguarded-restart: <reason>`; guarded restarts merge or-joined; a
+  restart of a unit the run starts is skipped; `will restart if pkg
+  <name> changes`; a second run is CHANGED 0.
+- Commits: telepatch b8c3910
+
+## 2026-11-06 — T77 h.unit: unit files and drop-ins (telepatch)
+
+- `h.unit(n).content(..).mode(..)`, `.drop_in(..)`, `.absent()` through
+  the file op's candidate path with `systemd-analyze verify`; one
+  daemon-reload before the next svc op after a changed unit (booted);
+  `.restart_on(&unit)`; recipe `test-live-unit` 2/2 in a docker VM.
+- Commits: telepatch b5d69c3
