@@ -104,6 +104,10 @@ li > code:first-child { font-weight: 500; }
 .cols > div { min-width: 0; background: var(--surface); border: 1px solid var(--line); border-radius: 6px; padding: 0.9rem 1rem; }
 .cols h4 { margin: 0 0 0.4rem; font-size: 0.95rem; font-weight: 600; }
 .cols p { font-size: 0.9rem; margin: 0; color: var(--muted); }
+.status { font-size: 0.88rem; color: var(--muted); }
+.status strong { color: var(--fg); }
+td.status { min-width: 14ch; }
+.eyebrow.group { margin-top: 3rem; padding-top: 1rem; border-top: 1px dashed var(--line); }
 
 nav.toc { font-size: 0.9rem; margin: 1.5rem 0 0; padding: 1rem 1.1rem; background: var(--surface); border: 1px solid var(--line); border-radius: 6px; max-width: 68ch; }
 nav.toc ol { margin: 0.4rem 0 0; columns: 2; column-gap: 2rem; }
@@ -120,7 +124,7 @@ nav.toc a:hover { text-decoration: underline; }
   <div class="eyebrow">telepatch / design note</div>
   <h1>Telepatch Execution Model</h1>
   <p class="lede">Roles and tasks are written as plain imperative Rust. Running them does nothing; it records a trace. The engine turns the trace into a per-host graph, merges what can be merged, and streams it into persistent shells over SSH, with a terminal stream per operation.</p>
-  <div class="meta"><span>status: proposal</span><span>tracing + postconditions + guards</span><span>2026-10-30</span></div>
+  <div class="meta"><span>status: contract</span><span>tracing + postconditions + guards</span><span>decided API 2026-11-05</span></div>
 </header>
 
 <nav class="toc" aria-label="Sections">
@@ -136,6 +140,7 @@ nav.toc a:hover { text-decoration: underline; }
     <li><a href="#cost">What it costs</a></li>
     <li><a href="#survey">What the Ansible repo does</a></li>
     <li><a href="#primitives">Initial primitives</a></li>
+    <li><a href="#decided">The decided API</a></li>
     <li><a href="#syntax">Reading like a script</a></li>
     <li><a href="#prepare">Prepare phase: fail early</a></li>
     <li><a href="#transactions">Roles as transactions</a></li>
@@ -314,7 +319,7 @@ echo "__tp_${nonce} ${id} {\"rc\":${rc},\"changed\":${changed}}"</code></pre>
 <p><code>Key</code> is a fine-grained effect address: <code>pkg:nginx</code>, <code>file:/etc/nginx/nginx.conf</code>, <code>svc:nginx</code>, <code>user:deploy</code>. Ops whose effects can't be enumerated (<code>shell</code>) declare <code>writes: *</code>, which makes them a barrier for free. The ordering edges between ops are derived from key overlap, so a user who writes <code>pkg(..)</code> then <code>svc(..).restart()</code> never has to state the dependency.</p>
 <p>Two distinctions matter later:</p>
 <ul>
-  <li>A <strong>postcondition</strong> is what an op guarantees once it has run. After <code>pkg(["nginx"]).installed()</code>, <code>pkg:nginx</code> is <code>Installed</code>. This is a contract, not a prediction.</li>
+  <li>A <strong>postcondition</strong> is what an op guarantees once it has run. After <code>pkg(["nginx"])</code>, <code>pkg:nginx</code> is <code>Installed</code>. This is a contract, not a prediction.</li>
   <li>An <strong>output</strong> is something you only know after execution: whether the op changed anything, its exit status, its stdout. Outputs are never awaited by the program. They feed <strong>guards</strong>, which the executor evaluates at run time.</li>
 </ul>
 </section>
@@ -347,15 +352,23 @@ echo "__tp_${nonce} ${id} {\"rc\":${rc},\"changed\":${changed}}"</code></pre>
 <section class="prose" id="example">
 <h2>Worked example</h2>
 <p>Two roles. Three places where the program asks about remote state are marked; only one of them syncs.</p>
-<pre><code><span class="c">#[role]</span>
-<span class="k">async fn</span> web(h: Host) -&gt; Result&lt;()&gt; {
+<pre><code><span class="c">#[derive(Template)]</span>
+<span class="c">#[template(path = "nginx.conf")]</span>
+<span class="k">struct</span> NginxConf { server_name: String, workers: u32 }
+
+<span class="c">#[role]</span>
+<span class="k">async fn</span> web(h: &amp;Host&lt;Vars&gt;) -&gt; Result&lt;(), TraceError&gt; {
     <span class="c">// (A) pre-existing state nothing in the playbook writes: this one syncs</span>
-    <span class="k">let</span> fresh = !h.fact(Fact::exists(<span class="w">"/etc/telepatch/.bootstrapped"</span>)).<span class="k">await</span>?;
+    <span class="k">let</span> fresh = !h.exists(<span class="w">"/etc/telepatch/.bootstrapped"</span>).<span class="k">await</span>;
     <span class="k">if</span> fresh {
-        h.shell(<span class="w">"useradd -m deploy"</span>).writes([Key::user(<span class="w">"deploy"</span>)]);
+        h.user(<span class="w">"deploy"</span>);
     }
-    h.pkg([<span class="w">"nginx"</span>, <span class="w">"certbot"</span>]).installed();
-    <span class="k">let</span> conf = h.file(<span class="w">"/etc/nginx/nginx.conf"</span>).content(tpl!(<span class="w">"nginx.conf"</span>, &amp;h.vars));
+    h.pkg([<span class="w">"nginx"</span>, <span class="w">"certbot"</span>]);
+    <span class="k">let</span> v = &amp;h.vars.web;
+    <span class="k">let</span> conf = h.file(<span class="w">"/etc/nginx/nginx.conf"</span>).content(NginxConf {
+        server_name: v.server_name.clone(),
+        workers: v.workers,
+    });
     <span class="c">// (B) output of an op: a guard, never awaited</span>
     h.svc(<span class="w">"nginx"</span>).restart().when(conf.changed());
     h.svc(<span class="w">"nginx"</span>).enabled();
@@ -363,15 +376,16 @@ echo "__tp_${nonce} ${id} {\"rc\":${rc},\"changed\":${changed}}"</code></pre>
 }
 
 <span class="c">#[role]</span>
-<span class="k">async fn</span> monitoring(h: Host) -&gt; Result&lt;()&gt; {
-    h.pkg([<span class="w">"prometheus-node-exporter"</span>]).installed();
+<span class="k">async fn</span> monitoring(h: &amp;Host&lt;Vars&gt;) -&gt; Result&lt;(), TraceError&gt; {
+    h.pkg([<span class="w">"prometheus-node-exporter"</span>]);
     h.svc(<span class="w">"prometheus-node-exporter"</span>).enabled();
     <span class="c">// (C) answered by the postcondition of web's pkg op; no round trip</span>
-    <span class="k">if</span> h.fact(Fact::pkg_installed(<span class="w">"nginx"</span>)).<span class="k">await</span>? == Installed {
+    <span class="k">if</span> h.pkg_installed(<span class="w">"nginx"</span>).<span class="k">await</span>.is_some() {
         h.file(<span class="w">"/etc/prometheus/targets/nginx.yml"</span>).content(NGINX_SCRAPE);
     }
     Ok(())
 }</code></pre>
+<p>The template is a struct the compiler checks (<a href="#d-templates">Templates</a>); the engine renders it in prepare, per host. The account is a <code>user</code> op, not a shell line.</p>
 <p>For one host, the trace and the graph the optimizer produces from it:</p>
 </section>
 
@@ -392,9 +406,9 @@ echo "__tp_${nonce} ${id} {\"rc\":${rc},\"changed\":${changed}}"</code></pre>
 
   <!-- chain nodes -->
   <rect x="150" y="76" width="96" height="48" rx="5" class="d-box"/>
-  <text x="198" y="96" text-anchor="middle" class="d-mono">shell</text>
-  <text x="198" y="111" text-anchor="middle" class="d-mono-sm">useradd</text>
-  <text x="198" y="140" text-anchor="middle" class="d-mono-sm">guard: fresh</text>
+  <text x="198" y="96" text-anchor="middle" class="d-mono">user</text>
+  <text x="198" y="111" text-anchor="middle" class="d-mono-sm">deploy</text>
+  <text x="198" y="140" text-anchor="middle" class="d-mono-sm">if fresh</text>
 
   <rect x="270" y="76" width="132" height="48" rx="5" class="d-box-accent"/>
   <text x="336" y="96" text-anchor="middle" class="d-mono">apt (merged)</text>
@@ -619,7 +633,7 @@ echo "__tp_${nonce} ${id} {\"rc\":${rc},\"changed\":${changed}}"</code></pre>
   </g>
 </svg>
 <figcaption class="caption">Counted by module key across <code>roles/</code>, <code>playbooks/</code> and <code>tools/</code>. Four galaxy roles (docker, golang, nvm, firewall) do substantial work that is not counted here and will need telepatch equivalents.</figcaption>
-</section>
+</figure>
 
 <section class="prose">
 <p>The histogram undersells how repetitive the repo is. Reading the shell tasks and the control flow, eight patterns account for nearly everything:</p>
@@ -630,45 +644,791 @@ echo "__tp_${nonce} ${id} {\"rc\":${rc},\"changed\":${changed}}"</code></pre>
   <tbody>
     <tr><td>Distro dispatch</td><td>20 includes, 10 flag vars</td><td><code>include_tasks: debian.yml when: debian_based|bool</code>, with <code>debian_based</code> computed in <code>group_vars</code> from <code>ansible_distribution</code>, plus Pop!_OS and Rocky overrides</td><td>A typed <code>os</code> fact and a <code>match</code>, or a per-family table on <code>pkg</code></td></tr>
     <tr><td>Per-user loops</td><td>12 includes</td><td><code>include_tasks: per_user.yml loop: admin_users</code>, then every task carries <code>become_user</code>, and <code>getent passwd</code> + <code>set_fact</code> to find the shell</td><td><code>for u in users { let s = h.as_user(u); … }</code>; the login shell is a fact of the user, not a task</td></tr>
-    <tr><td>Hand-rolled ensure</td><td>~25 shell pairs</td><td>"check if cargo-deb installed" (<code>register</code>, <code>changed_when: false</code>, <code>ignore_errors</code>) then "install cargo-deb" <code>when: rc != 0</code></td><td>One line: <code>sh!(..).unless("which cargo-deb")</code> or <code>.creates(path)</code></td></tr>
-    <tr><td>Version pinning</td><td>6 roles</td><td>rust_build, concourse, openbao, minio, cuda keyring: run <code>--version</code>, compare to a var, reinstall if different</td><td>A <code>bin_version</code> fact and the same ensure combinator</td></tr>
+    <tr><td>Hand-rolled ensure</td><td>~25 shell pairs</td><td>"check if cargo-deb installed" (<code>register</code>, <code>changed_when: false</code>, <code>ignore_errors</code>) then "install cargo-deb" <code>when: rc != 0</code></td><td>One line: a <code>pkg</code> with a non-distro source, <code>s.pkg(["cargo-deb"]).cargo()</code>, whose probe is the check</td></tr>
+    <tr><td>Version pinning</td><td>6 roles</td><td>rust_build, concourse, openbao, minio, cuda keyring: run <code>--version</code>, compare to a var, reinstall if different</td><td><code>.pin(v)</code> on the <code>pkg</code>; the source's probe compares the installed version</td></tr>
     <tr><td>Repo setup</td><td>5 roles</td><td>curl key, gpg --dearmor, write sources.list.d entry, <code>apt update</code> if changed</td><td>A <code>repo</code> primitive; one <code>apt update</code> per window</td></tr>
     <tr><td>Shell for a primitive</td><td>~12</td><td><code>shell: systemctl daemon-reload</code>, <code>mkdir -p</code>, <code>echo … &gt; file</code>, <code>sed -i</code> on sources.list</td><td><code>svc</code> and <code>file</code>; daemon-reload is implied when a unit file changes</td></tr>
-    <tr><td>Controller-side gather</td><td>~10</td><td><code>delegate_to: localhost</code> for <code>bao read</code>, <code>get_url</code>, <code>cat ~/.ssh/id_ed25519.pub</code>, <code>infocmp</code>; <code>vars_prompt</code> for passwords</td><td><code>secret</code>, <code>fetch</code>, <code>local</code>: all prepare-phase, all fail before apply</td></tr>
-    <tr><td>Handlers (Ansible's notify)</td><td>11 notifies</td><td>all of them systemd reload/restart, update-grub, udevadm, reboot</td><td>No handler concept. A guard on the restart op; identical guarded ops merge, so "run once" falls out of the optimizer</td></tr>
+    <tr><td>Controller-side gather</td><td>~10</td><td><code>delegate_to: localhost</code> for <code>bao read</code>, <code>get_url</code>, <code>cat ~/.ssh/id_ed25519.pub</code>, <code>infocmp</code>; <code>vars_prompt</code> for passwords</td><td><code>Secret</code> vars, <code>fetch</code>, <code>local_file</code> and <code>local</code>: all prepare-phase, all fail before apply</td></tr>
+    <tr><td>Handlers (Ansible's notify)</td><td>11 notifies</td><td>all of them systemd reload/restart, update-grub, udevadm, reboot</td><td>No handler concept. A guard on the restart: <code>h.svc(n).restart().when(conf.changed())</code>. Two restarts with the same spec merge and their guards are or-joined, so "run once" falls out of the optimizer (<a href="#d-triggers">Change triggers</a>)</td></tr>
   </tbody>
 </table>
 </div>
 <section class="prose">
-<p>Two things worth saying plainly. First, 17% of the repo is control flow that does nothing on a host: includes, flag variables, <code>set_fact</code> to parse stdout. In Rust that is a <code>match</code>, a <code>for</code> and a <code>.split(':')</code>. Second, most of the 73 shell tasks are not "things only shell can do." They are idempotency scaffolding Ansible forced because there is no module for <code>cargo install</code> or <code>rustup target add</code>. With a check combinator on the shell primitive they collapse to one line each, and <code>changed_when</code>, <code>failed_when</code> and <code>ignore_errors</code> (64 uses between them) mostly disappear because a check is a fact, not a task.</p>
+<p>Two things worth saying plainly. First, 17% of the repo is control flow that does nothing on a host: includes, flag variables, <code>set_fact</code> to parse stdout. In Rust that is a <code>match</code>, a <code>for</code> and a <code>.split(':')</code>. Second, most of the 73 shell tasks are not "things only shell can do." They are idempotency scaffolding Ansible forced because there is no module for <code>cargo install</code> or <code>rustup target add</code>. With a <code>pkg</code> source for each installer they collapse to one line each with no shell at all, and <code>changed_when</code>, <code>failed_when</code> and <code>ignore_errors</code> (64 uses between them) mostly disappear because a check is a fact, not a task.</p>
 </section>
 
 <section class="prose" id="primitives">
 <h2>Initial primitives</h2>
-<p>Sized to the corpus. Tier one covers roughly four fifths of the tasks; tier two covers the rest; everything else is <code>sh</code> with declared effects.</p>
+<p>Sized to the corpus. Tier one covers roughly four fifths of the tasks; tier two covers the rest; what no primitive covers is an <a href="#d-resource">author-defined resource</a>. <code>sh!</code> stays as the escape hatch, reported as a warning. Each row says what is <strong>built</strong> as of this commit and what is <strong>designed</strong>; the decided form of each is in <a href="#decided">The decided API</a>.</p>
 </section>
 <div class="table-wrap">
-<table>
-  <thead><tr><th>Primitive</th><th>Replaces</th><th>Shape</th><th>Effects / notes</th></tr></thead>
+<table id="primitives-table">
+  <thead><tr><th>Primitive</th><th>Replaces</th><th>Shape</th><th>Effects / notes</th><th>Status</th></tr></thead>
   <tbody>
-    <tr><td><code>pkg</code></td><td>apt, dnf, yum, pacman, build-dep, pip, <code>cargo install</code>, rustup, vendor installer scripts, mise tools</td><td>One method per source on the host handle, all producing the one <code>PkgSpec</code> type: <code>h.pkg([..])</code> (<code>Distro</code>, the default), <code>h.pip([..])</code>, <code>h.cargo([..])</code>, <code>h.rustup(toolchain)</code>, <code>h.script(name, ScriptSpec)</code>, <code>h.mise([..])</code>. <code>wanted</code> is <code>Present</code> (default), <code>.pin(v)</code> or <code>.latest()</code>; <code>.absent()</code> keeps the inverse's place in the shape. Every source answers five questions: what is installed (its probe), what is latest (its source of truth), how to install, how to update, and, for non-distro sources, the binary or listing that proves presence. "Latest" is resolved on the host by the source's own command, never by the controller</td><td>distro writes <code>pkg:name</code> and pip writes <code>pkg:pip:name</code>; both merge across roles, with one cache update per window; the other sources write <code>*</code> unless narrowed and post <code>pkg:source:user:name → Installed</code>. <code>mise</code> is the system layer, root only (<code>as_user("bot")</code> is a trace error): tools install into <code>/usr/local/share/mise</code> with entries in <code>/etc/mise/config.toml</code> (<code>"latest"</code> for present and latest, the version for a pin; the op keeps every other entry), keys <code>pkg:mise:root:name</code>, plus <code>file:/etc/mise/config.toml → Exists(true)</code>; users reach the tools through <code>/usr/local/share/mise/shims</code> on <code>PATH</code></td></tr>
-    <tr><td><code>repo</code></td><td>apt_key, apt_repository, keyring + sources.list dance, yum .repo template</td><td><code>h.repo("hashicorp").key_url(..).line(..)</code></td><td>writes <code>repo:name</code>; forces a cache update before the next <code>pkg</code> in the window</td></tr>
-    <tr><td><code>file</code></td><td>file, template, copy, lineinfile, replace</td><td><code>h.file(p).content(..)</code> / <code>.from(fetched)</code> / <code>.dir()</code> / <code>.absent()</code> / <code>.line(..)</code> / <code>.line_re(re, line)</code> / <code>.mode(0o644).owner(u)</code> / <code>.only_if_absent()</code> / <code>.validate("visudo -cf %s")</code></td><td>writes <code>file:p</code>; output <code>changed</code>; captures previous content for rollback. <code>.validate(cmd)</code> applies to content and line edits: the candidate is built in a temp file beside the target, given its final mode and owner, checked with <code>%s</code> replaced by the temp path, and moved over the target only if the check exits 0; otherwise the op fails with the validator's <code>rc</code>, the target is untouched and the temp is removed. A <code>cmd</code> without <code>%s</code> is a trace error</td></tr>
-    <tr><td><code>sh</code></td><td>shell, command</td><td><code>sh!(h, "…{var}…")</code> with <code>.unless(check)</code> / <code>.creates(path)</code> / <code>.changed_if(re)</code> / <code>.writes([..])</code> / <code>.undo("…")</code></td><td>writes <code>*</code> unless narrowed; <code>{var}</code> is shell-quoted on interpolation; PTY by default</td></tr>
-    <tr><td><code>svc</code></td><td>systemd, the 8 shell systemctl calls, daemon-reload handlers</td><td><code>h.svc(n).enabled()</code> / <code>.started()</code>; <code>.restart()</code> and <code>.masked()</code> are not built</td><td>at least one want, else a trace error (<code>svc(n): nothing wanted</code>); root only (<code>as_user("bob")</code> is a trace error). <code>n</code> goes to <code>systemctl</code> as given; the key is <code>svc:n</code> with <code>.service</code> appended when <code>n</code> has no unit suffix (<code>docker</code> and <code>docker.service</code> are one key); posts <code>svc:n → Exists(true)</code>. <code>.enabled()</code> is <code>systemctl is-enabled</code> saying <code>enabled</code>, <code>enabled-runtime</code>, <code>static</code> or <code>alias</code>, else <code>systemctl enable</code> (a masked or missing unit fails with systemctl's rc and message); <code>.started()</code> is <code>is-active</code>, else <code>start</code>. daemon-reload implied: on a booted host, before a <code>start</code>, <code>systemctl daemon-reload</code> runs when <code>systemctl show -p NeedDaemonReload --value n</code> says <code>yes</code> (systemd's own flag, so it is right whoever changed the unit file; no window tracking). No optimizer rule: distro <code>pkg</code> ops may merge across an svc op. Without a running systemd (<code>/run/systemd/system</code> absent) and with <code>systemctl</code> present, <code>enabled</code> is applied offline (a unit-file operation; plain <code>systemctl enable</code> works there, no <code>--root=/</code>) and <code>started</code> is skipped; with no <code>systemctl</code> the whole op is skipped. A skip is rc 0, <code>skipped</code>, never <code>changed</code>. The script decides at run time from the host's real state. Prepare (gathered, never asserted) reports <code>svc n.service: will enable, will start</code>, <code>will enable; no running systemd: start skipped</code> or <code>no systemctl: skipped</code>, and nothing for a settled unit; the probe runs before the window, so when a package, <code>sh</code> or file op comes before the window's first svc op a missing <code>systemctl</code> reads <code>no systemctl yet: decided at run time, after this window's earlier ops</code> (a container build that installs systemd with the package) and a unit <code>is-enabled</code> calls <code>not-found</code> reads <code>unit not found yet: decided at run time, after this window's earlier ops</code> (the package brings the unit)</td></tr>
-    <tr><td><code>user</code></td><td>user, authorized_key</td><td><code>h.user(n).shell(..).groups_add([..]).password_hash(..)</code></td><td>present only, root only; <code>useradd -m</code> with the shell and groups, on an existing account <code>.shell</code> is enforced (<code>usermod -s</code>) and <code>groups_add</code> appends (<code>usermod -aG</code>), never removes; <code>.password_hash(h)</code> is applied only when the op creates the account (empty: not applied, the account stays locked), by <code>chpasswd -e</code> on stdin so it is never in a process argv, and is shown as <code>&lt;hash&gt;</code> in the plan, report, log and events; reads <code>group:g</code> for each <code>groups_add</code> group, writes <code>user:n</code>, posts <code>user:n → Exists(true)</code>; output <code>created</code> (the repo's "set default password only when new"); prepare reports <code>user n: will create</code>, <code>groups +g</code>, <code>shell -&gt; /bin/bash</code>; <code>authorized_key</code> is not built</td></tr>
-    <tr><td><code>repo</code></td><td>apt_repository + apt_key, yum_repository, get_url of a vendor <code>.repo</code></td><td><code>h.repo(n).apt(AptRepo { uris, suites, components, key_url })</code> / <code>.dnf_url(url)</code> / <code>.dnf(DnfRepo { name, baseurl, gpgkey })</code></td><td>root only; the role picks per <code>h.os</code> (<code>match</code>), the builder for the other family is a trace error. apt: a deb822 <code>/etc/apt/sources.list.d/n.sources</code> (<code>Types: deb</code>, <code>URIs</code>, <code>Suites</code> from <code>h.os.codename()</code>, <code>Components</code>, <code>Architectures</code> from <code>dpkg --print-architecture</code> on the host, <code>Signed-By: /etc/apt/keyrings/n.asc</code>) and the key fetched with <code>curl -fsSL</code> to <code>/etc/apt/keyrings/n.asc</code> (0644, ASCII-armored, no <code>gpg --dearmor</code>). dnf: <code>/etc/yum.repos.d/n.repo</code>, fetched by <code>.dnf_url</code> or written by <code>.dnf</code>. Content known on the host (apt source, <code>.dnf</code> body) is compared byte for byte and rewritten on a difference; fetched files (key, <code>.dnf_url</code> file) are fetched only when absent, so a settled host makes no network call (a rotated key is not refreshed). No <code>curl</code>: fails with <code>telepatch: repo n: curl not found</code>; the role installs <code>curl</code> and <code>ca-certificates</code> first. Writes <code>repo:n</code> and each <code>file:</code> path; the <code>/etc/apt/</code> paths make the next apt <code>pkg</code> op run <code>apt-get update</code>; a <code>repo:</code> write conflicts with every distro <code>pkg</code> op, so none is hoisted across it; output <code>changed</code>; prepare reports <code>repo n: will add</code></td></tr>
-    <tr><td><code>group</code></td><td>group</td><td><code>h.group(n)</code> / <code>.system()</code></td><td>present only (no removal, no gid), root only (<code>as_user("bob")</code> is a trace error); <code>getent group n</code>, then <code>groupadd</code> (<code>-r</code> for a system group) only when absent; writes <code>group:n</code>, posts <code>group:n → Exists(true)</code>; output <code>created</code>; prepare reports <code>group n: will create</code></td></tr>
-    <tr><td><code>as_user</code></td><td>become_user + <code>getent passwd</code> + <code>$SHELL -lc</code></td><td><code>let s = h.as_user(u);</code> then any primitive on <code>s</code></td><td>ops go to a persistent login shell for <code>u</code>, opened once per host per run, after a <code>getent</code> check in the window that first addresses <code>u</code>; an account the run creates (<code>h.user(u)</code>) ends the window before the first op or fact read addressed to <code>u</code>, so that check runs after the account exists; the user's login shell and <code>~/.cargo/env</code> are in effect; the user needs no SSH access</td></tr>
-    <tr><td><code>secret</code></td><td>vars_prompt, <code>bao read</code> via delegate_to</td><td><code>let k = secret("infra/concourse_ci", "worker_key")</code></td><td>prepare phase; missing secret fails the run before apply; value never appears in the stream log</td></tr>
-    <tr><td><code>fetch</code></td><td>get_url, uri, local_action get_url, docker cp tricks</td><td><code>let f = h.fetch("https://…").sha256("…")</code> then <code>h.file(p).from(f)</code></td><td>prepare phase, on the host: downloads to a staging dir and verifies there; cached under <code>/var/cache/telepatch/</code> by checksum; <code>.via_controller()</code> for air-gapped hosts or controller-local sources</td></tr>
-    <tr><td><code>local</code></td><td>local_action shell, delegate_to localhost</td><td><code>let key = local("cat ~/.ssh/id_ed25519.pub")</code></td><td>prepare phase; a fact resolved on the controller</td></tr>
+    <tr><td><code>pkg</code></td><td>apt, dnf, yum, pacman, build-dep, pip, <code>cargo install</code>, rustup, vendor installer scripts and binary releases, mise tools, a vendor <code>.deb</code> or <code>.rpm</code></td><td>One op, <code>h.pkg([..])</code>, all producing the one <code>PkgSpec</code> type. With no chained call the source is the distro's manager; a chained call names another: <code>.yum()</code>, <code>.pip()</code>, <code>.cargo()</code> (with <code>.locked()</code>), <code>.mise()</code>, <code>.rustup()</code> (with <code>.targets(..)</code>, <code>.components(..)</code>, <code>.set_default()</code>), <code>.installer_script(InstallerScript)</code>, <code>.binary_release(BinaryRelease)</code>, and <code>.from(fetched)</code> for a vendor package file. <code>wanted</code> is present (default), <code>.pin(v)</code>, <code>.latest()</code> or <code>.absent()</code> (<code>.purge()</code> on apt); <code>.build_dep()</code> on apt. Every source answers five questions: what is installed (its probe), what is latest (its source of truth), how to install, how to update, and, for non-distro sources, the binary or listing that proves presence. "Latest" is resolved on the host by the source's own command, never by the controller (<a href="#d-pkg">One pkg, every source chained</a>)</td><td>distro writes <code>pkg:name</code> and pip writes <code>pkg:pip:name</code>; both merge across roles, with one cache update per window; the other sources write <code>*</code> unless narrowed and post <code>pkg:source:user:name → Installed</code>. Two rustup ops for one toolchain and user merge into one; a locked cargo op never merges with an unlocked one. A removal never merges with an install. <code>mise</code> is the system layer, root only (<code>as_user("bot")</code> is a trace error): tools install into <code>/usr/local/share/mise</code> with entries in <code>/etc/mise/config.toml</code> (<code>"latest"</code> for present and latest, the version for a pin; the op keeps every other entry), keys <code>pkg:mise:root:name</code>, plus <code>file:/etc/mise/config.toml → Exists(true)</code>; users reach the tools through <code>/usr/local/share/mise/shims</code> on <code>PATH</code>. A binary release with no checksum source is the policy error <code>Unverified</code></td><td class="status"><strong>built</strong>: the distro manager (present, build-dep) and the pip, cargo, rustup, mise and installer-script sources with present, pin and latest, each through its own host method. <strong>designed</strong>: the chained form, which replaces those methods; <code>.binary_release</code>; pin, latest and absent on the distro manager; <code>.from(fetched)</code>; <code>.locked()</code>; one rustup op per toolchain</td></tr>
+    <tr><td><code>repo</code></td><td>apt_repository + apt_key, yum_repository, get_url of a vendor <code>.repo</code></td><td><code>h.repo(n).apt(AptRepo { uris, suites, components, key_url })</code> / <code>.dnf_url(url)</code> / <code>.dnf(DnfRepo { name, baseurl, gpgkey })</code></td><td>root only; the role picks per <code>h.os</code> (<code>match</code>), the builder for the other family is a trace error. apt: a deb822 <code>/etc/apt/sources.list.d/n.sources</code> (<code>Types: deb</code>, <code>URIs</code>, <code>Suites</code> from <code>h.os.codename()</code>, <code>Components</code>, <code>Architectures</code> from <code>dpkg --print-architecture</code> on the host, <code>Signed-By: /etc/apt/keyrings/n.asc</code>) and the key fetched with <code>curl -fsSL</code> to <code>/etc/apt/keyrings/n.asc</code> (0644, ASCII-armored, no <code>gpg --dearmor</code>). dnf: <code>/etc/yum.repos.d/n.repo</code>, fetched by <code>.dnf_url</code> or written by <code>.dnf</code>. Content known on the host (apt source, <code>.dnf</code> body) is compared byte for byte and rewritten on a difference; fetched files (key, <code>.dnf_url</code> file) are fetched only when absent, so a settled host makes no network call (a rotated key is not refreshed). No <code>curl</code>: fails with <code>telepatch: repo n: curl not found</code>; the role installs <code>curl</code> and <code>ca-certificates</code> first. Writes <code>repo:n</code> and each <code>file:</code> path; the <code>/etc/apt/</code> paths make the next apt <code>pkg</code> op run <code>apt-get update</code>; a <code>repo:</code> write conflicts with every distro <code>pkg</code> op, so none is hoisted across it; output <code>changed</code>; prepare reports <code>repo n: will add</code></td><td class="status"><strong>built</strong></td></tr>
+    <tr><td><code>file</code></td><td>file, template, copy, lineinfile, replace, unarchive</td><td><code>h.file(p).content(..)</code> (bytes, or a template value) / <code>.from(fetched)</code> / <code>.from(local_file(..))</code> / <code>.from(local_dir(..))</code> / <code>.unpack(fetched).strip(n)</code> / <code>.dir()</code> / <code>.absent()</code> / <code>.line(..)</code> / <code>.line_re(re, line)</code> / <code>.mode(0o644).owner(u)</code> / <code>.only_if_absent()</code> / <code>.validate("visudo -cf %s")</code></td><td>writes <code>file:p</code>; output <code>changed</code>; captures previous content for rollback. <code>.validate(cmd)</code> applies to content and line edits: the candidate is built in a temp file beside the target, given its final mode and owner, checked with <code>%s</code> replaced by the temp path, and moved over the target only if the check exits 0; otherwise the op fails with the validator's <code>rc</code>, the target is untouched and the temp is removed. A <code>cmd</code> without <code>%s</code> is a trace error. A template is rendered in prepare, per host; a file rendered from a <code>Secret</code> is secret. Any form under <code>/etc/systemd/system/</code> is the policy error <code>UnitViaFile</code>: units go through <code>h.unit</code></td><td class="status"><strong>built</strong>: content as bytes, line, line_re, dir, absent, mode, owner, validate. <strong>designed</strong>: template content, <code>.from(..)</code>, <code>.unpack(..)</code>, <code>.only_if_absent()</code>, <code>UnitViaFile</code></td></tr>
+    <tr><td><code>sh</code></td><td>shell, command</td><td><code>sh!(h, "…{var}…", unless = "…", creates = "…", changed_if = "…")</code>, then <code>.writes([..])</code> / <code>.undo("…")</code> on the handle, under a <code>// HACK(&lt;primitive&gt;): what is missing</code> comment</td><td>the escape hatch, not a way to write a role: every <code>sh!</code> in a role body is reported as a warning (<a href="#d-standard">No shell in a role body</a>); writes <code>*</code> unless narrowed; <code>{var}</code> is shell-quoted on interpolation; PTY by default</td><td class="status"><strong>built</strong>: <code>unless</code>, <code>creates</code>, <code>changed_if</code>, <code>.writes</code>, quoting. <strong>designed</strong>: the warning, <code>.undo</code>, the PTY</td></tr>
+    <tr><td><code>svc</code></td><td>systemd, the 8 shell systemctl calls, Ansible's restart and reload handlers</td><td><code>h.svc(n)</code> with <code>.enabled()</code> / <code>.disabled()</code> / <code>.masked()</code> and <code>.started()</code> / <code>.stopped()</code>; <code>.restart()</code> / <code>.reload()</code> with a guard, <code>.when(g)</code> or <code>.restart_on(&amp;op)</code> (<a href="#d-svc-state">Service state</a>, <a href="#d-restart-guard">Restart and reload carry a guard</a>)</td><td>at least one want, else a trace error (<code>svc(n): nothing wanted</code>); enabled, disabled and masked are exclusive, and started and stopped; root only (<code>as_user("bob")</code> is a trace error). <code>n</code> goes to <code>systemctl</code> as given; the key is <code>svc:n</code> with <code>.service</code> appended when <code>n</code> has no unit suffix (<code>docker</code> and <code>docker.service</code> are one key; a template instance keeps its name); posts <code>svc:n → Exists(true)</code>. <code>.enabled()</code> is <code>systemctl is-enabled</code> saying <code>enabled</code>, <code>enabled-runtime</code>, <code>static</code> or <code>alias</code>, else <code>systemctl enable</code> (a masked or missing unit fails with systemctl's rc and message); <code>.started()</code> is <code>is-active</code>, else <code>start</code>. daemon-reload: a unit written by <code>h.unit</code> forces one <code>daemon-reload</code> before the next <code>svc</code> op in the window; for a unit the run did not write, on a booted host, before a <code>start</code>, <code>systemctl daemon-reload</code> runs when <code>systemctl show -p NeedDaemonReload --value n</code> says <code>yes</code> (systemd's own flag). No optimizer rule for enable and start: distro <code>pkg</code> ops may merge across them. Restart and reload are guarded actions: unguarded is the policy error <code>UnguardedRestart</code>; guarded restarts of one unit merge across roles with their guards or-joined, one restart per run; a restart of a unit the same run starts is dropped. Without a running systemd (<code>/run/systemd/system</code> absent) and with <code>systemctl</code> present, <code>enabled</code> is applied offline (a unit-file operation; plain <code>systemctl enable</code> works there, no <code>--root=/</code>) and <code>started</code> is skipped; with no <code>systemctl</code> the whole op is skipped. A skip is rc 0, <code>skipped</code>, never <code>changed</code>. The script decides at run time from the host's real state. Prepare (gathered, never asserted) reports <code>svc n.service: will enable, will start</code>, <code>will enable; no running systemd: start skipped</code> or <code>no systemctl: skipped</code>, and nothing for a settled unit; the probe runs before the window, so when a package, <code>sh</code> or file op comes before the window's first svc op a missing <code>systemctl</code> reads <code>no systemctl yet: decided at run time, after this window's earlier ops</code> (a container build that installs systemd with the package) and a unit <code>is-enabled</code> calls <code>not-found</code> reads <code>unit not found yet: decided at run time, after this window's earlier ops</code> (the package brings the unit)</td><td class="status"><strong>built</strong>: <code>.enabled()</code>, <code>.started()</code>, the offline and skip paths, <code>NeedDaemonReload</code>. <strong>designed</strong>: <code>.disabled()</code>, <code>.masked()</code>, <code>.stopped()</code>, <code>.restart()</code>, <code>.reload()</code>, <code>.restart_on(..)</code>, the one <code>systemctl show</code> probe</td></tr>
+    <tr><td><code>unit</code></td><td>template or copy into <code>/etc/systemd/system</code>, then a daemon-reload handler</td><td><code>h.unit(n).content(..).mode(..)</code> / <code>.drop_in(name, text)</code> / <code>.absent()</code> (<a href="#d-unit">Unit files and drop-ins</a>)</td><td>writes <code>/etc/systemd/system/&lt;unit&gt;</code> or <code>&lt;unit&gt;.d/&lt;name&gt;.conf</code>, checked with <code>systemd-analyze verify</code> before it moves into place; a changed unit forces exactly one <code>daemon-reload</code> before the next <code>svc</code> op in the window; root only</td><td class="status"><strong>designed</strong></td></tr>
+    <tr><td><code>user</code></td><td>user, authorized_key</td><td><code>h.user(n).shell(..).groups_add([..]).password_hash(..)</code></td><td>present only, root only; <code>useradd -m</code> with the shell and groups, on an existing account <code>.shell</code> is enforced (<code>usermod -s</code>) and <code>groups_add</code> appends (<code>usermod -aG</code>), never removes; <code>.password_hash(h)</code> is applied only when the op creates the account (empty: not applied, the account stays locked), by <code>chpasswd -e</code> on stdin so it is never in a process argv, and is shown as <code>&lt;hash&gt;</code> in the plan, report, log and events; reads <code>group:g</code> for each <code>groups_add</code> group, writes <code>user:n</code>, posts <code>user:n → Exists(true)</code>; output <code>created</code> (the repo's "set default password only when new"); prepare reports <code>user n: will create</code>, <code>groups +g</code>, <code>shell -&gt; /bin/bash</code>; an authorized key is a <code>file</code> line from <code>local_file(..)</code> (<a href="#d-local">Controller-side files and commands</a>)</td><td class="status"><strong>built</strong>: the op as described, with the hash as a string. <strong>designed</strong>: <code>.password_hash</code> taking a <code>Secret</code></td></tr>
+    <tr><td><code>group</code></td><td>group</td><td><code>h.group(n)</code> / <code>.system()</code></td><td>present only (no removal, no gid), root only (<code>as_user("bob")</code> is a trace error); <code>getent group n</code>, then <code>groupadd</code> (<code>-r</code> for a system group) only when absent; writes <code>group:n</code>, posts <code>group:n → Exists(true)</code>; output <code>created</code>; prepare reports <code>group n: will create</code></td><td class="status"><strong>built</strong></td></tr>
+    <tr><td><code>as_user</code></td><td>become_user + <code>getent passwd</code> + <code>$SHELL -lc</code></td><td><code>let s = h.as_user(u);</code> then any primitive on <code>s</code></td><td>ops go to a persistent login shell for <code>u</code>, opened once per host per run, after a <code>getent</code> check in the window that first addresses <code>u</code>; an account the run creates (<code>h.user(u)</code>) ends the window before the first op or fact read addressed to <code>u</code>, so that check runs after the account exists; the user's login shell and <code>~/.cargo/env</code> are in effect; the user needs no SSH access. <code>s.svc(..)</code> stays a trace error (per-user units are held)</td><td class="status"><strong>built</strong></td></tr>
+    <tr><td><code>Secret</code> vars</td><td>vars_prompt, <code>bao read</code> via delegate_to</td><td>a <code>Secret</code> field in the role's vars struct; the vars file sets it by reference, <code>{ bao = "kv/infra/telegraf", field = "token" }</code>, <code>{ env = ".." }</code>, <code>{ file = ".." }</code>, <code>{ prompt = ".." }</code>, or by a literal in a file that is not committed; the playbook binary picks the store, <code>.secrets(telepatch_openbao::backend())</code> (<a href="#d-secrets">Secrets</a>, <a href="#d-openbao-crate">The telepatch-openbao crate</a>)</td><td>a role never names a store or a path; prepare phase, one read per path; a missing secret ends the run before any host changes, naming the var and the role; the value never appears in the trace, the plan, the log or the report; reading only</td><td class="status"><strong>designed</strong></td></tr>
+    <tr><td><code>fetch</code></td><td>get_url, uri, unarchive, local_action get_url, docker cp tricks</td><td><code>let f = h.fetch("https://…").sha256(sum)</code> then <code>h.file(p).from(f)</code> or <code>h.file(dir).unpack(f).strip(1)</code> (<a href="#d-fetch">Fetch and unpack</a>)</td><td>a prepare-phase value, not an op; on the host: downloads to a staging dir and verifies there; cached under <code>/var/cache/telepatch/</code> by checksum; no checksum is the policy error <code>Unverified</code>; <code>.via_controller()</code> for air-gapped hosts; software with a binary and a version is a <code>pkg</code>, not a fetch</td><td class="status"><strong>designed</strong></td></tr>
+    <tr><td><code>local</code></td><td>local_action shell, delegate_to localhost, <code>copy</code> from the controller</td><td><code>local_file(path)</code> and <code>local_dir(path)</code>, as a source for <code>.from(..)</code> or as a value; <code>local(["infocmp", "-x", "xterm-ghostty"])</code> for a command's output (<a href="#d-local">Controller-side files and commands</a>)</td><td>prepare phase; read on the controller, compared with the host's copy by checksum, streamed only where they differ; <code>local</code> takes an argv and runs no shell; a missing file or a failed command ends the run before any host changes</td><td class="status"><strong>designed</strong></td></tr>
+    <tr><td><code>git</code></td><td>git, <code>git clone</code> in shell</td><td><code>h.git(url).depth(1).rev(r).into(path)</code>, or <code>.latest()</code> to follow the branch (<a href="#d-git">Git checkout</a>)</td><td>writes <code>file:path</code>; probe <code>git -C &lt;path&gt; rev-parse HEAD</code> and the remote URL; no <code>.rev</code> leaves an existing checkout of the same remote alone; a different remote or a dirty tree blocks the host in prepare; inverse removes the checkout if this run created it, otherwise restores the previous revision</td><td class="status"><strong>designed</strong></td></tr>
+    <tr><td><code>resource</code></td><td>whatever no primitive covers</td><td><code>h.resource(T)</code> for a type with <code>impl Resource</code>: <code>key</code>, <code>probe</code>, <code>plan</code>, <code>apply</code>, optional <code>inverse</code> (<a href="#d-resource">Author-defined resources</a>)</td><td>the shell lives inside the resource, quoted by <code>cmd!</code>; the probe runs in prepare; no inverse counts as irreversible; resources never merge</td><td class="status"><strong>designed</strong></td></tr>
+    <tr><td><code>wait_for</code></td><td>wait_for, until loops in shell</td><td><code>h.wait_for(Port::tcp(5432)).timeout(60 * SEC)</code>; a path or a unit reaching active (<a href="#d-run-controls">Run controls</a>)</td><td>an op with no change of its own; fails its role when the deadline passes</td><td class="status"><strong>designed</strong></td></tr>
+    <tr><td><code>reboot</code></td><td>reboot, the update-grub and reboot handlers</td><td><code>.needs_reboot()</code> on an op in a role; <code>h.reboot().if_pending()</code> in the playbook (<a href="#d-reboot">Reboot</a>)</td><td>a role marks, the playbook places the barrier; any number of marks cost one reboot; the mark lives under <code>/run</code>; <code>--reboot auto|never</code> for what is pending at the end</td><td class="status"><strong>designed</strong></td></tr>
   </tbody>
 </table>
 </div>
 <section class="prose">
-<p>Tier two, each used once or twice in the corpus: <code>git</code> (<code>h.git(url).depth(1).into(path)</code>, optionally <code>.rev(r)</code>; writes <code>file:path</code>; postcondition that the checkout exists; inverse removes it if this run created it, otherwise restores the previous rev), <code>mount</code> (fstab line plus <code>mount -a</code>), <code>unarchive</code>, <code>firewall</code>, <code>reboot</code>. Facts, as distinct from ops: <code>os</code> (family, distro, version), <code>user_info(u)</code> (home, shell, exists), <code>exists(p)</code>, <code>stat(p)</code>, <code>pkg_installed(n)</code>, <code>bin_version(cmd)</code>, and the general <code>check(cmd)</code> that returns rc and stdout.</p>
-<p>The four galaxy roles are the real porting cost. <code>geerlingguy.docker</code> is repo + pkg + svc + user groups, maybe 20 lines. <code>gantsign.golang</code> and <code>stephdewit.nvm</code> are fetch + unarchive + profile.d file. <code>geerlingguy.firewall</code> is a template and a service. None of them need anything outside tier one plus <code>unarchive</code>.</p>
+<p>Every op takes the same handle methods: <code>.when(g)</code> and <code>.at_end()</code> (<a href="#d-triggers">Change triggers</a>), <code>.allow(Policy, reason)</code> (<a href="#d-policy">Policy errors</a>), <code>.retry(n)</code> and <code>.timeout(d)</code> (<a href="#d-run-controls">Run controls</a>), <code>.allow_fail()</code>, <code>.needs_reboot()</code> (<a href="#d-reboot">Reboot</a>). Of these only <code>.when</code> (traced and planned, refused by the executor) and <code>.allow_fail()</code> are built.</p>
+<p>Facts, as distinct from ops: <code>os</code> (family, distro, version, codename), <code>exists(p)</code>, <code>bin_exists(cmd)</code> and <code>bin_version(cmd)</code> are built; <code>user_info(u)</code> (home, shell, exists), <code>stat(p)</code>, <code>pkg_installed(n)</code>, the general <code>check(cmd)</code> that returns rc and stdout, and <code>h.assert(..)</code> are designed (<a href="#d-facts">Facts and assertions</a>). Of the old tier two, <code>git</code> and <code>reboot</code> have rows above, <code>unarchive</code> is <code>h.file(p).unpack(fetched)</code>, and <code>mount</code> and <code>firewall</code> are among the proposals nobody has ruled on (<a href="#held">Held, and out</a>).</p>
+<p>The four galaxy roles are the real porting cost. <code>geerlingguy.docker</code> is repo + pkg + svc + user groups, maybe 20 lines. <code>gantsign.golang</code> is a <code>pkg</code> with a binary-release source, and <code>stephdewit.nvm</code> is a <code>mise</code> tool. <code>geerlingguy.firewall</code> needs the firewall proposal, which is unruled.</p>
+</section>
+
+<section class="prose" id="decided">
+<h2>The decided API</h2>
+<p>The shapes settled in the 2026-11-05 design review, one entry each. This section is the contract: where an earlier section of this note and an entry here disagree, the entry wins. Each entry says what is <strong>built</strong> as of this commit and what is <strong>designed</strong>. What the review did not decide, and what it held back, is in one place at the end, <a href="#held">Held, and out</a>; the forms it replaced are in <a href="#removed">Removed</a>.</p>
+</section>
+
+<section class="prose">
+<p class="eyebrow group">Rules</p>
+</section>
+
+<section class="prose" id="d-standard">
+<h3>No shell in a role body</h3>
+<p>A role body contains no shell strings. A need that only shell can meet is a missing primitive.</p>
+<p class="status">Status: <strong>designed</strong>: today <code>sh!</code> compiles without a warning</p>
+<pre><code><span class="c">// HACK(&lt;primitive&gt;): what is missing</span>
+sh!(h, "...");</code></pre>
+<ul>
+  <li><code>sh!</code> in a role body is reported as a warning. It does not fail the gate.</li>
+  <li>The <code>HACK(&lt;primitive&gt;)</code> comment names the primitive that would replace it.</li>
+</ul>
+</section>
+
+<section class="prose" id="d-policy">
+<h3>Policy errors</h3>
+<p>Some trace errors mean the thing cannot work. Others mean it would work and the project forbids it. The second kind has a name, and one way to permit it.</p>
+<p class="status">Status: <strong>designed</strong>: the trace error with its role chain and the <code>file:line</code> of the call, <code>.allow(Policy, reason)</code>, the policy errors <code>UnitViaFile</code>, <code>UnguardedRestart</code> and <code>Unverified</code>, allowances in the plan and the run report; <code>.force()</code> and <code>--allow-destructive</code> are a rule with nothing to apply to (see <a href="#held">Held, and out</a>)</p>
+<div class="eyebrow">permitting one op</div>
+<pre><code>h.file("/etc/systemd/system/legacy.service")
+    .content(include_str!("../templates/legacy.service"))
+    .allow(Policy::UnitViaFile, "vendor ships this unit and rewrites it on upgrade");</code></pre>
+<div class="eyebrow">without the allowance</div>
+<pre><code>trace error: file /etc/systemd/system/legacy.service: unit files go through h.unit (policy: unit-via-file)
+  in role vendor_agent, src/roles/vendor_agent.rs:41
+  to permit: .allow(Policy::UnitViaFile, "&lt;reason&gt;")</code></pre>
+<div class="eyebrow">a destructive op needs the operator too</div>
+<pre><code>$ tp-basic run storage --host bot@nas --allow-destructive</code></pre>
+<div class="eyebrow">plan</div>
+<pre><code>== ws1 [prepare] file /etc/systemd/system/legacy.service: will create; allowed unit-via-file: vendor ships this unit and rewrites it on upgrade ==</code></pre>
+<ul>
+  <li>A hard error cannot be permitted. A policy error can, with <code>.allow(Policy::Name, "reason")</code> on the op that trips it.</li>
+  <li>The reason is required. The plan and the report list every allowance with its reason.</li>
+  <li>The error message prints the policy's name and the call that permits it.</li>
+  <li>Policies: <code>UnitViaFile</code>, <code>UnguardedRestart</code>, <code>Unverified</code>.</li>
+  <li>A destructive op takes two keys. The author writes <code>.force()</code> on the op in the role. The operator passes <code>--allow-destructive</code>. Without the flag the host is blocked in prepare, and the plan lists the destructive ops.</li>
+</ul>
+</section>
+
+<section class="prose" id="d-resource">
+<h3>Author-defined resources</h3>
+<p>When no primitive fits, the author writes a typed resource once. The role then calls it like any other op.</p>
+<p class="status">Status: <strong>designed</strong></p>
+<div class="eyebrow">the resource</div>
+<pre><code><span class="c">/// A terminfo entry compiled into the system database.</span>
+pub struct Terminfo {
+    pub name: String,
+    pub source: String,
+}
+
+impl Resource for Terminfo {
+    const KIND: &amp;'static str = "terminfo";
+
+    fn key(&amp;self) -&gt; Key {
+        Key::new(Self::KIND, &amp;self.name)
+    }
+    fn probe(&amp;self) -&gt; Probe {
+        Probe::stdout(cmd!("infocmp -x {}", self.name)).missing_is_none()
+    }
+    fn plan(&amp;self, now: &amp;Probed) -&gt; Change {
+        match now.stdout() {
+            Some(text) if text == self.source =&gt; Change::None,
+            Some(_) =&gt; Change::will("replace"),
+            None =&gt; Change::will("compile"),
+        }
+    }
+    fn apply(&amp;self) -&gt; Script {
+        cmd!("tic -x -").stdin(&amp;self.source)
+    }
+}</code></pre>
+<div class="eyebrow">in the role</div>
+<pre><code>h.resource(Terminfo {
+    name: "xterm-ghostty".into(),
+    source: include_str!("../files/xterm-ghostty.terminfo").into(),
+});</code></pre>
+<div class="eyebrow">plan</div>
+<pre><code>== ws1 [prepare] terminfo xterm-ghostty: will compile ==</code></pre>
+<ul>
+  <li>Four parts: a key for ordering and merging, a probe that runs in prepare, a plan that turns the probe into a prepare line, and an apply.</li>
+  <li>An optional <code>inverse</code> puts the resource in the rollback coverage. Without one the plan counts it as irreversible.</li>
+  <li>The shell lives inside the resource, once, where it is typed, quoted by <code>cmd!</code> and unit-tested against recorded probes.</li>
+  <li>The trait is public. A playbook crate defines its own resources.</li>
+</ul>
+</section>
+
+<section class="prose">
+<p class="eyebrow group">Services and boot</p>
+</section>
+
+<section class="prose" id="d-svc-state">
+<h3>Service state</h3>
+<p>A service has states: enabled, disabled or masked, and started or stopped.</p>
+<p class="status">Status: <strong>built</strong>: <code>.enabled()</code> and <code>.started()</code>, offline enable without a running systemd. <strong>designed</strong>: <code>.disabled()</code>, <code>.masked()</code>, <code>.stopped()</code>, the one <code>systemctl show</code> probe, inverse capture</p>
+<pre><code>h.svc("telegraf").enabled().started();
+h.svc("systemd-networkd-wait-online").masked().stopped();
+h.svc("bluetooth").disabled().stopped();
+h.svc(&amp;format!("tigervncserver@:{n}")).enabled();   <span class="c">// template instance</span></code></pre>
+<div class="eyebrow">plan</div>
+<pre><code>== ws1 [prepare] svc systemd-networkd-wait-online.service: will stop, will mask ==</code></pre>
+<ul>
+  <li>One <code>systemctl show</code> probe answers enabled, active and masked for every unit in the window.</li>
+  <li>With no running systemd, states are applied offline where <code>systemctl</code> allows, and start and stop are skipped with a prepare line.</li>
+  <li>Root only.</li>
+  <li>Inverse: restore enabled, active and masked as captured.</li>
+</ul>
+</section>
+
+<section class="prose" id="d-restart-guard">
+<h3>Restart and reload carry a guard</h3>
+<p>Restart and reload are actions, and an action names what triggers it.</p>
+<p class="status">Status: <strong>designed</strong>: guards are traced and planned, and the executor refuses them at prepare</p>
+<pre><code>let toolkit = h.pkg(["nvidia-container-toolkit"]);
+h.svc("docker").restart().when(toolkit.changed());
+
+h.svc("sshd").reload().when(conf.changed());
+
+h.svc("docker").restart();        <span class="c">// policy error: UnguardedRestart</span>
+
+h.svc("flaky-agent")
+    .restart()
+    .allow(Policy::UnguardedRestart, "leaks memory; the vendor says restart daily");</code></pre>
+<div class="eyebrow">plan</div>
+<pre><code>== ws1 [prepare] svc docker.service: will restart if pkg nvidia-container-toolkit changes ==
+== ws1 [prepare] svc flaky-agent.service: will restart, every run; allowed unguarded-restart: leaks memory; the vendor says restart daily ==</code></pre>
+<ul>
+  <li>A restart or reload with no guard is the policy error <code>UnguardedRestart</code>.</li>
+  <li>Permitted with <code>.allow(..)</code>, the op runs on every run and the plan says so.</li>
+  <li>When the guard is false the op is skipped, and the run shows it as skipped.</li>
+  <li>A restart of a unit that the same run starts is dropped. The start already runs the new configuration.</li>
+  <li>A second run with nothing changed reports <code>CHANGED 0</code>.</li>
+</ul>
+</section>
+
+<section class="prose" id="d-triggers">
+<h3>Change triggers</h3>
+<p>An op that depends on a change carries a guard that names the change.</p>
+<p class="status">Status: <strong>designed</strong>: <code>.when(op.changed())</code> is traced and planned; <code>.ok()</code>, <code>| &amp; !</code>, or-joined merges and <code>.at_end()</code> are not built, and the executor refuses guarded ops</p>
+<pre><code>let toolkit = h.pkg(&amp;v.toolkit_packages);
+let daemon = h.file("/etc/docker/daemon.json").content(include_str!("../templates/daemon.json"));
+h.svc("docker").restart().when(toolkit.changed() | daemon.changed());</code></pre>
+<ul>
+  <li>Every op handle has <code>.changed()</code> and <code>.ok()</code>. Guards compose with <code>|</code>, <code>&amp;</code> and <code>!</code>.</li>
+  <li>Two guarded ops with the same spec merge, and their guards are joined with "or". Two roles that each ask for a <code>docker</code> restart produce one restart.</li>
+  <li>A guarded op runs where it is written. <code>.at_end()</code> moves it to the end of the host's run.</li>
+  <li>A guarded op whose source failed is skipped, not failed.</li>
+  <li>When <code>pkg</code> ops merge, <code>x.changed()</code> means one of that op's own names was installed.</li>
+  <li>Reboots do not use guards. They use marks and a barrier in the playbook.</li>
+</ul>
+</section>
+
+<section class="prose" id="d-unit">
+<h3>Unit files and drop-ins</h3>
+<p><code>h.unit</code> owns a systemd unit file or a drop-in. A change reloads systemd once, before anything starts.</p>
+<p class="status">Status: <strong>designed</strong></p>
+<pre><code>let unit = h
+    .unit("minikube.service")
+    .content(MinikubeUnit { minikube_binary: v.binary.clone() })
+    .mode(0o600);
+h.svc("minikube").enabled().started().restart_on(&amp;unit);
+
+<span class="c">// a drop-in for a unit the distro owns</span>
+h.unit("systemd-networkd-wait-online.service").drop_in(
+    "override",
+    "[Service]\nExecStart=\nExecStart=/lib/systemd/systemd-networkd-wait-online --any --timeout=30\n",
+);</code></pre>
+<div class="eyebrow">plan</div>
+<pre><code>== ws1 [prepare] unit minikube.service: will create ==
+== ws1 [prepare] svc minikube.service: will enable, will start ==</code></pre>
+<ul>
+  <li>Writes <code>/etc/systemd/system/&lt;unit&gt;</code>, or <code>&lt;unit&gt;.d/&lt;name&gt;.conf</code> for a drop-in. The candidate is checked with <code>systemd-analyze verify</code> before it moves into place.</li>
+  <li>A changed unit forces exactly one <code>daemon-reload</code> before the next <code>svc</code> op in the window.</li>
+  <li><code>.restart_on(&amp;x)</code> is <code>.restart().when(x.changed())</code>. It takes any op handle: a unit, a config file, a package.</li>
+  <li><code>.absent()</code> removes the file and reloads.</li>
+  <li>Writing under <code>/etc/systemd/system</code> with <code>h.file</code> is the policy error <code>UnitViaFile</code>.</li>
+</ul>
+</section>
+
+<section class="prose" id="d-reboot">
+<h3>Reboot</h3>
+<p>A role marks. The playbook places the barrier. The operator owns what is pending at the end.</p>
+<p class="status">Status: <strong>designed</strong></p>
+<div class="eyebrow">roles</div>
+<pre><code><span class="c">// role: gpu_driver</span>
+h.pkg(&amp;h.vars.gpu_driver.packages).needs_reboot();
+
+<span class="c">// role: kernel_update</span>
+h.pkg(["linux-generic"]).latest().needs_reboot();
+
+<span class="c">// role: cuda_workloads</span>
+h.pkg(&amp;h.vars.cuda.packages);                 <span class="c">// no reboot knowledge</span></code></pre>
+<div class="eyebrow">playbook</div>
+<pre><code>async fn gpu_host(h: &amp;Host&lt;Vars&gt;) -&gt; Result&lt;(), TraceError&gt; {
+    gpu_driver(h).await?;
+    kernel_update(h).await?;
+    h.reboot().if_pending();
+    cuda_workloads(h).await
+}</code></pre>
+<div class="eyebrow">operator</div>
+<pre><code>$ tp-basic run gpu_host --host bot@gpu-01                  <span class="c"># a pending barrier reboots; the end reports</span>
+$ tp-basic run gpu_host --host bot@gpu-01 --reboot auto    <span class="c"># also reboots once at the end if still pending</span>
+$ tp-basic run gpu_host --host bot@gpu-01 --reboot never   <span class="c"># stops at a pending barrier</span></code></pre>
+<div class="eyebrow">plan</div>
+<pre><code>== gpu-01 [gpu_driver] pkg nvidia-driver-570 -&gt; changed; needs reboot ==
+== gpu-01 [kernel_update] pkg linux-generic -&gt; changed; needs reboot ==
+== gpu-01 [gpu_host] reboot: pending (pkg nvidia-driver-570, pkg linux-generic) ==
+== gpu-01 [reboot] down 41s, boot id changed, shells reopened ==
+== gpu-01 [cuda_workloads] pkg cuda-toolkit -&gt; changed ==</code></pre>
+<ul>
+  <li><code>.needs_reboot()</code> on an op marks its change as taking effect only after a reboot.</li>
+  <li>A role marks and does not reboot. That is a convention. The engine does not enforce it.</li>
+  <li>A role never states what it needs from earlier roles.</li>
+  <li><code>h.reboot().if_pending()</code> goes in the playbook, between roles. It is a barrier: everything before it is applied, the host reboots once if anything is pending, and everything after it runs on the rebooted host.</li>
+  <li>Any number of marks cost one reboot. With nothing pending the barrier does nothing.</li>
+  <li>The pending mark is kept on the host under <code>/run</code>, which the boot clears. A reboot left pending by one run is seen by the next.</li>
+  <li>At the end of a run, anything still pending is reported as <code>reboot pending</code> with the list of what needs it. <code>--reboot auto</code> reboots once and waits for the host.</li>
+  <li>When the run cannot cross a pending barrier, because of <code>--local</code> or <code>--reboot never</code>, it stops there. Everything before the barrier is applied, the run ends with <code>reboot pending at barrier</code>, and the next run after the reboot continues past it.</li>
+</ul>
+</section>
+
+<section class="prose">
+<p class="eyebrow group">Packages and files</p>
+</section>
+
+<section class="prose" id="d-pkg">
+<h3>One pkg, every source chained</h3>
+<p>Every way of installing software is one <code>pkg</code> op. The source is a chained call.</p>
+<p class="status">Status: <strong>built</strong>: the distro manager, pip, cargo, rustup, mise and vendor installer scripts as sources, each through its own host method, with present, pin and latest on the non-distro sources. <strong>designed</strong>: the chained form below, <code>.installer_script(..)</code>, <code>.binary_release(..)</code>, pin and latest on the distro manager</p>
+<div class="eyebrow">the sources</div>
+<pre><code>h.pkg(["curl", "git"]);                          <span class="c">// the distro's manager</span>
+h.pkg(["PyYAML"]).pip();
+s.pkg(["cargo-deb", "cargo-generate-rpm"]).cargo();
+h.pkg(["just"]).mise();
+s.pkg(["stable"]).rustup().targets(["x86_64-unknown-linux-musl"]).set_default();
+h.pkg(["kernel-devel"]).yum();                   <span class="c">// yum, on a host where it is not the default</span></code></pre>
+<div class="eyebrow">a vendor's installer script</div>
+<pre><code>h.pkg(["uv"]).installer_script(
+    InstallerScript::new()
+        .bin("/usr/local/bin/uv")
+        .version("uv self version --short")
+        .latest(Latest::github_release("astral-sh/uv"))
+        .install("(set -o pipefail &amp;&amp; curl -LsSf https://astral.sh/uv/install.sh | ... sh)")
+        .update("uv self update"),
+);</code></pre>
+<div class="eyebrow">a vendor's binary release</div>
+<pre><code>h.pkg(["go"])
+    .binary_release(
+        BinaryRelease::new()
+            .url("https://go.dev/dl/go{version}.linux-{arch}.tar.gz")
+            .sha256(Sum::json("https://go.dev/dl/?mode=json", "filename", "sha256"))
+            .unpack_to("/usr/local/go")
+            .strip(1)
+            .bin("/usr/local/go/bin/go")
+            .version("go version")
+            .latest(Latest::text("https://go.dev/VERSION?m=text")),
+    )
+    .latest();
+
+h.pkg(["mc"])
+    .binary_release(
+        BinaryRelease::new()
+            .url("https://dl.min.io/client/mc/release/linux-{arch}/mc")
+            .sha256(Sum::sidecar(".sha256sum"))
+            .bin("/usr/local/bin/mc"),
+    )
+    .latest();
+
+h.pkg(["cmake"])
+    .binary_release(
+        BinaryRelease::new()
+            .url("https://github.com/Kitware/CMake/releases/download/v{version}/cmake-{version}-linux-{arch}.tar.gz")
+            .arch_names(Arch::UNAME)
+            .sha256(Sum::value(&amp;v.cmake_sha256))
+            .unpack_to("/opt/cmake")
+            .strip(1)
+            .bin("/opt/cmake/bin/cmake")
+            .version("cmake --version"),
+    )
+    .pin("3.23.2");</code></pre>
+<div class="eyebrow">plan</div>
+<pre><code>== ws1 [prepare] pkg[binary_release] go: 1.27.2 installed, 1.27.3 wanted; fetched, sha256 ok ==</code></pre>
+<ul>
+  <li>One type underneath: a source, a list of names and a want. Present is the default, <code>.pin(v)</code> and <code>.latest()</code> work on every source, and latest is resolved on the host.</li>
+  <li><code>h.pkg(names)</code> with no chained source is the distro's manager. <code>.pip()</code>, <code>.cargo()</code>, <code>.mise()</code>, <code>.rustup()</code> and <code>.yum()</code> name the others. <code>h.pip</code>, <code>h.cargo</code>, <code>h.mise</code>, <code>h.rustup</code>, <code>h.yum</code> and <code>h.script</code> are removed (<a href="#removed">Removed</a>).</li>
+  <li><code>.installer_script(..)</code> is a vendor's curl-to-bash installer. The vendor's script does the install.</li>
+  <li><code>.binary_release(..)</code> is a tarball or a single binary the vendor publishes. The engine downloads it to a staging directory on the host, verifies the checksum, and swaps the result into place with one rename.</li>
+  <li>When a vendor ships both, the installer script is preferred. uv and mise use their installers.</li>
+  <li>A binary release with no checksum source is the policy error <code>Unverified</code>.</li>
+  <li><code>{version}</code> and <code>{arch}</code> are the placeholders in a URL. <code>{arch}</code> maps <code>x86_64</code> to <code>amd64</code> and <code>aarch64</code> to <code>arm64</code> unless the spec gives its own table.</li>
+  <li>With no version in the URL, latest means the published checksum differs from the installed file's.</li>
+  <li>Each vendor source takes exactly one name.</li>
+</ul>
+</section>
+
+<section class="prose" id="d-pkg-absent">
+<h3>Package removal</h3>
+<p><code>.absent()</code> is the fourth want, beside present, pinned and latest.</p>
+<p class="status">Status: <strong>designed</strong></p>
+<pre><code>h.pkg(["cmake"]).absent();
+h.pkg(["nano"]).absent().purge();     <span class="c">// apt: config files too</span></code></pre>
+<div class="eyebrow">plan</div>
+<pre><code>== al2 [prepare] pkg: will remove cmake ==</code></pre>
+<ul>
+  <li>Removes only the names that are installed.</li>
+  <li>Never merges with an install op, and keeps trace order against one.</li>
+  <li>Inverse: reinstall the names this run removed.</li>
+</ul>
+</section>
+
+<section class="prose" id="d-pkg-file">
+<h3>Package from a file or URL</h3>
+<p>A vendor <code>.deb</code> or <code>.rpm</code> is installed through the distro's manager, from a fetched file.</p>
+<p class="status">Status: <strong>designed</strong></p>
+<pre><code>let deb = h.fetch(&amp;v.keyring_url).sha256(&amp;v.keyring_sha256);
+h.pkg(["cuda-keyring"]).from(deb).pin(&amp;v.keyring_version);</code></pre>
+<ul>
+  <li>The installed check is by name and version, through the manager.</li>
+  <li>Installs with <code>apt-get install ./x.deb</code> or <code>dnf install ./x.rpm</code>, so dependencies resolve.</li>
+  <li>The download is a prepare-phase fetch. Nothing is left in <code>/tmp</code>.</li>
+</ul>
+</section>
+
+<section class="prose" id="d-cargo-rustup">
+<h3>cargo and rustup options</h3>
+<p><code>--locked</code> for cargo, and components added to a toolchain another role declared.</p>
+<p class="status">Status: <strong>built</strong>: rustup <code>.targets(..)</code>, <code>.components(..)</code>, <code>.set_default()</code>. <strong>designed</strong>: <code>.locked()</code>, one op per toolchain and user</p>
+<pre><code>let s = h.as_user(&amp;u);
+s.pkg(["stable"]).rustup().components(["rust-src"]);
+s.pkg(["bindgen-cli"]).cargo().locked();</code></pre>
+<ul>
+  <li><code>.locked()</code> passes <code>--locked</code>. A locked op never merges with an unlocked one.</li>
+  <li>Two roles that name the same toolchain for the same user produce one op. The second call adds its targets and components to the first.</li>
+</ul>
+</section>
+
+<section class="prose" id="d-fetch">
+<h3>Fetch and unpack</h3>
+<p>A download is a prepare-phase value. A file op places it or unpacks it.</p>
+<p class="status">Status: <strong>designed</strong></p>
+<pre><code>let key = h.fetch("https://packages.cloud.google.com/apt/doc/apt-key.gpg").sha256(&amp;v.key_sha256);
+h.file("/usr/share/keyrings/kubernetes-archive-keyring.gpg").from(key).mode(0o644);
+
+let tgz = h.fetch(&amp;v.dataset_url).sha256(&amp;v.dataset_sha256);
+h.file("/srv/dataset").unpack(tgz).strip(1);
+
+<span class="c">// a host with no route out: the controller downloads and streams it over</span>
+let blob = h.fetch(&amp;v.blob_url).sha256(&amp;v.blob_sha256).via_controller();
+h.file("/opt/blob").from(blob);</code></pre>
+<ul>
+  <li>Prepare phase, on the host: download to a staging directory, verify there, and cache under <code>/var/cache/telepatch/</code> by checksum.</li>
+  <li><code>.from(f)</code> places the file. <code>.unpack(f)</code> handles tar and zip and replaces the directory with one rename.</li>
+  <li>A fetch with no checksum is the policy error <code>Unverified</code>.</li>
+  <li>Software with a binary and a version is a <code>pkg</code>, not a fetch.</li>
+</ul>
+</section>
+
+<section class="prose" id="d-local">
+<h3>Controller-side files and commands</h3>
+<p>Three things a role can take from the controller: a file that ships with the role, a file or directory that exists only on the controller, and the output of a command run there.</p>
+<p class="status">Status: <strong>built</strong>: <code>include_bytes!</code> into <code>.content(..)</code>. <strong>designed</strong>: <code>local_file</code>, <code>local_dir</code>, <code>local</code>, <code>.via_controller()</code></p>
+<pre><code><span class="c">// 1. a file that ships with the role: compiled into the binary</span>
+h.file("/etc/tigervnc/vncserver-config-defaults")
+    .content(include_bytes!("../files/vncserver-config-defaults"));
+
+<span class="c">// 2. a copy of a controller file, or of a directory</span>
+h.file("/usr/local/bin/site-agent")
+    .from(local_file("downloads/site-agent"))
+    .mode(0o755);
+h.file("/etc/site-agent/certs").from(local_dir("certs"));
+
+<span class="c">// the same file's text, used as a value</span>
+let pubkey = local_file("~/.ssh/id_ed25519.pub");
+h.file(&amp;format!("~{u}/.ssh/authorized_keys")).line(&amp;pubkey);
+
+<span class="c">// 3. the output of a command on the controller: an argv, no shell</span>
+let terminfo = local(["infocmp", "-x", "xterm-ghostty"]);
+h.resource(Terminfo { name: "xterm-ghostty".into(), source: terminfo });</code></pre>
+<div class="eyebrow">plan</div>
+<pre><code>== ws1 [prepare] file /usr/local/bin/site-agent: will change (from controller downloads/site-agent, 18.4 MiB, sha256 differs) ==</code></pre>
+<ul>
+  <li><code>.from(local_file(path))</code> copies one controller file to the host. <code>.from(local_dir(path))</code> copies a tree, and removes nothing on the host that is not in it.</li>
+  <li>The source is read on the controller in prepare, compared with the host's copy by checksum, and streamed only where they differ. Any size, binary safe.</li>
+  <li>A relative path is relative to the vars or inventory file, so a site's files sit beside its vars. <code>~</code> is the operator's home.</li>
+  <li>A file that ships with the role is embedded with <code>include_bytes!</code>, so it is there when the binary runs alone in a container.</li>
+  <li>A missing controller file, or a <code>local</code> command that fails, ends the run before any host changes.</li>
+  <li><code>local</code> takes an argv. No shell runs on the controller.</li>
+</ul>
+</section>
+
+<section class="prose" id="d-git">
+<h3>Git checkout</h3>
+<p>A checkout of a repository at a path, optionally at a revision.</p>
+<p class="status">Status: <strong>designed</strong></p>
+<pre><code>let s = h.as_user(u);
+s.git("https://github.com/romkatv/powerlevel10k.git")
+    .depth(1)
+    .into("~/.oh-my-zsh/custom/themes/powerlevel10k");
+
+h.git("https://github.com/torvalds/linux.git").rev("v6.12").into("/usr/src/linux");</code></pre>
+<ul>
+  <li>The probe is <code>git -C &lt;path&gt; rev-parse HEAD</code> and the remote URL.</li>
+  <li>With no <code>.rev</code>, an existing checkout of the same remote is left alone. <code>.rev(r)</code> checks out exactly <code>r</code>. <code>.latest()</code> follows the branch.</li>
+  <li>A different remote or a dirty tree blocks the host in prepare.</li>
+  <li>Inverse: remove the checkout if this run created it, otherwise restore the previous revision.</li>
+</ul>
+</section>
+
+<section class="prose" id="d-templates">
+<h3>Templates</h3>
+<p>Templates use the <code>askama</code> crate. A template is compiled into the binary and checked by the compiler.</p>
+<p class="status">Status: <strong>designed</strong>: today <code>.content(..)</code> takes bytes</p>
+<div class="eyebrow">the template's inputs</div>
+<pre><code>#[derive(Template)]
+#[template(path = "telegraf.conf")]
+struct TelegrafConf {
+    influx_server: String,
+    influx_org: String,
+    influx_bucket: String,
+    influx_token: Secret,
+}</code></pre>
+<div class="eyebrow">templates/telegraf.conf</div>
+<pre><code>[[outputs.influxdb_v2]]
+  urls = ["{{ influx_server }}"]
+  token = "{{ influx_token }}"
+  organization = "{{ influx_org }}"
+  bucket = "{{ influx_bucket }}"</code></pre>
+<div class="eyebrow">in the role</div>
+<pre><code>let v = &amp;h.vars.telegraf;
+h.file("/etc/telegraf/telegraf.conf")
+    .content(TelegrafConf {
+        influx_server: v.influx_server.clone(),
+        influx_org: v.influx_org.clone(),
+        influx_bucket: v.influx_bucket.clone(),
+        influx_token: v.influx_token.clone(),
+    })
+    .mode(0o640)
+    .owner("root:telegraf");
+
+<span class="c">// a file with no variables is not a template</span>
+h.file("/etc/profile.d/android.sh").content(include_str!("../templates/android.sh"));</code></pre>
+<ul>
+  <li>One struct per template names every input and its type.</li>
+  <li>A missing variable, a misspelled field inside a loop, or a value of the wrong type is a compile error.</li>
+  <li>Inside the tags, expressions are Rust.</li>
+  <li><code>.content(..)</code> takes the template value. The engine holds it and renders in prepare, per host.</li>
+  <li>A <code>Secret</code> field prints its value only during that render. Anywhere else it prints <code>&lt;secret&gt;</code>. A file rendered from one is secret: no content in the plan, the log or a diff.</li>
+  <li>There is no template macro (<a href="#removed">Removed</a>).</li>
+</ul>
+</section>
+
+<section class="prose">
+<p class="eyebrow group">Vars, secrets and facts</p>
+</section>
+
+<section class="prose" id="d-role-vars">
+<h3>Vars per role</h3>
+<p>Each role owns a vars struct. A value comes from the nearest of four layers.</p>
+<p class="status">Status: <strong>designed</strong>: today the vars file deserializes into one flat struct</p>
+<div class="eyebrow">the roles</div>
+<pre><code>#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DockerVars {
+    pub admin_users: Vec&lt;String&gt;,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RustBuildVars {
+    pub admin_users: Vec&lt;String&gt;,
+    pub rustc_version: String,
+}
+
+impl Default for RustBuildVars { /* rustc_version: "1.94.0", admin_users: ["root"] */ }</code></pre>
+<div class="eyebrow">the playbook crate</div>
+<pre><code>#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Vars {
+    pub docker: DockerVars,
+    pub rust_build: RustBuildVars,
+}</code></pre>
+<div class="eyebrow">the vars file</div>
+<pre><code>admin_users = ["bot", "tpdev"]     <span class="c"># top level: every role with a field of this name</span>
+
+[rust_build]
+admin_users = ["bot"]              <span class="c"># this role only</span></code></pre>
+<ul>
+  <li>A role reads its own struct: <code>h.vars.rust_build.admin_users</code>. No role reads another role's vars.</li>
+  <li>A var that several roles need is a field in each of their structs.</li>
+  <li>A value is taken from the first layer that sets it: the role's own section in the vars file, a top-level key of the same name, a default the playbook supplies, the role's own <code>Default</code>. With an inventory, host and group vars come before the vars file.</li>
+  <li>A top-level key that matches no field in any role is an error.</li>
+  <li>An unknown key or a wrong type fails at trace time.</li>
+</ul>
+</section>
+
+<section class="prose" id="d-secrets">
+<h3>Secrets</h3>
+<p>The role sees a typed secret. The vars file says where it lives. The store is a crate that only <code>main</code> names.</p>
+<p class="status">Status: <strong>designed</strong></p>
+<div class="eyebrow">the role</div>
+<pre><code>pub struct TelegrafVars {
+    pub influx_server: String,
+    pub influx_token: Secret,
+}
+
+pub struct AdminUsersVars {
+    pub admin_users: Vec&lt;String&gt;,
+    pub default_password: Secret,      <span class="c">// a crypt-format hash</span>
+}</code></pre>
+<div class="eyebrow">a vars file that is committed: references only</div>
+<pre><code>[telegraf]
+influx_server = "https://influx.example:8086"
+influx_token = { bao = "kv/infra/telegraf", field = "token" }</code></pre>
+<div class="eyebrow">a vars file that is not committed: a literal is allowed</div>
+<pre><code>[admin_users]
+default_password = "$y$j9T$..."     <span class="c"># overridden at bring-up</span></code></pre>
+<div class="eyebrow">the playbook binary</div>
+<pre><code>fn main() -&gt; ExitCode {
+    telepatch::cli::main(playbooks::all())
+        .secrets(telepatch_openbao::backend())
+        .run()
+}</code></pre>
+<div class="eyebrow">plan</div>
+<pre><code>== ws1 [prepare] secret telegraf.influx_token: resolved (openbao) ==
+== ws1 [prepare] file /etc/telegraf/telegraf.conf (secret): will change ==</code></pre>
+<ul>
+  <li>A role never names a store or a path, and never calls a backend.</li>
+  <li>A <code>Secret</code> var is set by a reference or by a literal value. A reference names a backend: <code>bao</code>, <code>env</code>, <code>file</code> or <code>prompt</code>.</li>
+  <li>A literal is never committed. It lives in a vars file on the operator's disk.</li>
+  <li>A gate check in the playbook repo fails when a tracked vars or inventory file gives a <code>Secret</code> field a literal value.</li>
+  <li>An OpenBao reference is the full path, mount included, and a field.</li>
+  <li><code>telepatch</code> holds the <code>Secret</code> type, the reference format, the backend trait, and the backends with no dependencies: environment, file and prompt.</li>
+  <li>Every reference the trace used is resolved in prepare, one read per path. A missing secret ends the run before any host changes, and the error names the var and the role.</li>
+  <li>A secret never appears in the trace, the plan, the log or the report. The host compares by checksum.</li>
+  <li><code>plan</code> needs no access to the store. <code>--check</code> resolves secrets and does need it.</li>
+  <li>Reading only.</li>
+</ul>
+</section>
+
+<section class="prose" id="d-openbao-crate">
+<h3>The telepatch-openbao crate</h3>
+<p>Our own client: one trait implementation and two kinds of HTTP request. It is a separate crate because it brings the only HTTP and TLS dependency.</p>
+<p class="status">Status: <strong>designed</strong></p>
+<div class="eyebrow">the trait, in telepatch</div>
+<pre><code>pub trait SecretBackend: Send + Sync {
+    <span class="c">/// The key that selects this backend in a vars reference.</span>
+    fn scheme(&amp;self) -&gt; &amp;'static str;
+
+    <span class="c">/// Called once per run, in prepare. One result per reference, in order.</span>
+    fn resolve(&amp;self, refs: &amp;[SecretRef]) -&gt; Vec&lt;Result&lt;SecretValue, SecretError&gt;&gt;;
+}</code></pre>
+<div class="eyebrow">the crate</div>
+<pre><code><span class="c">// telepatch-openbao</span>
+<span class="c">//   src/lib.rs      backend(), impl SecretBackend</span>
+<span class="c">//   src/config.rs   address and TLS settings from the environment</span>
+<span class="c">//   src/auth.rs     the Auth trait and TokenFromEnv</span>
+<span class="c">//   src/kv.rs       paths and reply shapes for KV version 1 and 2</span>
+<span class="c">//   tests/          a stub HTTP server; one live test against `bao server -dev`</span>
+
+pub trait Auth: Send + Sync {
+    fn token(&amp;self, http: &amp;Http) -&gt; Result&lt;Token, SecretError&gt;;
+}
+
+pub struct TokenFromEnv;                  <span class="c">// BAO_TOKEN, then VAULT_TOKEN</span>
+
+pub fn backend() -&gt; OpenBao {
+    OpenBao::from_env().auth(TokenFromEnv)
+}
+
+impl SecretBackend for OpenBao {
+    fn scheme(&amp;self) -&gt; &amp;'static str {
+        "bao"
+    }
+
+    fn resolve(&amp;self, refs: &amp;[SecretRef]) -&gt; Vec&lt;Result&lt;SecretValue, SecretError&gt;&gt; {
+        <span class="c">// 1. once:              self.auth.token(..)</span>
+        <span class="c">// 2. per mount, once:   GET /v1/sys/internal/ui/mounts/&lt;path&gt;   -&gt; mount, KV version</span>
+        <span class="c">// 3. per distinct path: GET /v1/&lt;mount&gt;/data/&lt;rest&gt;  (version 2) -&gt; .data.data</span>
+        <span class="c">//                       GET /v1/&lt;mount&gt;/&lt;rest&gt;       (version 1) -&gt; .data</span>
+        <span class="c">// 4. per reference:     take its field from that path's reply</span>
+        self.read_all(refs)
+    }
+}</code></pre>
+<div class="eyebrow">its errors, all before any host changes</div>
+<pre><code>secret telegraf.influx_token: no secret at kv/infra/telegraf (role telegraf)
+secret telegraf.influx_token: kv/infra/telegraf has no field token; it has: api_key
+secret telegraf.influx_token: permission denied reading kv/infra/telegraf
+openbao: no token: set BAO_TOKEN or VAULT_TOKEN
+openbao: token expired on 2026-12-06: log in again</code></pre>
+<div class="eyebrow">plan</div>
+<pre><code>== ws1 [prepare] openbao: certificate verification is OFF (BAO_SKIP_VERIFY) ==</code></pre>
+<ul>
+  <li>Built on <code>ureq</code> with rustls, and <code>serde_json</code>. No third-party client crate.</li>
+  <li>Auth is its own trait. Token from the environment is the one implementation. AppRole or userpass is another implementation of <code>Auth</code>, with no change to the read path.</li>
+  <li>Address: <code>BAO_ADDR</code>, then <code>VAULT_ADDR</code>. Token: <code>BAO_TOKEN</code>, then <code>VAULT_TOKEN</code>. No token file.</li>
+  <li><code>BAO_SKIP_VERIFY</code> and <code>VAULT_SKIP_VERIFY</code> are honoured. Prepare prints a warning line whenever verification is off.</li>
+  <li>The KV version is detected per mount with the request the <code>bao</code> command makes itself.</li>
+  <li>A secret value is held in a type that is wiped when dropped and has no debug output.</li>
+  <li>A missing field is reported with the names of the fields that exist, never their values.</li>
+  <li>Tests run against a stub HTTP server. One live test runs against <code>bao server -dev</code> in a plain container.</li>
+</ul>
+</section>
+
+<section class="prose" id="d-facts">
+<h3>Facts and assertions</h3>
+<p>A fact is a typed question about the host, answered in prepare. An assertion on facts blocks the host before anything changes.</p>
+<p class="status">Status: <strong>built</strong>: <code>h.exists(p)</code>, <code>h.bin_exists(cmd)</code>, <code>h.bin_version(cmd)</code> and the <code>os</code> fact. <strong>designed</strong>: <code>user_info</code>, <code>stat</code>, <code>pkg_installed</code>, <code>check</code>, <code>h.assert</code></p>
+<pre><code>let info = h.user_info(u).await;                         <span class="c">// home, shell, exists</span>
+h.assert(info.exists, format!("zsh: {u} has no account"));
+
+let st = h.stat("/usr/local/bin/mc").await;              <span class="c">// mode, owner, size</span>
+let installed = h.pkg_installed("cuda-keyring").await;   <span class="c">// Some(version) or None</span></code></pre>
+<ul>
+  <li>All facts the trace asks for are gathered in one round trip per host.</li>
+  <li><code>h.assert(..)</code> on facts runs in prepare.</li>
+  <li><code>check(cmd)</code> is the general fact, for a question with no typed fact yet.</li>
+</ul>
+</section>
+
+<section class="prose">
+<p class="eyebrow group">The run</p>
+</section>
+
+<section class="prose" id="d-check">
+<h3>Dry run with diffs</h3>
+<p><code>--check</code> runs trace and prepare in full and stops before apply. <code>--diff</code> shows what each file would become.</p>
+<p class="status">Status: <strong>designed</strong>: today <code>plan</code> renders without a host</p>
+<pre><code>$ tp-basic run dev_desktop --host bot@ws1 --check --diff
+== ws1 [prepare] 4 will change, 41 ok, 0 blocked ==
+ file /etc/sudoers.d/bot: will create (0440 root:root)
+ file /etc/telegraf/telegraf.conf: will change
+   @@ -12,3 +12,3 @@
+   -  urls = ["http://old:8086"]
+   +  urls = ["http://influx:8086"]
+ svc telegraf.service: will restart (file /etc/telegraf/telegraf.conf changes)
+ pkg: will install docker-ce docker-ce-cli (2 of 5)
+ svc docker.service: unit not found yet: decided at run time, after this window's earlier ops
+== ws1 [coverage] docker: 6 ops, 6 reversible ==
+$ echo $?
+2</code></pre>
+<ul>
+  <li>Secrets, fetches, templates, facts and permissions are all resolved. Nothing a role declares is touched.</li>
+  <li>An op whose probe depends on an earlier change says so.</li>
+  <li>Exit status 0 means nothing to change, 2 means changes pending, 1 means a host is blocked.</li>
+  <li>A dry run needs access to the secret store. A secret file shows "will change" and no diff.</li>
+</ul>
+</section>
+
+<section class="prose" id="d-inventory">
+<h3>Inventory</h3>
+<p>Hosts, groups, and vars for each, in one file.</p>
+<p class="status">Status: <strong>designed</strong></p>
+<div class="eyebrow">inventory.toml</div>
+<pre><code>[vars]                                  <span class="c"># every host</span>
+admin_users = ["bot"]
+
+[groups.builders]
+hosts = ["bot@build-01", "bot@build-02"]
+vars = { rust_build = { rustc_version = "1.94.0" } }
+
+[groups.gpu]
+hosts = ["bot@gpu-01"]
+
+[hosts."bot@gpu-01"]
+groups = ["builders"]
+vars = { admin_users = ["bot", "ml"] }</code></pre>
+<pre><code>$ tp-basic run dev_desktop --inventory inventory.toml --limit builders</code></pre>
+<div class="eyebrow">in a playbook</div>
+<pre><code>if h.in_group("gpu") {
+    cuda(h).await?;
+}</code></pre>
+<ul>
+  <li>The more specific place wins: a host's vars, then a group's, then the inventory's vars for every host, then the vars file. Groups apply in the order listed.</li>
+  <li>Within each place, a role's own section beats a top-level key. Playbook defaults and the role's <code>Default</code> come last.</li>
+  <li>The merged vars are deserialized into the playbook's typed <code>Vars</code>. An unknown key or a wrong type fails at trace time and names the file and line.</li>
+  <li><code>--limit</code> takes group and host names. <code>--host</code> stays for the one-off run.</li>
+</ul>
+</section>
+
+<section class="prose" id="d-run-controls">
+<h3>Run controls</h3>
+<p>How many hosts at a time, which roles, and how long to wait.</p>
+<p class="status">Status: <strong>built</strong>: <code>.allow_fail()</code>. <strong>designed</strong>: <code>--serial</code>, <code>--max-fail</code>, <code>--only</code>, <code>.retry</code>, <code>.timeout</code>, <code>wait_for</code></p>
+<pre><code>$ tp-basic run site --inventory inventory.toml --limit web \
+      --serial 2 --max-fail 1 --only docker,telegraf</code></pre>
+<pre><code>h.fetch(url).sha256(sum).retry(3).timeout(5 * MIN);
+
+h.svc("postgresql").enabled().started();
+h.wait_for(Port::tcp(5432)).timeout(60 * SEC);    <span class="c">// fails the role if it never opens</span></code></pre>
+<ul>
+  <li><code>--serial n</code> applies to <code>n</code> hosts at a time. <code>--max-fail n</code> stops the run when more than <code>n</code> hosts have failed.</li>
+  <li><code>--only</code> runs the named roles and skips the rest.</li>
+  <li><code>.retry(n)</code> and <code>.timeout(d)</code> are available on every op.</li>
+  <li><code>wait_for</code> is an op with no change of its own: a port, a path, or a unit reaching active.</li>
+</ul>
+</section>
+
+<section class="prose">
+<p class="eyebrow group">Not this round</p>
+</section>
+
+<section class="prose" id="held">
+<h3>Held, and out</h3>
+<p>Decided against, for now or for good.</p>
+<ul>
+  <li>Held: the kernel command line and bootloaders, <code>h.kernel_args()</code>.</li>
+  <li>Held: per-user systemd services. <code>s.svc(..)</code> on an <code>as_user</code> scope stays a trace error.</li>
+  <li>Out: the Concourse roles are not ported.</li>
+  <li>Container builds keep their upgrade and cleanup lines in the Dockerfile.</li>
+</ul>
+<p>Not decided, and not planned: six proposals the review did not rule on. Nothing in the engine builds them and no entry above depends on them. A role that needs one today uses an author-defined resource, or the warned <code>sh!</code> under its <code>HACK(..)</code> comment.</p>
+<ul>
+  <li>mounts and filesystems</li>
+  <li>firewall</li>
+  <li>udev rules, sysctl and kernel modules</li>
+  <li>time zone, hostname and locale</li>
+  <li>system upgrade</li>
+  <li>package groups, source packages and source repos</li>
+</ul>
+<p>Destructive ops. <code>.force()</code> on the op and <code>--allow-destructive</code> from the operator (<a href="#d-policy">Policy errors</a>) are a rule, not a built feature: no decided op is destructive. Package removal removes only what is installed and has an inverse, and a git checkout blocks the host on a dirty tree instead of overwriting it. The call and the flag are built with the first destructive op; mounts and filesystems, the likely first, are unruled.</p>
+</section>
+
+<section class="prose" id="removed">
+<h3>Removed</h3>
+<p>Forms earlier drafts of this note described, and what replaces each. Nothing outside this list uses them. A removed API is removed, not deprecated: the package-source host methods are still in the built engine until the chained form is built, and go in the same change.</p>
+<ul>
+  <li><code>h.pip(..)</code>, <code>h.cargo(..)</code>, <code>h.mise(..)</code>, <code>h.rustup(..)</code>, <code>h.yum(..)</code>, <code>h.script(name, ScriptSpec)</code>: one method per source on the host handle. Now one <code>h.pkg(names)</code> with a chained source, <code>.pip()</code>, <code>.cargo()</code>, <code>.mise()</code>, <code>.rustup()</code>, <code>.yum()</code>, <code>.installer_script(InstallerScript)</code>; <code>ScriptSpec</code> becomes <code>InstallerScript</code> (<a href="#d-pkg">One pkg, every source chained</a>).</li>
+  <li><code>tpl!("nginx.conf", &amp;h.vars)</code>: a template macro over the whole vars. Now a struct deriving askama's <code>Template</code>, passed to <code>.content(..)</code> (<a href="#d-templates">Templates</a>).</li>
+  <li><code>secret("infra/…", "worker_key")</code>: a role naming a store and a path. Now a <code>Secret</code> field in the role's vars, whose reference lives in the vars file (<a href="#d-secrets">Secrets</a>).</li>
+  <li><code>local("cat ~/.ssh/…")</code>: a shell string run on the controller. Now <code>local_file(path)</code> for a file and <code>local([argv])</code> for a command, no shell (<a href="#d-local">Controller-side files and commands</a>).</li>
+  <li><code>sh!(..)</code> with <code>unless</code> or <code>creates</code> as the way to install a tool: now a <code>pkg</code> source; <code>sh!</code> remains only as the warned escape hatch (<a href="#d-standard">No shell in a role body</a>).</li>
+  <li><code>h.repo("hashicorp").key_url(..).line(..)</code>: the first repo sketch. The built <code>repo</code> row replaces it.</li>
+  <li><code>.installed()</code> on <code>pkg</code>: present is the default and needs no call.</li>
+</ul>
 </section>
 
 <section class="prose" id="syntax">
@@ -703,28 +1463,27 @@ echo "__tp_${nonce} ${id} {\"rc\":${rc},\"changed\":${changed}}"</code></pre>
 
 <h3>Option A: builder calls, no macro</h3>
 <pre><code><span class="c">#[role]</span>
-<span class="k">async fn</span> zsh(h: &amp;Host) {
-    h.pkg([<span class="w">"zsh"</span>]).installed();
+<span class="k">async fn</span> zsh(h: &amp;Host&lt;Vars&gt;) -&gt; Result&lt;(), TraceError&gt; {
+    h.pkg([<span class="w">"zsh"</span>]);
     h.file(<span class="w">"/etc/zsh/zprofile"</span>).line(<span class="w">"emulate sh -c 'source /etc/profile'"</span>);
-    <span class="k">for</span> u <span class="k">in</span> &amp;h.vars.admin_users {
+    <span class="k">for</span> u <span class="k">in</span> &amp;h.vars.zsh.admin_users {
+        h.user(u).shell(<span class="w">"/usr/bin/zsh"</span>);
         <span class="k">let</span> s = h.as_user(u);
-        s.user().shell(<span class="w">"/usr/bin/zsh"</span>);
-        s.sh(<span class="w">"curl -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh | sh -s -- --unattended"</span>)
-            .creates(<span class="w">"~/.oh-my-zsh"</span>);
+        s.git(<span class="w">"https://github.com/ohmyzsh/ohmyzsh.git"</span>).depth(1).into(<span class="w">"~/.oh-my-zsh"</span>);
         s.git(<span class="w">"https://github.com/romkatv/powerlevel10k.git"</span>).depth(1).into(<span class="w">"~/.oh-my-zsh/custom/themes/powerlevel10k"</span>);
-        s.file(<span class="w">"~/.zshrc"</span>).line_re(<span class="w">r#"^ZSH_THEME=".*""#</span>, <span class="w">r#"ZSH_THEME="powerlevel10k/powerlevel10k""#</span>).create();
+        s.file(<span class="w">"~/.zshrc"</span>).line_re(<span class="w">r#"^ZSH_THEME=".*""#</span>, <span class="w">r#"ZSH_THEME="powerlevel10k/powerlevel10k""#</span>);
         s.file(<span class="w">"~/.zshrc"</span>).line_re(<span class="w">r#"^export POWERLEVEL9K_DISABLE_CONFIGURATION_WIZARD="#</span>, <span class="w">"export POWERLEVEL9K_DISABLE_CONFIGURATION_WIZARD=true"</span>);
     }
+    Ok(())
 }</code></pre>
-<p>Eleven lines. Everything is a plain method call, so rust-analyzer completes it, errors point at the right line, and a role can call any crate. The cost is the <code>h.</code> and <code>s.</code> prefixes and the quoting, which is Rust's, not shell's. <code>~</code> expands on the host because the command runs in the user's login shell.</p>
+<p>Twelve lines and no shell. Everything is a plain method call, so rust-analyzer completes it, errors point at the right line, and a role can call any crate. Oh My Zsh's installer script is a <code>git</code> clone with extra steps, so the clone is the op. The cost is the <code>h.</code> and <code>s.</code> prefixes and the quoting, which is Rust's, not shell's. <code>~</code> expands on the host because the op runs in the user's login shell.</p>
 
 <h3>Option B: <code>sh!</code> with interpolation and effects</h3>
-<p>Same as A, but shell lines go through a macro that interpolates Rust values with shell quoting and lets effects and checks ride as named arguments:</p>
-<pre><code><span class="k">let</span> theme = <span class="w">"powerlevel10k"</span>;
-sh!(s, <span class="w">"git clone --depth=1 https://github.com/romkatv/{theme}.git ~/.oh-my-zsh/custom/themes/{theme}"</span>,
-    creates = <span class="w">"~/.oh-my-zsh/custom/themes/{theme}"</span>);
-sh!(h, <span class="w">"rustup target add {target}"</span>, unless = <span class="w">"rustup target list --installed | grep -qx {target}"</span>);</code></pre>
-<p><code>{target}</code> becomes <code>'x86_64-unknown-linux-musl'</code> on the wire, so a value with a space or a quote cannot break the command. This is a small <code>macro_rules!</code> plus a quoting function, not a parser. It removes the one thing that makes A feel like Rust-wrapping-shell, which is building command strings by hand.</p>
+<p>Same as A, but where no primitive exists yet a shell line goes through a macro that interpolates Rust values with shell quoting and lets checks ride as named arguments. It is the escape hatch, not a style: every <code>sh!</code> in a role body is reported as a warning, and the line above it names the primitive that would replace it (<a href="#d-standard">No shell in a role body</a>). The one left in the ported roles:</p>
+<pre><code><span class="c">// HACK(repo: deb-src on the distro's own sources): no primitive edits the distro's .sources files</span>
+sh!(h, <span class="w">"sed -i 's/^Types: deb$/Types: deb deb-src/' {sources}"</span>,
+    unless = <span class="w">"grep -q '^Types: deb deb-src$' {sources}"</span>);</code></pre>
+<p><code>{sources}</code> becomes <code>'/etc/apt/sources.list.d/ubuntu.sources'</code> on the wire, so a value with a space or a quote cannot break the command. This is a small <code>macro_rules!</code> plus a quoting function, not a parser. The plan ends with <code>warning: sh! in a role body at src/roles/src_repos.rs:99</code>; a warning never fails the gate.</p>
 
 <h3>Option C: a line-oriented DSL in a proc macro</h3>
 <pre><code>tp! { h,
@@ -744,40 +1503,41 @@ sh!(h, <span class="w">"rustup target add {target}"</span>, unless = <span class
 <p><code>include_tp!("zsh.tp")</code> with the same grammar as C in its own file. Gains shell-style syntax highlighting; otherwise identical cost to C. Mentioned for completeness.</p>
 
 <div class="callout">
-<p><strong>Decision: A and B, each where it fits.</strong> Ops with structure (<code>pkg</code>, <code>file</code>, <code>git</code>, <code>fetch</code>, <code>svc</code>, <code>user</code>) are builders, because their options are typed and their inverses are known. Anything that is really a shell line is <code>sh!</code>, because the command <em>is</em> the content and a builder would only get in the way. The conventions that make A read well: One op per line, no trailing <code>.await</code> on ops (they return handles, not futures). Builder defaults such that the common case takes no options: <code>pkg([..])</code> alone means installed, <code>file(p).content(c)</code> alone means mode 0644 root. <code>as_user</code> as a scope so <code>become_user</code> is written once per block, not per task. The <code>os</code> fact as an enum so distro dispatch is a <code>match</code> in the role, not seven include files. Reconsider C once there are twenty roles written in A and the <code>h.</code> noise is measurable rather than imagined.</p>
+<p><strong>Decision: A, with B as the warned escape hatch.</strong> Every op is a builder, because its options are typed and its inverse is known: <code>pkg</code>, <code>file</code>, <code>git</code>, <code>fetch</code>, <code>svc</code>, <code>unit</code>, <code>user</code>. Where none fits, the author writes a typed <a href="#d-resource">resource</a> once, and the shell lives inside it. <code>sh!</code> in a role body is a missing primitive: it is reported as a warning and carries a <code>// HACK(&lt;primitive&gt;): what is missing</code> comment. The conventions that make A read well: one op per line, no trailing <code>.await</code> on ops (they return handles, not futures). Builder defaults such that the common case takes no options: <code>pkg([..])</code> alone means present, <code>file(p).content(c)</code> alone means mode 0644 root. <code>as_user</code> as a scope so <code>become_user</code> is written once per block, not per task. The <code>os</code> fact as an enum so distro dispatch is a <code>match</code> in the role, not seven include files. Reconsider C once there are twenty roles written in A and the <code>h.</code> noise is measurable rather than imagined.</p>
 </div>
 
-<p>For scale, the repo's <code>rust_build</code> role is 183 lines of YAML across five files. In A plus <code>sh!</code>:</p>
+<p>For scale, the repo's <code>rust_build</code> role is 183 lines of YAML across five files. In A, with no shell:</p>
 <pre><code><span class="c">#[role]</span>
-<span class="k">async fn</span> rust_build(h: &amp;Host) {
+<span class="k">async fn</span> rust_build(h: &amp;Host&lt;Vars&gt;) -&gt; Result&lt;(), TraceError&gt; {
     <span class="k">match</span> h.os.family {
-        Debian =&gt; h.pkg([<span class="w">"build-essential"</span>, <span class="w">"libclang-dev"</span>]),
+        Debian =&gt; h.pkg([<span class="w">"build-essential"</span>, <span class="w">"libclang-dev"</span>, <span class="w">"musl-tools"</span>]),
         RedHat =&gt; h.pkg([<span class="w">"gcc"</span>, <span class="w">"clang-devel"</span>]),
-        Arch   =&gt; h.pkg([<span class="w">"base-devel"</span>, <span class="w">"clang"</span>]),
-    }.installed();
-    <span class="k">for</span> u <span class="k">in</span> h.vars.admin_users.iter().chain([<span class="w">"root"</span>]) {
+        Arch   =&gt; h.pkg([<span class="w">"base-devel"</span>, <span class="w">"clang"</span>, <span class="w">"musl"</span>]),
+        Other(_) =&gt; <span class="k">return</span> Err(TraceError::new(<span class="w">"unsupported distro"</span>)),
+    };
+    <span class="k">let</span> v = &amp;h.vars.rust_build;
+    <span class="k">for</span> u <span class="k">in</span> v.admin_users.iter().map(String::as_str).chain([<span class="w">"root"</span>]) {
         <span class="k">let</span> s = h.as_user(u);
-        <span class="k">let</span> want = &amp;h.vars.rust_version;
-        sh!(s, <span class="w">"curl -sSf https://sh.rustup.rs | sh -s -- -y"</span>, unless = <span class="w">"which cargo"</span>);
-        sh!(s, <span class="w">"rustup update"</span>, unless = <span class="w">"rustc --version | grep -q {want}"</span>);
-        <span class="k">for</span> tool <span class="k">in</span> [<span class="w">"cargo-deb"</span>, <span class="w">"cargo-generate-rpm"</span>] {
-            sh!(s, <span class="w">"cargo install --locked {tool}"</span>, creates = <span class="w">"~/.cargo/bin/{tool}"</span>);
-        }
-        sh!(s, <span class="w">"rustup target add x86_64-unknown-linux-musl"</span>,
-            unless = <span class="w">"rustup target list --installed | grep -qx x86_64-unknown-linux-musl"</span>);
+        s.pkg([<span class="w">"stable"</span>])
+            .rustup()
+            .targets([<span class="w">"x86_64-unknown-linux-musl"</span>])
+            .set_default()
+            .latest();
+        s.pkg([<span class="w">"cargo-deb"</span>, <span class="w">"cargo-generate-rpm"</span>]).cargo().locked();
     }
+    Ok(())
 }</code></pre>
-<p>Sixteen lines, and the "repair a broken install" block the YAML needed is a <code>bin_version</code> fact returning <code>None</code> and the same <code>unless</code>.</p>
+<p>Seventeen lines, and the "repair a broken install" block the YAML needed is the rustup source's own probe: a toolchain that does not answer <code>rustc --version</code> is not installed.</p>
 </section>
 
 <section class="prose" id="prepare">
 <h2>Prepare phase: fail early</h2>
-<p>The repo fetches binaries, reads OpenBao secrets and prompts for passwords in the middle of plays, with <code>delegate_to: localhost</code>. A missing secret in the concourse role fails after the packages are installed and the user is created. That is the late failure this phase exists to remove.</p>
+<p>The repo fetches binaries, reads OpenBao secrets and prompts for passwords in the middle of plays, with <code>delegate_to: localhost</code>. A missing secret fails after the packages are installed and the user is created. That is the late failure this phase exists to remove.</p>
 <p>The rule: <strong>anything that can fail without touching a host runs before anything that touches a host, and a failure there ends the run with nothing changed.</strong> Concretely the prepare phase does, for every host in parallel:</p>
 <ul>
-  <li><strong>Secrets.</strong> Every <code>secret(..)</code> the trace declared is resolved from its backend (OpenBao, env, prompt). Any miss fails the run and names the role that needed it.</li>
+  <li><strong>Secrets.</strong> Every <code>Secret</code> var reference the trace used is resolved from its backend (<code>bao</code>, <code>env</code>, <code>file</code>, <code>prompt</code>), one read per path. Any miss fails the run and names the var and the role that needed it (<a href="#d-secrets">Secrets</a>).</li>
   <li><strong>Downloads.</strong> Every <code>fetch(..)</code> runs on its host: download to <code>/var/tmp/telepatch/&lt;run&gt;/</code>, verify the checksum there, reuse the on-host cache when the checksum matches. Network and checksum failures happen here, per host, before anything moves into place. The controller only downloads when a fetch says <code>.via_controller()</code>.</li>
-  <li><strong>Templates.</strong> Every <code>file(..).content(tpl!(..))</code> is rendered. Missing variables fail here, not on host forty.</li>
+  <li><strong>Templates.</strong> Every template value given to <code>file(..).content(..)</code> or <code>unit(..).content(..)</code> is rendered, per host. A missing variable or a wrong type is a compile error, so nothing about a template fails on host forty (<a href="#d-templates">Templates</a>).</li>
   <li><strong>Facts.</strong> The bulk fact commands run once per host: <code>os</code>, package state, the <code>getent</code> lines, every <code>exists</code> and <code>stat</code> the trace asked for.</li>
   <li><strong>Permissions.</strong> Did <code>sudo -n -H bash</code> succeed at shell open? Does <code>sudo -iu u true</code> work for every user the roles address? Is <code>curl</code> or <code>wget</code> present on hosts that fetch? These are facts with an assertion attached.</li>
 </ul>
@@ -825,13 +1585,13 @@ sh!(h, <span class="w">"rustup target add {target}"</span>, unless = <span class
 
 <section class="prose">
 <h3>How this fits the trace</h3>
-<p>Nothing in the tracing model changes; the executor's flush gets a rule. When the program blocks on a fact read, the flush used to execute everything pending. Now it executes only <em>non-mutating</em> nodes, which are fact reads and prepare ops (<code>secret</code>, <code>fetch</code>, <code>local</code>, template rendering), and leaves mutations in the pending list. Mutations run only when:</p>
+<p>Nothing in the tracing model changes; the executor's flush gets a rule. When the program blocks on a fact read, the flush used to execute everything pending. Now it executes only <em>non-mutating</em> nodes, which are fact reads and prepare ops (secret resolution, <code>fetch</code>, <code>local_file</code> and <code>local</code>, template rendering), and leaves mutations in the pending list. Mutations run only when:</p>
 <ol>
   <li>the trace ends, so the whole playbook's mutations are known and the prepare phase has covered all of them; or</li>
   <li>a fact read needs the effect of a pending mutation and no postcondition answers it. That is an implicit barrier: prepare runs for everything before it, apply runs up to it, the fact is read, and tracing resumes.</li>
 </ol>
 <p>In the corpus, case 2 is rare. The <code>minio_client</code> role does it (download, then ask the installed binary its hash) and <code>mount_btrfs</code> does it (<code>mkfs</code>, then <code>lsblk</code>). Everything else is case 1, which means for most playbooks the apply phase sees every op on every host before the first one runs. That is also the best possible input to the optimizer: the apt merge now spans the whole playbook, not just the first window.</p>
-<p>Secrets never enter the trace as values. A <code>secret(..)</code> returns a handle; the template that uses it is rendered in prepare with the real value; the rendered bytes go to the host; the stream log records the op as <code>file /opt/concourse/keys/worker_key (secret)</code> and redacts the content.</p>
+<p>Secrets never enter the trace as values. A <code>Secret</code> var holds a reference until prepare resolves it; the template that uses it is rendered in prepare with the real value; the rendered bytes go to the host; the stream log records the op as <code>file /etc/telegraf/telegraf.conf (secret)</code> and redacts the content.</p>
 </section>
 
 <section class="prose" id="transactions">
@@ -877,8 +1637,8 @@ sh!(h, <span class="w">"rustup target add {target}"</span>, unless = <span class
 <table>
   <thead><tr><th>When</th><th>What can fail</th><th>Who handles it</th><th>Default outcome</th></tr></thead>
   <tbody>
-    <tr><td>Trace</td><td>missing variable, bad template argument, unparseable path, <code>local(..)</code> failed</td><td>the role body, with <code>?</code>; <code>#[role]</code> returns <code>Result&lt;(), TraceError&gt;</code></td><td>the run fails before prepare. It is a playbook bug, not a host condition.</td></tr>
-    <tr><td>Prepare</td><td>secret missing, fetch or checksum failed, <code>sudo -n</code> refused, <code>sudo -iu u</code> refused, template won't render for this host, a fact assertion failed</td><td>the engine; the role never sees it</td><td>host marked <code>blocked(reason)</code>, nothing changed. Any blocked host stops the run; a flag lets healthy hosts proceed.</td></tr>
+    <tr><td>Trace</td><td>unknown or mistyped var, unparseable path, a policy error without its <code>.allow(..)</code>, conflicting wants on one op; a template's missing field is a compile error, earlier still</td><td>the role body, with <code>?</code>; <code>#[role]</code> returns <code>Result&lt;(), TraceError&gt;</code>, printed with the role and the <code>file:line</code> of the call (<a href="#d-policy">Policy errors</a>)</td><td>the run fails before prepare. It is a playbook bug, not a host condition.</td></tr>
+    <tr><td>Prepare</td><td>secret missing, fetch or checksum failed, a <code>local_file</code> missing or a <code>local</code> command failed, <code>sudo -n</code> refused, <code>sudo -iu u</code> refused, a fact assertion failed, a destructive op without <code>--allow-destructive</code></td><td>the engine; the role never sees it</td><td>host marked <code>blocked(reason)</code>, nothing changed. Any blocked host stops the run; a flag lets healthy hosts proceed.</td></tr>
     <tr><td>Apply</td><td>trailer <code>rc != 0</code>, timeout, typed result failed to parse</td><td>the engine, unless the op opted out</td><td>role fails on that host; undo log runs in reverse; host marked <code>failed(role, op)</code> with the op's last 40 stream lines; later roles on that host are skipped; other hosts continue.</td></tr>
     <tr><td>Rollback</td><td>an inverse op fails</td><td>the engine</td><td>host marked <code>inconsistent(role, op)</code>; undo log left on the host; nothing further on that host.</td></tr>
     <tr><td>Connection loss</td><td>shell gone, in-flight op unknown</td><td>the engine</td><td>reconnect; the run directory on the host holds a per-op completion marker written before each trailer, so the engine learns what finished; then roll back the role from the on-host undo log. Resume is a later feature.</td></tr>
@@ -887,15 +1647,17 @@ sh!(h, <span class="w">"rustup target add {target}"</span>, unless = <span class
 </div>
 <section class="prose">
 <p>The default for apply is deliberately that the role body never sees a host failure. The corpus has 64 uses of <code>ignore_errors</code>, <code>changed_when</code> and <code>failed_when</code> between them and almost all are on check commands, which are facts here. Genuine "react to a failed mutation" logic is rare, and when it exists it should cost something visible. What the author gets:</p>
-<pre><code>sh!(s, <span class="w">"cargo install --locked {tool}"</span>);                 <span class="c">// failure fails the role: the default</span>
-sh!(s, <span class="w">"…"</span>).allow_fail();                                <span class="c">// failure recorded, role continues</span>
-<span class="k">let</span> r = sh!(h, <span class="w">"some-installer"</span>).allow_fail();
+<pre><code>s.pkg([<span class="w">"bindgen-cli"</span>]).cargo().locked();                <span class="c">// failure fails the role: the default</span>
+h.pkg([<span class="w">"vendor-agent"</span>]).allow_fail();                    <span class="c">// failure recorded, role continues</span>
+<span class="k">let</span> r = h.pkg([<span class="w">"vendor-agent"</span>]).allow_fail();
 h.svc(<span class="w">"x"</span>).restart().when(r.ok());                       <span class="c">// outcome as a guard; no sync</span>
+h.fetch(url).sha256(sum).retry(3).timeout(5 * MIN);       <span class="c">// on every op; the timeout runs on the host</span>
+h.wait_for(Port::tcp(5432)).timeout(60 * SEC);            <span class="c">// fails the role if it never opens</span>
+<span class="c">// HACK(resource: diff as a typed check): the escape hatch keeps ok_if</span>
 sh!(h, <span class="w">"diff a b"</span>).ok_if(|rc| rc &lt;= 1);                  <span class="c">// failed_when, typed</span>
-sh!(h, <span class="w">"apt-get update"</span>).retry(3).timeout(5 * MIN);      <span class="c">// in-template loop; timeout kills from the spare shell</span>
-<span class="k">let</span> out = sh!(h, <span class="w">"…"</span>).allow_fail().<span class="k">await</span>?;               <span class="c">// explicit: Rust sees the result; implicit barrier; shown in the plan</span>
-h.assert(s.bin_exists(<span class="w">"cargo"</span>), <span class="w">"cargo missing for {u}"</span>); <span class="c">// the repo's `fail:` task, moved to prepare</span></code></pre>
-<p>The last two are the escape hatches. Awaiting an op's result blocks tracing the way a fact read does, so it is allowed, costs a window, and the dry run shows where. An assertion that depends only on facts runs in prepare and blocks the host before apply, which is where the repo's <code>fail:</code> wanted to be all along.</p>
+<span class="k">let</span> out = h.git(url).into(p).allow_fail().<span class="k">await</span>?;      <span class="c">// explicit: Rust sees the result; implicit barrier; shown in the plan</span>
+h.assert(info.exists, format!(<span class="w">"zsh: {u} has no account"</span>));  <span class="c">// the repo's `fail:` task, moved to prepare</span></code></pre>
+<p>The last two are the escape hatches. Awaiting an op's result blocks tracing the way a fact read does, so it is allowed, costs a window, and the dry run shows where. An assertion that depends only on facts runs in prepare and blocks the host before apply, which is where the repo's <code>fail:</code> wanted to be all along (<a href="#d-facts">Facts and assertions</a>). <code>.retry(n)</code> and <code>.timeout(d)</code> are on every op, not only on <code>sh!</code> (<a href="#d-run-controls">Run controls</a>).</p>
 <p>Three defaults set here rather than left to each author: every op kind has a timeout (<code>pkg</code> long, <code>sh</code> medium, <code>svc</code> short), overridable per op; a guarded op whose source failed is skipped, not failed, because the role has already failed by then; and the run's exit status is non-zero if any host is not <code>ok</code> or <code>changed</code>, with the per-host status table printed first.</p>
 </section>
 
@@ -904,8 +1666,8 @@ h.assert(s.bin_exists(<span class="w">"cargo"</span>), <span class="w">"cargo mi
 <div class="cols">
   <div><h4>Effects are the contract</h4><p>Every op declares <code>reads</code> and <code>writes</code>. Ordering and merge safety are derived from them. <code>shell</code> defaults to <code>writes: *</code>; the user can narrow it with <code>.writes([..])</code>. Lying about effects is the user's problem, the same way <code>changed_when</code> is in Ansible.</p></div>
   <div><h4>Facts vs outputs</h4><p>A fact is a question about the host (<code>pkg_installed</code>, <code>exists</code>, <code>stat</code>). An output is a result of an op (<code>changed</code>, <code>exit</code>, <code>stdout</code>). Facts are awaited and may block. Outputs are never awaited; they drive guards.</p></div>
-  <div><h4>Postconditions are narrow</h4><p>An op's <code>post</code> answers only keys it fully determines. <code>pkg(x).installed()</code> determines <code>pkg:x</code>. It says nothing about <code>file:/etc/x/x.conf</code>, even though apt probably wrote it. When in doubt, return <code>None</code> and let the read block.</p></div>
-  <div><h4>Controller-side I/O is an op</h4><p>Reading a local template or an inventory file inside a role goes through <code>local_read</code>, a fact the engine resolves without a round trip. Not required today, but it keeps roles replayable, which the dry-run view wants and speculation would need.</p></div>
+  <div><h4>Postconditions are narrow</h4><p>An op's <code>post</code> answers only keys it fully determines. <code>pkg([x])</code> determines <code>pkg:x</code>. It says nothing about <code>file:/etc/x/x.conf</code>, even though apt probably wrote it. When in doubt, return <code>None</code> and let the read block.</p></div>
+  <div><h4>Controller-side I/O is an op</h4><p>Reading a controller file or running a controller command inside a role goes through <code>local_file</code>, <code>local_dir</code> or <code>local([argv])</code>, values the engine resolves in prepare without a round trip. It keeps roles replayable, which the dry-run view wants and speculation would need.</p></div>
   <div><h4>Explicit barriers stay</h4><p><code>barrier()</code> is an edge from everything before to everything after on that host. It is the escape hatch when effects are too coarse to express an ordering, and it is also what "don't merge these two apt calls" looks like.</p></div>
   <div><h4>Within-host order is trace order</h4><p>Version one reorders nothing on a host except merge-hoisting. Hosts run fully in parallel. Reordering unrelated ops on one host comes later, once declared effects have earned trust.</p></div>
 </div>
@@ -917,7 +1679,7 @@ h.assert(s.bin_exists(<span class="w">"cargo"</span>), <span class="w">"cargo mi
 <ol>
   <li><strong>Journal.</strong> Persist <code>(host, key) → value</code> from each run. The resolver gains a third source, <code>Journaled</code>, consulted after postconditions and before blocking.</li>
   <li><strong>Verify.</strong> Before executing a window, gather every <code>Journaled</code> read whose key no pending op writes, one batched round trip per host. If a value differs, replace it with the real one and re-trace.</li>
-  <li><strong>Re-trace.</strong> The program becomes something you run from the top again instead of a suspended future, and the prefix that has already executed must come out identical. That is where the determinism rule and <code>local_read</code> become mandatory.</li>
+  <li><strong>Re-trace.</strong> The program becomes something you run from the top again instead of a suspended future, and the prefix that has already executed must come out identical. That is where the determinism rule and <code>local_file</code> become mandatory.</li>
 </ol>
 <p>The op model, the optimizer, the executor, the agent protocol and the UI are untouched. The <code>Source</code> enum and the loop grow; nothing else does.</p>
 </section>
@@ -930,7 +1692,7 @@ h.assert(s.bin_exists(<span class="w">"cargo"</span>), <span class="w">"cargo mi
   <li>The trace recorder and the resolver, with a fake executor that just records what it would have run, including the deferred-mutation rule.</li>
   <li>The three optimizer passes, especially <code>hoist_is_safe</code>.</li>
   <li>A dozen adversarial playbooks: merges that must happen, merges that must not, guards on guards, a <code>sh</code> in the middle of a package run, the same fact read from two roles, a read that forces an implicit barrier.</li>
-  <li>Port <code>zsh</code>, <code>rust_build</code> and <code>concourse_ci_worker</code> from the Ansible repo on top of it. The first two exercise per-user and ensure; the third exercises secrets, fetch and rollback coverage reporting.</li>
+  <li>Port <code>zsh</code> and <code>rust_build</code> from the Ansible repo on top of it. They exercise per-user ops and ensure.</li>
 </ul>
 <p>Instrument the count of blocking reads per playbook. That number decides whether speculation is ever worth building. The SSH layer, the trailer parser, and the terminal UI are large but they are well-trodden; they are not the part of this design that could be mistaken.</p>
 </section>

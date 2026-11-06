@@ -136,9 +136,13 @@ and return handles. Packages have a *source* (the distro manager, pip,
 cargo, rustup, or a vendor install script) and a *wanted* state (present,
 pinned to a version, or latest), and every source knows how to probe, install
 and update, so an installer is never a bare shell line with a `creates`
-guard. Anything that really is a shell line is `sh!`, with shell-quoted
-interpolation and `unless`, `creates` and `changed_if` so check-then-act is
-one line.
+guard. The example uses the per-source methods built today; the decided API
+chains the source onto one call, `s.pkg(["stable"]).rustup()` and
+`s.pkg([..]).cargo()`, and removes those methods (designed; see the note's
+"The decided API"). `sh!` is the escape hatch for a need no primitive meets
+yet, with shell-quoted interpolation and `unless`, `creates` and
+`changed_if`. The decided rule is that a role body has no shell: each `sh!`
+carries a `// HACK(<primitive>)` comment and is to be reported as a warning.
 
 The binary it builds has three commands:
 
@@ -188,17 +192,24 @@ The full design, including the parts not built yet, is in
 |---|---|
 | Trace, resolver, engine loop, optimizer | Built, with snapshot tests and an adversarial plan suite |
 | `pkg` from the distro (apt, dnf, yum, pacman, apt build-dep) | Built; merged across roles; apt cache refreshed once when stale |
-| `pkg` from pip, cargo, rustup, vendor scripts (`h.pip`, `h.cargo`, `h.rustup`, `h.script`) | Built; present, pinned or latest; latest resolved on the host by the source's own command |
-| `file` (content, line, line_re, dir, absent, mode, owner) | Built |
-| `sh!` with `unless`, `creates`, `changed_if`; `raw`; `barrier` | Built |
+| `pkg` from pip, cargo, rustup, mise and vendor installer scripts | Built, one host method per source; present, pinned or latest; latest resolved on the host by the source's own command |
+| One `pkg` with the source chained (`h.pkg([..]).pip()`, `.cargo().locked()`, `.rustup()`, `.mise()`, `.yum()`, `.installer_script(..)`, `.binary_release(..)`), replacing the per-source methods; pin, latest and absent on the distro manager; a package from a fetched file | Designed, not built |
+| `file` (content, line, line_re, dir, absent, mode, owner, validate) | Built |
+| `repo` (apt deb822, dnf), `user`, `group` | Built |
+| `sh!` with `unless`, `creates`, `changed_if`; `raw`; `barrier` | Built; the warning for `sh!` in a role body is designed |
 | `as_user` | Built; a persistent login shell per user over SSH, a fresh login environment per op elsewhere |
 | Facts: `os`, `exists`, `bin_exists`, `bin_version` | Built; `os` from os-release across 15 distro releases |
 | Transports | Local (`bash`, `sudo -n -H bash`), `docker exec`, SSH (multiplexed, root and per-user shells) |
 | CLI (`list`, `plan`, `run --local`, `run --host …`), JSONL log, static musl binaries | Built |
-| Guards (`.when(op.changed())`) | Traced and planned; the executor refuses them at prepare |
+| Guards (`.when(op.changed())`) | Built as far as trace and plan; the executor refuses them at prepare. Designed: evaluation on the host, `.ok()`, `\|`/`&`/`!`, `.at_end()`, or-joined merges |
 | `svc` (`.enabled()`, `.started()`) | Built; without a running systemd the enable is applied offline and the start is skipped; no `systemctl` skips the op |
-| `repo`, `user`, `fetch`, `git`, `secret` | Designed, not built |
-| Role rollback, templates, reconnect, PTY | Designed, not built |
+| `svc` `.disabled()`, `.masked()`, `.stopped()`, guarded `.restart()` and `.reload()`; `h.unit` | Designed, not built |
+| Policy errors (`.allow(Policy, reason)`), trace errors with a location | Designed, not built |
+| `fetch`, `git`, `local_file`/`local_dir`/`local`, author-defined resources, `wait_for` | Designed, not built |
+| `Secret` vars and the `telepatch-openbao` crate, askama templates, vars per role | Designed, not built |
+| Typed facts (`user_info`, `stat`, `pkg_installed`, `check`) and `h.assert` | Designed, not built |
+| `--check`/`--diff`, inventory and `--limit`, `--serial`/`--max-fail`/`--only`, `.retry`/`.timeout`, reboot marks and the barrier | Designed, not built |
+| Role rollback (the undo log), reconnect, PTY | Designed, not built |
 
 ## Porting from Ansible
 
