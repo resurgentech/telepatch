@@ -33,8 +33,9 @@
 //!
 //! The op scripts ([`render`]) read only the cache entry (or the staged
 //! file): `.from` copies it to a candidate beside the target, with the
-//! final mode and owner, and renames that over the target when `cmp`
-//! differs. `.unpack` unpacks into a sibling `<target>.tpXXXXXX`, sets mode
+//! final mode and owner, and renames that over the target when the
+//! target's `sha256sum` differs from the fetch's (no `cmp`: Rocky's minimal
+//! image has no diffutils). `.unpack` unpacks into a sibling `<target>.tpXXXXXX`, sets mode
 //! and owner, writes a marker `.telepatch-fetch` (`<sum> strip=<n>`) inside,
 //! then swaps it in: the target is absent (one rename), or the old tree is
 //! renamed aside first, the new one renamed in, the old removed (two
@@ -377,7 +378,7 @@ fn render_place(f: &FileSpec, o: &mut String) {
         "if [ \"$rc\" -eq 0 ] && [ -d \"$tp_p\" ]; then echo \"telepatch: $tp_p is a directory\" >&2; rc=1; fi\n",
     );
     o.push_str(
-        "if [ \"$rc\" -eq 0 ] && ! { [ -f \"$tp_p\" ] && cmp -s \"$tp_f\" \"$tp_p\"; }; then\n  tp_t=$(mktemp \"$tp_p.tpXXXXXX\") || rc=$?\n  if [ \"$rc\" -eq 0 ]; then\n    cp -- \"$tp_f\" \"$tp_t\" || rc=$?\n",
+        "if [ \"$rc\" -eq 0 ] && ! { [ -f \"$tp_p\" ] && [ \"$(sha256sum < \"$tp_p\" | cut -d' ' -f1)\" = \"$tp_s\" ]; }; then\n  tp_t=$(mktemp \"$tp_p.tpXXXXXX\") || rc=$?\n  if [ \"$rc\" -eq 0 ]; then\n    cp -- \"$tp_f\" \"$tp_t\" || rc=$?\n",
     );
     match f.mode {
         Some(m) => o.push_str(&format!(

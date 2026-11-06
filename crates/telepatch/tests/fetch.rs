@@ -1018,3 +1018,32 @@ fn the_real_curl_downloads_a_file_url() {
     assert_eq!(e.cache(), [sum]);
     e.assert_clean();
 }
+
+/// Rocky's minimal image has no `cmp` (diffutils): `.from(f)` compares by
+/// the checksum it already knows (found by the live gate, T81).
+#[test]
+fn from_needs_no_cmp_on_the_host() {
+    let e = Env::new();
+    e.serve("k.gpg", b"key bytes\n");
+    let sum = sha256(b"key bytes\n");
+    let target = e.p("out/k.gpg");
+    let v = V::from("http://fake/k.gpg", Some(&sum), &target);
+    let farm = e.farm_without(&["cmp"]);
+    let bin = e.fakes(&["curl"]);
+    let path = format!("{}:{}", bin.display(), farm.display());
+    let (r1, out1) = e.go(&v, &path);
+    assert_eq!(status(&r1), &HostStatus::Changed, "{out1}\n{}", r1.render());
+    assert!(!out1.contains("command not found"), "{out1}");
+    let (r2, out2) = e.go(&v, &path);
+    assert_eq!(status(&r2), &HostStatus::Ok, "{out2}\n{}", r2.render());
+    assert!(
+        r2.hosts[0].ops.iter().all(|o| !o.changed),
+        "{}",
+        r2.render()
+    );
+    std::fs::write(&target, "stale").unwrap();
+    let (r3, out3) = e.go(&v, &path);
+    assert_eq!(status(&r3), &HostStatus::Changed, "{out3}");
+    assert_eq!(std::fs::read(&target).unwrap(), b"key bytes\n");
+    e.assert_clean();
+}
