@@ -43,3 +43,9 @@ role demo
       | systemctl stop {maybe}
       | rc=$?
       | if [ "$rc" -eq 0 ]; then changed=1; fi
+
+warning: sh! in a role body at crates/telepatch/tests/sh_snapshot.rs:13
+warning: sh! in a role body at crates/telepatch/tests/sh_snapshot.rs:14
+warning: sh! in a role body at crates/telepatch/tests/sh_snapshot.rs:20
+warning: sh! in a role body at crates/telepatch/tests/sh_snapshot.rs:21
+warning: sh! in a role body at crates/telepatch/tests/sh_snapshot.rs:27

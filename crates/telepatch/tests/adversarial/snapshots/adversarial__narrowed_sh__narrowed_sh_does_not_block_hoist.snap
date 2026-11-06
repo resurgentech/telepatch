@@ -30,3 +30,5 @@ role script
       | touch /var/lib/marker
       | rc=$?
       | if [ "$rc" -eq 0 ]; then changed=1; fi
+
+warning: sh! in a role body at crates/telepatch/tests/adversarial/narrowed_sh.rs:14

@@ -46,3 +46,5 @@ role last
       |     if [ "$rc" -eq 0 ]; then changed=1; installed=("${tp_missing[@]}"); fi
       |   fi
       | fi
+
+warning: sh! in a role body at crates/telepatch/tests/adversarial/sh_blocks.rs:14

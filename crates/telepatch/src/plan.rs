@@ -6,7 +6,7 @@ use std::fmt::Write;
 use crate::engine::{Window, WindowKind};
 use crate::facts::os::Os;
 use crate::key::Key;
-use crate::trace::{Guard, Node, OpNode, Trace};
+use crate::trace::{Guard, Node, OpNode, Site, Trace, sh_sites};
 
 fn keys(set: &std::collections::BTreeSet<Key>) -> String {
     let v: Vec<String> = set.iter().map(|k| k.to_string()).collect();
@@ -49,6 +49,23 @@ fn op_line(out: &mut String, id: usize, op: &OpNode, os: &Os) {
     }
 }
 
+/// The warning line for one `sh!` site.
+pub fn sh_warning(site: &Site) -> String {
+    format!("warning: sh! in a role body at {site}")
+}
+
+/// The plan's closing block: a blank line, then one warning per `sh!` site.
+/// Empty when there is none.
+fn sh_warnings(out: &mut String, sites: &[Site]) {
+    if sites.is_empty() {
+        return;
+    }
+    out.push('\n');
+    for s in sites {
+        let _ = writeln!(out, "{}", sh_warning(s));
+    }
+}
+
 /// Render one host's trace: header, then per role each node in order.
 pub fn render_host(name: &str, os: &Os, trace: &Trace) -> String {
     let mut out = String::new();
@@ -87,6 +104,7 @@ pub fn render_host(name: &str, os: &Os, trace: &Trace) -> String {
             Node::RoleBegin(_) | Node::RoleEnd(_) => unreachable!(),
         }
     }
+    sh_warnings(&mut out, &trace.sh_sites());
     out
 }
 
@@ -155,5 +173,9 @@ pub fn render_windows(name: &str, os: &Os, blocking_reads: usize, windows: &[Win
             }
         }
     }
+    sh_warnings(
+        &mut out,
+        &sh_sites(windows.iter().flat_map(|w| w.ops.iter().map(|o| &o.node))),
+    );
     out
 }

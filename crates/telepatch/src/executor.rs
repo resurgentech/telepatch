@@ -652,6 +652,11 @@ impl Executor for HostExec {
             json!({"ev":"window","host":self.name,"n":window.number,"kind":kind,
             "ops": window.ops.iter().map(|o| o.id.0).collect::<Vec<_>>()}),
         );
+        for site in crate::trace::sh_sites(window.ops.iter().map(|o| &o.node)) {
+            if !self.report.sh_sites.contains(&site) {
+                self.report.sh_sites.push(site);
+            }
+        }
         if window.ops.is_empty() {
             return Ok(());
         }

@@ -276,6 +276,14 @@ fn role_stack(nodes: &[Node]) -> Vec<String> {
 }
 
 impl Trace {
+    /// The site of every `sh!` in the trace, first appearance first, each once.
+    pub fn sh_sites(&self) -> Vec<Site> {
+        sh_sites(self.nodes.iter().filter_map(|n| match n {
+            Node::Op(op) => Some(op),
+            _ => None,
+        }))
+    }
+
     pub fn push(&mut self, node: Node) -> NodeId {
         self.nodes.push(node);
         NodeId(self.nodes.len() - 1)
@@ -321,4 +329,18 @@ impl Trace {
             })
             .count()
     }
+}
+
+/// The `sh!` sites of `ops`, in order, each once.
+pub fn sh_sites<'a>(ops: impl IntoIterator<Item = &'a OpNode>) -> Vec<Site> {
+    let mut out: Vec<Site> = Vec::new();
+    for op in ops {
+        if let OpSpec::Shell(s) = &op.spec
+            && let Some(site) = s.site
+            && !out.contains(&site)
+        {
+            out.push(site);
+        }
+    }
+    out
 }

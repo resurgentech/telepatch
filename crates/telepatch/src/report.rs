@@ -176,6 +176,9 @@ pub struct HostReport {
     pub will_install: Vec<WillInstall>,
     pub will_change: Vec<WillChange>,
     pub will_create: Vec<WillCreate>,
+    /// Every `sh!` in the ops the executor received, each site once. Printed
+    /// as a warning; never changes the status.
+    pub sh_sites: Vec<crate::trace::Site>,
 }
 
 impl HostReport {
@@ -188,6 +191,7 @@ impl HostReport {
             will_install: Vec::new(),
             will_change: Vec::new(),
             will_create: Vec::new(),
+            sh_sites: Vec::new(),
         }
     }
 
@@ -279,6 +283,10 @@ impl Report {
                 for a in &o.allowed {
                     let _ = writeln!(out, "\n{}: #{} {}: {a}", h.name, o.id, o.desc);
                 }
+            }
+            for (i, s) in h.sh_sites.iter().enumerate() {
+                let nl = if i == 0 { "\n" } else { "" };
+                let _ = writeln!(out, "{nl}{}: {}", h.name, crate::plan::sh_warning(s));
             }
         }
         for h in &self.hosts {
@@ -376,5 +384,24 @@ mod tests {
         );
         assert!(WillChange::lines(&[]).is_empty());
         assert_eq!(items[0].line(), WillChange::lines(&items[..1])[0]);
+    }
+
+    #[test]
+    fn render_lists_sh_warnings_and_exit_code_stays() {
+        use crate::trace::Site;
+        let mut h = HostReport::new("ws1");
+        h.status = HostStatus::Changed;
+        h.sh_sites = vec![Site {
+            file: "src/roles/x.rs",
+            line: 7,
+        }];
+        let r = Report { hosts: vec![h] };
+        assert!(
+            r.render()
+                .ends_with("\nws1: warning: sh! in a role body at src/roles/x.rs:7\n"),
+            "{}",
+            r.render()
+        );
+        assert_eq!(r.exit_code(), 0);
     }
 }

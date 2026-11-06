@@ -181,3 +181,50 @@ fn ui() {
     let t = trybuild::TestCases::new();
     t.compile_fail("tests/ui/*.rs");
 }
+
+fn shell_site(h: &Host<()>, id: telepatch::NodeId) -> Option<telepatch::trace::Site> {
+    match &h.snapshot().nodes[id.0] {
+        Node::Op(op) => match &op.spec {
+            OpSpec::Shell(s) => s.site,
+            _ => panic!("not a shell op"),
+        },
+        _ => panic!("not an op"),
+    }
+}
+
+#[test]
+fn sh_records_the_line_it_is_written_on() {
+    let h = host();
+    let line = line!() + 1;
+    let id = sh!(h, "true").id();
+    let site = shell_site(&h, id).expect("sh! records its site");
+    assert_eq!(site.file, file!());
+    assert_eq!(site.line, line);
+}
+
+#[test]
+fn plan_ends_with_one_warning_per_site() {
+    let h = host();
+    let first = line!() + 2;
+    for _ in 0..2 {
+        sh!(h, "true");
+    }
+    let second = line!() + 1;
+    sh!(h, "false");
+    h.raw("toy op, not an sh!");
+    let plan = telepatch::plan::render_host("t", &h.os, &h.snapshot());
+    let want = format!(
+        "\nwarning: sh! in a role body at {f}:{first}\nwarning: sh! in a role body at {f}:{second}\n",
+        f = file!()
+    );
+    assert!(plan.ends_with(&want), "{plan}");
+    assert_eq!(plan.matches("warning:").count(), 2, "{plan}");
+}
+
+#[test]
+fn plan_without_sh_has_no_warning() {
+    let h = host();
+    h.raw("toy op, not an sh!");
+    let plan = telepatch::plan::render_host("t", &h.os, &h.snapshot());
+    assert!(!plan.contains("warning:"), "{plan}");
+}

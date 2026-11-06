@@ -1,7 +1,7 @@
 //! Runtime support for `sh!`: quoting and the shell op's script body.
 
 use crate::host::{Host, OpHandle};
-use crate::trace::OpSpec;
+use crate::trace::{OpSpec, Site};
 
 /// POSIX single-quote `s`: the result is one shell word whatever `s` holds.
 pub fn quote(s: &str) -> String {
@@ -19,6 +19,10 @@ pub struct ShellSpec {
     pub creates: Option<String>,
     /// Regex (`grep -E`) over combined output; the op changed iff it matches.
     pub changed_if: Option<String>,
+    /// Where the `sh!` was written (`file!()`, `line!()` of the macro call);
+    /// the plan and the run report warn about every such site. `None` for a
+    /// spec built by hand.
+    pub site: Option<Site>,
 }
 
 impl ShellSpec {

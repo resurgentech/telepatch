@@ -166,6 +166,10 @@ pub fn sh(input: TokenStream) -> TokenStream {
                 unless: #unless,
                 creates: #creates,
                 changed_if: #changed_if,
+                site: ::std::option::Option::Some(::telepatch::trace::Site {
+                    file: ::std::file!(),
+                    line: ::std::line!(),
+                }),
             })
         })
     };

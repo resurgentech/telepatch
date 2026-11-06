@@ -33,3 +33,5 @@ role greet
       | echo hi
       | rc=$?
       | if [ "$rc" -eq 0 ]; then changed=1; fi
+
+warning: sh! in a role body at crates/telepatch/tests/cli.rs:22

@@ -5,6 +5,9 @@ expression: "scrub(&r.render(), d.path())"
 HOST  STATUS    OK CHANGED FAILED NOT RUN  DETAIL
 h1    failed     0       1      1       2  role first: sh echo one; echo two >&2; echo boom-last; exit 3 (rc 3)
 
+h1: warning: sh! in a role body at crates/telepatch/tests/executor_local.rs:95
+h1: warning: sh! in a role body at crates/telepatch/tests/executor_local.rs:96
+
 h1: role first failed: sh echo one; echo two >&2; echo boom-last; exit 3 (rc 3)
 last output lines:
   | one

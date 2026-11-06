@@ -51,3 +51,5 @@ role web
       | nginx -t
       | rc=$?
       | if [ "$rc" -eq 0 ]; then changed=1; fi
+
+warning: sh! in a role body at crates/telepatch/tests/adversarial/merge_roles.rs:16
