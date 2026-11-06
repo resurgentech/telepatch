@@ -39,6 +39,30 @@
 //! sending windows but lets the engine finish tracing, so the report can
 //! list every skipped role; fact reads still run (they only read).
 //!
+//! # Guards
+//!
+//! A guarded op (`.when(g)`) is sent inside the halt gate as `if <test>;
+//! then <op>; else <guard-skip trailer>; fi`; the shell decides, the
+//! executor never waits for it. In `<test>` each `changed(#n)` / `ok(#n)`
+//! of the guard is either
+//!
+//! - a shell variable, `__tp_c_<n>` / `__tp_ok_<n>` (`1` or `0`), when the
+//!   source op is earlier in the same run (same principal's shell, not yet
+//!   collected). Such a source is sent with `__tp_f=$(mktemp)` set: its
+//!   trailer also writes `changed` and the `installed` names to that file,
+//!   and the parent shell, after the op, reads it back, removes it and sets
+//!   the variables beside `__tp_halt` (for every member of a merged op;
+//!   for a merged `pkg` op a member's `changed` is whether one of its own
+//!   names is in `installed`). `ok` is the op's exit status being 0.
+//! - a constant, `true` / `false`, when the source was already reported
+//!   (an earlier run, another principal, an earlier window): runs are
+//!   collected in full before the next is sent, so the outcome is known.
+//!
+//! A failed source (an `allow_fail` op) is neither `ok` nor `changed`; a
+//! source skipped by its own guard is `ok`, not `changed`; one never run is
+//! neither. The guard-skip trailer is rc 0 with `"when":false`, reported as
+//! [`Outcome::Skipped`]: never changed, never failed.
+//!
 //! # Stream
 //!
 //! Each op prints `== host [role] #id desc ==`, its output lines prefixed
@@ -64,7 +88,7 @@ use crate::pool::{Event, Shell};
 use crate::prepare;
 use crate::report::{HostReport, HostStatus, OpRecord, Outcome, Report};
 use crate::role::Playbook;
-use crate::trace::{OpNode, OpSpec, Principal};
+use crate::trace::{Guard, NodeId, OpNode, OpSpec, Principal};
 use crate::trailer::{OpKind, Trailer, wrap};
 use crate::transport::docker::DockerTransport;
 use crate::transport::local::LocalTransport;
@@ -269,6 +293,157 @@ pub struct HostExec {
     verdict: Option<HostStatus>,
     users_ok: BTreeSet<String>,
     seq: usize,
+    /// The reported outcome of every trace op so far, by member id: the
+    /// constants guards in later runs and windows are evaluated with.
+    known: HashMap<NodeId, Known>,
+}
+
+/// What a guard can know about a reported op.
+#[derive(Debug, Clone, Copy)]
+struct Known {
+    ok: bool,
+    changed: bool,
+}
+
+/// Does a member of `w` change only when one of its own names was
+/// installed? For a merged `pkg` op whose `installed` list is known (not
+/// `build-dep`).
+fn member_rule(w: &WindowOp) -> bool {
+    matches!(&w.node.spec, OpSpec::Pkg(p) if p.mode != PkgMode::BuildDep) && w.members.len() > 1
+}
+
+/// Was `name` (a member's own) installed, per an `installed` entry `got`?
+/// pip pins are reported as `name==version`.
+fn installed_as(got: &str, name: &str) -> bool {
+    got == name
+        || got
+            .strip_prefix(name)
+            .is_some_and(|rest| rest.starts_with("=="))
+}
+
+/// The shell test for `g`: constants for reported sources, variables for
+/// sources earlier in this run (`in_run`), `false` for anything else (a
+/// trace error prevents that).
+fn guard_test(g: &Guard, known: &HashMap<NodeId, Known>, in_run: &BTreeSet<NodeId>) -> String {
+    let atom = |n: &NodeId, var: &str, pick: fn(&Known) -> bool| match known.get(n) {
+        Some(k) if pick(k) => "true".to_string(),
+        Some(_) => "false".to_string(),
+        None if in_run.contains(n) => format!("[ \"${{__tp_{var}_{}-0}}\" = 1 ]", n.0),
+        None => "false".to_string(),
+    };
+    match g {
+        Guard::Changed(n) => atom(n, "c", |k| k.changed),
+        Guard::ExitOk(n) => atom(n, "ok", |k| k.ok),
+        Guard::Not(g) => format!("! {{ {}; }}", guard_test(g, known, in_run)),
+        Guard::Or(a, b) => format!(
+            "{{ {} || {}; }}",
+            guard_test(a, known, in_run),
+            guard_test(b, known, in_run)
+        ),
+        Guard::And(a, b) => format!(
+            "{{ {} && {}; }}",
+            guard_test(a, known, in_run),
+            guard_test(b, known, in_run)
+        ),
+    }
+}
+
+/// `__tp_c_<m>=<c>; __tp_ok_<m>=<ok>` for every member of `w`.
+fn assign(w: &WindowOp, c: u8, ok: u8) -> String {
+    w.members
+        .iter()
+        .map(|m| format!("__tp_c_{0}={c}; __tp_ok_{0}={ok}\n", m.id.0))
+        .collect()
+}
+
+/// After a guard source ran (its exit status in `__tp_rc`): read what its
+/// trailer wrote to `$__tp_f`, remove the file, set every member's
+/// variables.
+fn source_vars(w: &WindowOp) -> String {
+    let mut o = String::from(
+        "__tp_x=; __tp_inst=()\n\
+         if [ -n \"$__tp_f\" ]; then { IFS= read -r __tp_x; mapfile -t __tp_inst; } < \"$__tp_f\"; rm -f \"$__tp_f\"; fi\n\
+         __tp_f=\n",
+    );
+    o.push_str(&assign(w, 0, 0));
+    o.push_str("if [ \"$__tp_rc\" -eq 0 ]; then\n");
+    for m in &w.members {
+        let id = m.id.0;
+        let _ = std::fmt::Write::write_fmt(&mut o, format_args!("  __tp_ok_{id}=1\n"));
+        if !member_rule(w) {
+            let _ = std::fmt::Write::write_fmt(
+                &mut o,
+                format_args!("  [ \"$__tp_x\" != true ] || __tp_c_{id}=1\n"),
+            );
+        } else if !m.pkg_names.is_empty() {
+            let pats: Vec<String> = m
+                .pkg_names
+                .iter()
+                .map(|n| {
+                    let q = crate::sh::quote(n);
+                    format!("{q}|{q}==*")
+                })
+                .collect();
+            let _ = std::fmt::Write::write_fmt(
+                &mut o,
+                format_args!(
+                    "  for __tp_y in \"${{__tp_inst[@]}}\"; do case \"$__tp_y\" in {}) __tp_c_{id}=1;; esac; done\n",
+                    pats.join("|")
+                ),
+            );
+        }
+    }
+    o.push_str("fi\n");
+    o
+}
+
+/// `w`'s script as sent: inside the halt gate; inside its guard's test
+/// when it has one; as a guard source (`source`: a guard later in the run
+/// reads it) with the result variables set after it.
+fn gate(w: &WindowOp, script: &str, nonce: &str, test: Option<&str>, source: bool) -> String {
+    let id = w.id.0;
+    let kind = w.node.spec.op_kind();
+    let run = if source {
+        let halt = if w.node.allow_fail {
+            ""
+        } else {
+            "[ \"$__tp_rc\" -eq 0 ] || __tp_halt=1\n"
+        };
+        format!(
+            "__tp_f=$(mktemp 2>/dev/null) || __tp_f=\n{script}__tp_rc=$?\n{halt}{}",
+            source_vars(w)
+        )
+    } else {
+        let set = if w.node.allow_fail {
+            ""
+        } else {
+            "[ $? -eq 0 ] || __tp_halt=1\n"
+        };
+        format!("{script}{set}")
+    };
+    let not_run = if source {
+        assign(w, 0, 0)
+    } else {
+        String::new()
+    };
+    let run = match test {
+        None => run,
+        Some(t) => {
+            let skipped = if source {
+                assign(w, 0, 1)
+            } else {
+                String::new()
+            };
+            format!(
+                "if {t}; then\n{run}else\n{}{skipped}fi\n",
+                crate::trailer::guard_skip(kind, id, nonce)
+            )
+        }
+    };
+    format!(
+        "if [ -z \"${{__tp_halt-}}\" ]; then\n{run}else\n{}{not_run}fi\n",
+        skip_script(&w.node, id, nonce)
+    )
 }
 
 fn describe(op: &OpNode) -> String {
@@ -345,20 +520,36 @@ fn roles_of(w: &WindowOp) -> Vec<String> {
     v
 }
 
-fn parse_result(kind: OpKind, t: &Trailer) -> Result<(i32, bool, bool), String> {
+/// A trailer's `(rc, changed, skipped, installed)`; `installed` for a
+/// `pkg` result only.
+type Parsed = (i32, bool, bool, Option<Vec<String>>);
+
+fn parse_result(kind: OpKind, t: &Trailer) -> Result<Parsed, String> {
     use crate::trailer::{
         FileResult, GroupResult, PkgResult, RepoResult, ShellResult, SvcResult, UserResult,
     };
     let r = match kind {
-        OpKind::Pkg => t.typed::<PkgResult>().map(|r| (r.rc, r.changed, false)),
-        OpKind::File => t.typed::<FileResult>().map(|r| (r.rc, r.changed, false)),
-        OpKind::Group => t.typed::<GroupResult>().map(|r| (r.rc, r.changed, false)),
-        OpKind::User => t.typed::<UserResult>().map(|r| (r.rc, r.changed, false)),
-        OpKind::Repo => t.typed::<RepoResult>().map(|r| (r.rc, r.changed, false)),
-        OpKind::Svc => t.typed::<SvcResult>().map(|r| (r.rc, r.changed, r.skipped)),
+        OpKind::Pkg => t
+            .typed::<PkgResult>()
+            .map(|r| (r.rc, r.changed, false, Some(r.installed))),
+        OpKind::File => t
+            .typed::<FileResult>()
+            .map(|r| (r.rc, r.changed, false, None)),
+        OpKind::Group => t
+            .typed::<GroupResult>()
+            .map(|r| (r.rc, r.changed, false, None)),
+        OpKind::User => t
+            .typed::<UserResult>()
+            .map(|r| (r.rc, r.changed, false, None)),
+        OpKind::Repo => t
+            .typed::<RepoResult>()
+            .map(|r| (r.rc, r.changed, false, None)),
+        OpKind::Svc => t
+            .typed::<SvcResult>()
+            .map(|r| (r.rc, r.changed, r.skipped, None)),
         OpKind::Sh => t
             .typed::<ShellResult>()
-            .map(|r| (r.rc, r.changed, r.skipped)),
+            .map(|r| (r.rc, r.changed, r.skipped, None)),
     };
     r.map_err(|e| format!("unreadable result {:?}: {e}", t.json))
 }
@@ -380,6 +571,7 @@ impl HostExec {
             verdict: None,
             users_ok: BTreeSet::new(),
             seq: PROBE_BASE,
+            known: HashMap::new(),
         }
     }
 
@@ -444,6 +636,7 @@ impl HostExec {
         changed: bool,
         note: &str,
     ) {
+        let when = w.node.guard.as_ref().map(|g| g.to_string());
         let label = match outcome {
             Outcome::Changed => "changed".to_string(),
             Outcome::Unchanged if note.is_empty() => "ok".to_string(),
@@ -451,6 +644,7 @@ impl HostExec {
             Outcome::Failed => format!("FAILED rc={rc}"),
             Outcome::AllowedFail => format!("failed rc={rc} (allowed)"),
             Outcome::NotRun => "not run".to_string(),
+            Outcome::Skipped => format!("skipped (when {})", when.as_deref().unwrap_or("")),
         };
         self.sink.line(&format!("-> {label}"));
         self.sink
@@ -464,7 +658,40 @@ impl HostExec {
             rc,
             changed,
             allowed: w.node.allowed.clone(),
+            when,
         });
+        self.remember(w, outcome, changed, None);
+    }
+
+    /// Record `w`'s outcome for later guards, per member. `installed` is
+    /// the `pkg` result's list (the member rule); `None` uses `changed`.
+    fn remember(
+        &mut self,
+        w: &WindowOp,
+        outcome: Outcome,
+        changed: bool,
+        installed: Option<&[String]>,
+    ) {
+        let ok = matches!(
+            outcome,
+            Outcome::Unchanged | Outcome::Changed | Outcome::Skipped
+        );
+        let ran = ok && outcome != Outcome::Skipped;
+        for m in &w.members {
+            let c = match installed {
+                Some(got) if member_rule(w) => got
+                    .iter()
+                    .any(|g| m.pkg_names.iter().any(|n| installed_as(g, n))),
+                _ => changed,
+            };
+            self.known.insert(
+                m.id,
+                Known {
+                    ok,
+                    changed: ran && c,
+                },
+            );
+        }
     }
 
     fn fail(&mut self, w: &WindowOp, desc: &str, rc: i32, tail: String) {
@@ -599,6 +826,7 @@ impl Executor for HostExec {
                 allow_fail: false,
                 site: None,
                 allowed: Vec::new(),
+                at_end: false,
             };
             let id = self.seq;
             let who = &q.run_as.principal;
@@ -647,6 +875,7 @@ impl Executor for HostExec {
             WindowKind::NonMutating => "non-mutating",
             WindowKind::ImplicitBarrier => "implicit barrier",
             WindowKind::Final => "final",
+            WindowKind::AtEnd => "at end",
         };
         self.sink.event(
             json!({"ev":"window","host":self.name,"n":window.number,"kind":kind,
@@ -668,16 +897,6 @@ impl Executor for HostExec {
         }
 
         // Prepare: nothing is sent to be applied until all of it passes.
-        for w in &window.ops {
-            if w.node.guard.is_some() {
-                let why = format!(
-                    "op #{} has a guard (when); guards are not supported by the executor yet",
-                    w.id.0
-                );
-                self.block(why.clone());
-                return Err(why);
-            }
-        }
         let prepared = prepare::prepare_window(
             &mut self.shells,
             window,
@@ -726,16 +945,46 @@ impl Executor for HostExec {
             }
         }
 
+        // Consecutive ops on the same principal's shell form a run.
+        let mut runs: Vec<(usize, usize)> = Vec::new();
+        let mut s = 0;
+        while s < window.ops.len() {
+            let who = &window.ops[s].node.run_as.principal;
+            let e = window.ops[s..]
+                .iter()
+                .position(|w| w.node.run_as.principal != *who)
+                .map_or(window.ops.len(), |n| s + n);
+            runs.push((s, e));
+            s = e;
+        }
+        // The ops a guard later in the same run reads: sent as sources.
+        let mut source = vec![false; window.ops.len()];
+        for &(s, e) in &runs {
+            let read: BTreeSet<NodeId> = window.ops[s..e]
+                .iter()
+                .filter_map(|w| w.node.guard.as_ref())
+                .flat_map(|g| g.sources())
+                .collect();
+            for (i, w) in window.ops.iter().enumerate().take(e).skip(s) {
+                source[i] = w.members.iter().any(|m| read.contains(&m.id));
+            }
+        }
+
         // Render each op for its principal's shell (open now).
         let mut scripts = Vec::new();
-        for w in &window.ops {
+        for (i, w) in window.ops.iter().enumerate() {
             let who = &w.node.run_as.principal;
             let Some(sh) = self.shell_for(who) else {
                 let why = format!("op #{}: no shell open for {who:?}", w.id.0);
                 self.block(why.clone());
                 return Err(why);
             };
-            match crate::trailer::render_for(&w.node, w.id.0, sh.nonce(), &host.os, sh.user()) {
+            let render = if source[i] {
+                crate::trailer::render_source_for
+            } else {
+                crate::trailer::render_for
+            };
+            match render(&w.node, w.id.0, sh.nonce(), &host.os, sh.user()) {
                 Ok(s) => scripts.push(s),
                 Err(e) => {
                     let why = format!("op #{}: {e}", w.id.0);
@@ -765,34 +1014,37 @@ impl Executor for HostExec {
         let mut failed_seen = false;
         let mut send_err = None;
 
-        // Consecutive ops on the same principal's shell form a run. Each
-        // run is pipelined into its shell and collected in full before the
-        // next run is sent (Assumption A3); after a failure nothing more is
-        // sent on any shell.
-        let mut start = 0;
-        while start < window.ops.len() && !failed_seen && send_err.is_none() {
+        // Each run is pipelined into its shell and collected in full
+        // before the next run is sent (Assumption A3); after a failure
+        // nothing more is sent on any shell.
+        let mut r = 0;
+        while r < runs.len() && !failed_seen && send_err.is_none() {
+            let (start, end) = runs[r];
             let who = window.ops[start].node.run_as.principal.clone();
-            let end = window.ops[start..]
-                .iter()
-                .position(|w| w.node.run_as.principal != who)
-                .map_or(window.ops.len(), |n| start + n);
 
-            // Send the run, gated on the shell's halt flag.
+            // Send the run, gated on the shell's halt flag and each op's
+            // guard (constants for what is reported, variables for sources
+            // earlier in this run).
+            let Some(nonce) = self.shell_for(&who).map(|sh| sh.nonce().to_string()) else {
+                break;
+            };
+            let mut in_run: BTreeSet<NodeId> = BTreeSet::new();
+            let mut gated = Vec::new();
+            for i in start..end {
+                let w = &window.ops[i];
+                let test = w
+                    .node
+                    .guard
+                    .as_ref()
+                    .map(|g| guard_test(g, &self.known, &in_run));
+                gated.push(gate(w, &scripts[i], &nonce, test.as_deref(), source[i]));
+                in_run.extend(w.members.iter().map(|m| m.id));
+            }
             let Some(sh) = self.shell_for(&who) else {
                 break;
             };
-            let nonce = sh.nonce().to_string();
-            for (w, script) in window.ops[start..end].iter().zip(&scripts[start..end]) {
-                let set = if w.node.allow_fail {
-                    ""
-                } else {
-                    "[ $? -eq 0 ] || __tp_halt=1\n"
-                };
-                let gated = format!(
-                    "if [ -z \"${{__tp_halt-}}\" ]; then\n{script}{set}else\n{}fi\n",
-                    skip_script(&w.node, w.id.0, &nonce)
-                );
-                if let Err(e) = sh.send(w.id.0, &gated).await {
+            for (w, g) in window.ops[start..end].iter().zip(&gated) {
+                if let Err(e) = sh.send(w.id.0, g).await {
                     send_err = Some(e.to_string());
                     break;
                 }
@@ -821,7 +1073,10 @@ impl Executor for HostExec {
                             continue;
                         }
                         match parse_result(w.node.spec.op_kind(), &trailer) {
-                            Ok((0, changed, skipped)) => {
+                            Ok((0, _, _, _)) if crate::trailer::is_guard_skip(&trailer) => {
+                                self.finish_op(w, &descs[i], Outcome::Skipped, 0, false, "");
+                            }
+                            Ok((0, changed, skipped, installed)) => {
                                 let o = if changed {
                                     Outcome::Changed
                                 } else {
@@ -829,11 +1084,14 @@ impl Executor for HostExec {
                                 };
                                 let note = if skipped { "skipped" } else { "" };
                                 self.finish_op(w, &descs[i], o, 0, changed, note);
+                                if installed.is_some() {
+                                    self.remember(w, o, changed, installed.as_deref());
+                                }
                             }
-                            Ok((rc, _, _)) if w.node.allow_fail => {
+                            Ok((rc, _, _, _)) if w.node.allow_fail => {
                                 self.finish_op(w, &descs[i], Outcome::AllowedFail, rc, false, "");
                             }
-                            Ok((rc, _, _)) => {
+                            Ok((rc, _, _, _)) => {
                                 failed_seen = true;
                                 let tail = last_lines(&live[i].tail, TAIL_LINES);
                                 self.finish_op(w, &descs[i], Outcome::Failed, rc, false, "");
@@ -872,7 +1130,7 @@ impl Executor for HostExec {
             if done[start..end].iter().any(|d| !d) {
                 break;
             }
-            start = end;
+            r += 1;
         }
         // Ops with no result: never sent, or lost with the shell.
         for (i, w) in window.ops.iter().enumerate() {

@@ -238,3 +238,30 @@ fn as_user_op_without_a_user_op_stays_in_one_window() {
     }
     insta::assert_snapshot!(go(run, FakeExecutor::new()));
 }
+
+/// Two roles each ask for the same restart on their own change: one op at
+/// the later position, the guards or-joined. `.at_end()` gets a window of
+/// its own after the final one.
+#[test]
+fn equal_guarded_ops_merge_or_joined_and_at_end_runs_last() {
+    fn run(h: Host<()>) -> PlaybookFuture {
+        Box::pin(async move {
+            let toolkit = h.pkg(["nvidia-container-toolkit"]);
+            h.raw("systemctl restart docker")
+                .writes([Key::svc("docker")])
+                .when(toolkit.changed());
+            let daemon = h.file("/etc/docker/daemon.json");
+            daemon.content("{}\n");
+            h.raw("systemctl restart docker")
+                .writes([Key::svc("docker")])
+                .when(daemon.changed());
+            h.raw("echo late")
+                .writes([Key::file("/late")])
+                .when(!daemon.ok())
+                .at_end();
+            h.raw("echo after").writes([Key::file("/after")]);
+            Ok(())
+        })
+    }
+    insta::assert_snapshot!(telepatch::testing::plan(&pb(run), &host()));
+}

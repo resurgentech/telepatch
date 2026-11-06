@@ -166,6 +166,7 @@ fn kind_name(k: WindowKind) -> &'static str {
         WindowKind::NonMutating => "non-mutating",
         WindowKind::ImplicitBarrier => "implicit barrier",
         WindowKind::Final => "final",
+        WindowKind::AtEnd => "at end",
     }
 }
 

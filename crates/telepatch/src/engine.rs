@@ -39,6 +39,8 @@ pub enum WindowKind {
     ImplicitBarrier,
     /// The trace ended: everything left.
     Final,
+    /// After the final window: the `.at_end()` ops.
+    AtEnd,
 }
 
 /// A trace op folded into a [`WindowOp`], with the role that traced it
@@ -47,12 +49,31 @@ pub enum WindowKind {
 pub struct Member {
     pub id: NodeId,
     pub role: String,
+    /// The names this member asked for, for a `pkg` op (empty otherwise):
+    /// a member of a merged `pkg` op changed when one of them was installed.
+    pub pkg_names: Vec<String>,
 }
 
-/// One op of a window. `id` is the earliest member's trace id. `members`
-/// lists the trace ops it stands for in trace order: one for an ordinary
-/// op, several for a merged `pkg` op (whose `node` then carries the union
-/// of names, effects and postconditions).
+impl Member {
+    /// The member for trace op `id`, traced in `role`.
+    pub fn of(id: NodeId, role: &str, op: &OpNode) -> Member {
+        Member {
+            id,
+            role: role.to_string(),
+            pkg_names: match &op.spec {
+                OpSpec::Pkg(p) => p.names.clone(),
+                _ => Vec::new(),
+            },
+        }
+    }
+}
+
+/// One op of a window. `id` is the trace id of the member whose position
+/// the op takes: the earliest for a merged `pkg` op, the latest for equal
+/// guarded ops merged with their guards or-joined. `members` lists the
+/// trace ops it stands for in trace order: one for an ordinary op, several
+/// for a merged op (whose `node` then carries the union of names, effects
+/// and postconditions).
 #[derive(Debug, Clone)]
 pub struct WindowOp {
     pub id: NodeId,
@@ -174,7 +195,8 @@ impl<E: Executor> Engine<E> {
             match poll {
                 Poll::Ready(Err(e)) => return Err(EngineError::Playbook(e)),
                 Poll::Ready(Ok(())) => {
-                    let ids = pending_ids(&host);
+                    let ids = pending_ids(&host, false);
+                    let ran = !ids.is_empty();
                     self.apply(
                         &info,
                         &host,
@@ -184,6 +206,22 @@ impl<E: Executor> Engine<E> {
                         &mut apt_stale,
                     )
                     .await?;
+                    // `.at_end()` ops: a window of their own, after the last.
+                    let late = pending_ids(&host, true);
+                    if !late.is_empty() {
+                        if ran {
+                            window += 1;
+                        }
+                        self.apply(
+                            &info,
+                            &host,
+                            &mut window,
+                            WindowKind::AtEnd,
+                            late,
+                            &mut apt_stale,
+                        )
+                        .await?;
+                    }
                     return Ok(());
                 }
                 Poll::Pending => {
@@ -257,6 +295,7 @@ impl<E: Executor> Engine<E> {
             resolver
                 .pending_ops(&trace)
                 .iter()
+                .filter(|(_, op)| !op.at_end)
                 .filter(|(_, op)| op.writes.iter().any(|w| keys.iter().any(|k| w.overlaps(k))))
                 .map(|(id, _)| *id)
                 .next_back()
@@ -268,6 +307,7 @@ impl<E: Executor> Engine<E> {
                 resolver
                     .pending_ops(&trace)
                     .iter()
+                    .filter(|(_, op)| !op.at_end)
                     .map(|(id, _)| *id)
                     .take_while(|id| *id <= last)
                     .collect()
@@ -347,10 +387,7 @@ impl<E: Executor> Engine<E> {
                         items.push(Item::Op(WindowOp {
                             id: NodeId(i),
                             node: op.clone(),
-                            members: vec![Member {
-                                id: NodeId(i),
-                                role: roles[i].clone(),
-                            }],
+                            members: vec![Member::of(NodeId(i), &roles[i], op)],
                         }));
                     }
                     Node::Barrier => items.push(Item::Barrier(NodeId(i))),
@@ -395,19 +432,22 @@ fn user_split<V>(host: &Host<V>, ids: &[NodeId]) -> usize {
     ids.len()
 }
 
-fn pending_ids<V>(host: &Host<V>) -> Vec<NodeId> {
+/// The pending ops that are (`at_end`) or are not `.at_end()`.
+fn pending_ids<V>(host: &Host<V>, at_end: bool) -> Vec<NodeId> {
     let trace = host.trace_cell().borrow();
     let resolver = host.resolver_cell().borrow();
     resolver
         .pending_ops(&trace)
         .iter()
+        .filter(|(_, op)| op.at_end == at_end)
         .map(|(id, _)| *id)
         .collect()
 }
 
-/// Pending non-mutating ops that may run now: unguarded, not reading what an
-/// earlier pending mutation writes, and not behind an explicit barrier that
-/// has a pending mutation before it.
+/// Pending non-mutating ops that may run now: unguarded, not `at_end`, not
+/// reading what an earlier pending mutation writes, and not behind an
+/// explicit barrier that has a pending mutation before it. A pending
+/// `at_end` op is invisible here: it runs after everything else.
 fn non_mutating_ready<V>(host: &Host<V>) -> Vec<NodeId> {
     let trace = host.trace_cell().borrow();
     let resolver = host.resolver_cell().borrow();
@@ -422,7 +462,7 @@ fn non_mutating_ready<V>(host: &Host<V>) -> Vec<NodeId> {
     for (i, node) in trace.nodes.iter().enumerate() {
         match node {
             Node::Barrier if !mutation_writes.is_empty() => fenced = true,
-            Node::Op(op) if pending.contains(&NodeId(i)) => {
+            Node::Op(op) if pending.contains(&NodeId(i)) && !op.at_end => {
                 if op.writes.is_empty() {
                     let blocked = op
                         .reads

@@ -171,13 +171,140 @@ impl OpSpec {
     }
 }
 
-/// Run an op only if an earlier op's output says so. The type exists; no
-/// builder sets one yet.
+/// Run an op only if an earlier op's output says so. Built with an op
+/// handle's `.changed()` / `.ok()` and composed with `|`, `&` and `!`;
+/// set with `.when(g)`. Evaluated on the host (see [`crate::executor`]).
+///
+/// A source that ran and exited 0 is `ok`; it is `changed` when its result
+/// says so (for a member of a merged `pkg` op: when one of that member's
+/// own names was installed). A source that failed (an `allow_fail` op) is
+/// neither, so a `changed()` guard on it is false: the guarded op is
+/// skipped, not failed. A source that was itself skipped by its guard (or
+/// skipped itself, as an `sh!` `creates`) is `ok` and not `changed`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Guard {
     Changed(NodeId),
     ExitOk(NodeId),
     Not(Box<Guard>),
+    Or(Box<Guard>, Box<Guard>),
+    And(Box<Guard>, Box<Guard>),
+}
+
+impl Guard {
+    /// The ops this guard reads, each once, first appearance first.
+    pub fn sources(&self) -> Vec<NodeId> {
+        fn walk(g: &Guard, out: &mut Vec<NodeId>) {
+            match g {
+                Guard::Changed(n) | Guard::ExitOk(n) => {
+                    if !out.contains(n) {
+                        out.push(*n);
+                    }
+                }
+                Guard::Not(g) => walk(g, out),
+                Guard::Or(a, b) | Guard::And(a, b) => {
+                    walk(a, out);
+                    walk(b, out);
+                }
+            }
+        }
+        let mut out = Vec::new();
+        walk(self, &mut out);
+        out
+    }
+
+    /// Binding strength for printing: `|` < `&` < `!` and atoms.
+    fn rank(&self) -> u8 {
+        match self {
+            Guard::Or(..) => 0,
+            Guard::And(..) => 1,
+            _ => 2,
+        }
+    }
+}
+
+impl std::ops::BitOr for Guard {
+    type Output = Guard;
+    fn bitor(self, rhs: Guard) -> Guard {
+        Guard::Or(Box::new(self), Box::new(rhs))
+    }
+}
+
+impl std::ops::BitAnd for Guard {
+    type Output = Guard;
+    fn bitand(self, rhs: Guard) -> Guard {
+        Guard::And(Box::new(self), Box::new(rhs))
+    }
+}
+
+impl std::ops::Not for Guard {
+    type Output = Guard;
+    fn not(self) -> Guard {
+        Guard::Not(Box::new(self))
+    }
+}
+
+impl fmt::Display for Guard {
+    /// `changed(#3)`, `exit_ok(#3)`, `!g`, `a | b`, `a & b`; parentheses
+    /// only where binding needs them.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let part = |f: &mut fmt::Formatter<'_>, g: &Guard, min: u8| {
+            if g.rank() < min {
+                write!(f, "({g})")
+            } else {
+                write!(f, "{g}")
+            }
+        };
+        match self {
+            Guard::Changed(n) => write!(f, "changed({n})"),
+            Guard::ExitOk(n) => write!(f, "exit_ok({n})"),
+            Guard::Not(g) => {
+                f.write_str("!")?;
+                part(f, g, 2)
+            }
+            Guard::Or(a, b) => {
+                part(f, a, 0)?;
+                f.write_str(" | ")?;
+                part(f, b, 0)
+            }
+            Guard::And(a, b) => {
+                part(f, a, 1)?;
+                f.write_str(" & ")?;
+                part(f, b, 1)
+            }
+        }
+    }
+}
+
+/// Guards that cannot be evaluated: one that names a node that is not an
+/// op of this host, an op traced after the guarded one, or an `at_end` op
+/// from an op that is not `at_end` (it would run after the guarded op).
+/// Each error is placed at the guarded op.
+pub fn guard_errors(t: &Trace) -> Vec<crate::host::TraceError> {
+    let mut out = Vec::new();
+    for (i, n) in t.nodes.iter().enumerate() {
+        let Node::Op(op) = n else { continue };
+        let Some(g) = &op.guard else { continue };
+        for s in g.sources() {
+            let msg = match t.nodes.get(s.0) {
+                Some(Node::Op(_)) if s.0 >= i => {
+                    format!("when(..): the guard names {s}, which is traced after this op")
+                }
+                Some(Node::Op(src)) if src.at_end && !op.at_end => format!(
+                    "when(..): the guard names {s}, which runs at the end (at_end); this op does not"
+                ),
+                Some(Node::Op(_)) => continue,
+                _ => format!("when(..): the guard names {s}, which is not an op on this host"),
+            };
+            let e = crate::host::TraceError {
+                message: msg,
+                roles: Vec::new(),
+                site: None,
+                policy: None,
+            };
+            out.push(t.locate(NodeId(i), e));
+        }
+    }
+    out
 }
 
 /// How a fact read was answered.
@@ -207,6 +334,9 @@ pub struct OpNode {
     pub site: Option<Site>,
     /// Policies this op is permitted to break, with their reasons.
     pub allowed: Vec<crate::policy::Allowance>,
+    /// `.at_end()`: the op runs after the host's last window, in a window
+    /// of its own.
+    pub at_end: bool,
 }
 
 /// A source location: the caller of an op builder (`#[track_caller]`).

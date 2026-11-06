@@ -191,16 +191,56 @@ __tp_emit() {
 /// The full script for one op: body wrapped in the trailer subshell.
 /// `id` is the op's trace index; `nonce` is random per run.
 pub fn render_op(op: &OpNode, id: usize, nonce: &str, os: &Os) -> String {
+    render_op_with(op, id, nonce, os, false)
+}
+
+fn render_op_with(op: &OpNode, id: usize, nonce: &str, os: &Os, record: bool) -> String {
     let body = match &op.spec {
         crate::trace::OpSpec::Raw { script } => crate::ops::shell::raw_body(script),
         spec => spec.exec_script(os),
     };
-    wrap(op.spec.op_kind(), &body, id, nonce)
+    wrap_with(op.spec.op_kind(), &body, id, nonce, record)
 }
 
 /// Wrap `body` (which sets `rc` / `changed` / ...) in the trailer subshell
 /// for a result of `kind`.
 pub fn wrap(kind: OpKind, body: &str, id: usize, nonce: &str) -> String {
+    wrap_with(kind, body, id, nonce, false)
+}
+
+/// The line a guard source's trailer adds: when the parent shell set
+/// `__tp_f` (a `mktemp` file), the result's `changed` (`true`/`false`) and
+/// then the `installed` names, one per line, go there too, so the parent
+/// shell can set the variables a guard reads (the subshell cannot).
+const RECORD: &str =
+    "  [ -z \"${__tp_f-}\" ] || printf '%s\\n' \"$__tp_c\" \"${installed[@]}\" > \"$__tp_f\"\n";
+
+/// The trailer an op prints instead of running when its guard is false:
+/// rc 0, unchanged, and `"when":false`, which the executor reads as
+/// skipped. Printed by the parent shell (no subshell, nothing runs).
+pub fn guard_skip(kind: OpKind, id: usize, nonce: &str) -> String {
+    assert!(
+        nonce.chars().all(|c| c.is_ascii_alphanumeric()),
+        "nonce must be alphanumeric"
+    );
+    let json = match kind {
+        OpKind::Pkg => r#"{"rc":0,"changed":false,"installed":[],"when":false}"#,
+        OpKind::File | OpKind::Repo => r#"{"rc":0,"changed":false,"when":false}"#,
+        OpKind::Group | OpKind::User => r#"{"rc":0,"changed":false,"created":false,"when":false}"#,
+        OpKind::Sh | OpKind::Svc => r#"{"rc":0,"changed":false,"skipped":true,"when":false}"#,
+    };
+    format!("printf '\\n__tp_{nonce} {id} %s\\n' '{json}'\n")
+}
+
+/// Was this trailer printed by [`guard_skip`]?
+pub fn is_guard_skip(t: &Trailer) -> bool {
+    serde_json::from_str::<serde_json::Value>(&t.json)
+        .ok()
+        .and_then(|v| v.get("when").and_then(|w| w.as_bool()))
+        == Some(false)
+}
+
+fn wrap_with(kind: OpKind, body: &str, id: usize, nonce: &str, record: bool) -> String {
     assert!(
         nonce.chars().all(|c| c.is_ascii_alphanumeric()),
         "nonce must be alphanumeric"
@@ -222,6 +262,9 @@ pub fn wrap(kind: OpKind, body: &str, id: usize, nonce: &str) -> String {
     if matches!(kind, OpKind::Group | OpKind::User) {
         // Only a group or user op sets `created`; other kinds keep their bytes.
         o.push_str("  case \"$created\" in 1) __tp_k=true;; *) __tp_k=false;; esac\n");
+    }
+    if record {
+        o.push_str(RECORD);
     }
     let _ = writeln!(o, "  printf '\\n__tp_{nonce} {id} {}\\n' {args}", json);
     o.push_str("}\ntrap '__tp_emit $?' EXIT\nrc=0; changed=0; skipped=0; installed=()\n");
@@ -273,7 +316,31 @@ pub fn render_for(
     os: &Os,
     shell_user: &str,
 ) -> Result<String, RenderError> {
-    let plain = render_op(op, id, nonce, os);
+    render_for_with(op, id, nonce, os, shell_user, false)
+}
+
+/// [`render_for`] for an op a guard in the same run reads: its trailer
+/// also writes its result to `$__tp_f` when the parent shell set it (see
+/// [`crate::executor`]). A login op gets `__tp_f` through its `env -i`.
+pub fn render_source_for(
+    op: &OpNode,
+    id: usize,
+    nonce: &str,
+    os: &Os,
+    shell_user: &str,
+) -> Result<String, RenderError> {
+    render_for_with(op, id, nonce, os, shell_user, true)
+}
+
+fn render_for_with(
+    op: &OpNode,
+    id: usize,
+    nonce: &str,
+    os: &Os,
+    shell_user: &str,
+    record: bool,
+) -> Result<String, RenderError> {
+    let plain = render_op_with(op, id, nonce, os, record);
     if !op.run_as.login {
         return Ok(plain);
     }
@@ -288,17 +355,19 @@ pub fn render_for(
         });
     }
     let q = crate::sh::quote(user);
-    let failed = wrap(
+    let failed = wrap_with(
         op.spec.op_kind(),
         &format!("echo \"telepatch: no passwd entry for \"{q} >&2\nrc=1\n"),
         id,
         nonce,
+        record,
     );
+    let pass = if record { "__tp_f=\"${__tp_f-}\" " } else { "" };
     Ok(format!(
         "(\n__tp_pw=$(getent passwd {q}) || __tp_pw=\n\
          if [ -z \"$__tp_pw\" ]; then\n{failed}else\n\
          IFS=: read -r _ _ _ _ _ __tp_home __tp_shell <<<\"$__tp_pw\"\n\
-         env -i HOME=\"$__tp_home\" USER={q} LOGNAME={q} SHELL=\"$__tp_shell\" PATH={LOGIN_PATH} bash -l -c {}\n\
+         env -i {pass}HOME=\"$__tp_home\" USER={q} LOGNAME={q} SHELL=\"$__tp_shell\" PATH={LOGIN_PATH} bash -l -c {}\n\
          fi\n) </dev/null\n",
         crate::sh::quote(&plain)
     ))

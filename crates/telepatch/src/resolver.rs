@@ -59,13 +59,15 @@ impl Resolver {
     /// key: any such op was traced after the read was confirmed (an earlier
     /// one would have been applied to answer it), so the value may be stale.
     /// A postcondition comes from the last pending writer only, and not from
-    /// a guarded op, which may be skipped.
+    /// a guarded op, which may be skipped. A pending `.at_end()` op is no
+    /// writer here: it runs after every read.
     pub fn resolve(&self, trace: &Trace, q: &FactQuery) -> Answer {
         let key = q.fact.effect_key();
         let pending = self.pending_ops(trace);
         let writer = pending
             .iter()
             .rev()
+            .filter(|(_, op)| !op.at_end)
             .find(|(_, op)| op.writes.iter().any(|w| w.overlaps(&key)));
         if writer.is_none()
             && let Some(v) = self.confirmed.get(&(q.run_as.clone(), q.fact.clone()))
@@ -159,6 +161,7 @@ mod tests {
             allow_fail: false,
             site: None,
             allowed: Vec::new(),
+            at_end: false,
         })
     }
 

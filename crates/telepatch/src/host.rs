@@ -194,6 +194,7 @@ impl<V> Host<V> {
             allow_fail: false,
             site: Some(Site::caller()),
             allowed: Vec::new(),
+            at_end: false,
         };
         let id = self.trace.borrow_mut().push(Node::Op(node));
         OpHandle {
@@ -328,10 +329,33 @@ impl OpHandle {
         self.edit(|op| op.allow_fail = true)
     }
 
-    /// Run this op only when `guard` holds.
+    /// Run this op only when `guard` holds: any composition of earlier
+    /// ops' `.changed()` and `.ok()` with `|`, `&` and `!`. A false guard
+    /// skips the op (reported `skipped`, with the guard). A second call
+    /// replaces the guard.
     #[track_caller]
     pub fn when(&self, guard: Guard) -> &Self {
         self.edit(|op| op.guard = Some(guard))
+    }
+
+    /// True when this op changed something (see [`Guard`] for failed and
+    /// skipped ops, and for a member of a merged `pkg` op).
+    pub fn changed(&self) -> Guard {
+        Guard::Changed(self.id)
+    }
+
+    /// True when this op ran or was skipped, and did not fail.
+    pub fn ok(&self) -> Guard {
+        Guard::ExitOk(self.id)
+    }
+
+    /// Move this op to the end of its host's run: after the last window's
+    /// ops, in a window of its own, in trace order with the other `at_end`
+    /// ops. Until then its effects are not visible to fact reads (its
+    /// postconditions answer nothing, and it is no implicit barrier).
+    #[track_caller]
+    pub fn at_end(&self) -> &Self {
+        self.edit(|op| op.at_end = true)
     }
 
     /// Declare a postcondition: after this op, `key` has `value`.
@@ -348,5 +372,6 @@ impl OpHandle {
 fn derived_errors(t: &Trace) -> Vec<TraceError> {
     let mut v = crate::ops::svc::nothing_wanted(t);
     v.extend(crate::policy::violations(t));
+    v.extend(crate::trace::guard_errors(t));
     v
 }

@@ -493,6 +493,7 @@ pub async fn prepare_window<S: ShellSet>(
             allow_fail: false,
             site: None,
             allowed: Vec::new(),
+            at_end: false,
         };
         let who = &op.node.run_as.principal;
         let sh = shell_of(shells, who)?;

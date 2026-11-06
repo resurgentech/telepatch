@@ -56,6 +56,9 @@ pub enum Outcome {
     AllowedFail,
     /// Never ran: an earlier op on the host failed.
     NotRun,
+    /// Its guard (`.when(..)`) was false: not run, not failed, not changed.
+    /// Counted with OK in the table.
+    Skipped,
 }
 
 /// One executed (possibly merged) op.
@@ -70,6 +73,9 @@ pub struct OpRecord {
     pub changed: bool,
     /// The policies the op was permitted to break, with their reasons.
     pub allowed: Vec<crate::policy::Allowance>,
+    /// The op's guard as the plan prints it (`changed(#3) | changed(#5)`);
+    /// `None` for an unguarded op.
+    pub when: Option<String>,
 }
 
 /// Packages a window's pkg ops will install, from the prepare queries.
@@ -231,7 +237,12 @@ impl Report {
             "HOST", "STATUS", "OK", "CHANGED", "FAILED", "NOT RUN"
         );
         for h in &self.hosts {
-            let ok = h.count(|o| matches!(o, Outcome::Unchanged | Outcome::AllowedFail));
+            let ok = h.count(|o| {
+                matches!(
+                    o,
+                    Outcome::Unchanged | Outcome::AllowedFail | Outcome::Skipped
+                )
+            });
             let detail = match &h.status {
                 HostStatus::Failed { role, op, rc, .. } => {
                     format!("role {role}: {op} (rc {rc})")
@@ -354,6 +365,7 @@ mod tests {
                 policy: Policy::UnitViaFile,
                 reason: "vendor ships this unit".into(),
             }],
+            when: None,
         });
         let r = Report { hosts: vec![h] }.render();
         assert!(

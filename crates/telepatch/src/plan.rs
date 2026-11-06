@@ -6,19 +6,11 @@ use std::fmt::Write;
 use crate::engine::{Window, WindowKind};
 use crate::facts::os::Os;
 use crate::key::Key;
-use crate::trace::{Guard, Node, OpNode, Site, Trace, sh_sites};
+use crate::trace::{Node, OpNode, Site, Trace, sh_sites};
 
 fn keys(set: &std::collections::BTreeSet<Key>) -> String {
     let v: Vec<String> = set.iter().map(|k| k.to_string()).collect();
     format!("[{}]", v.join(", "))
-}
-
-fn guard(g: &Guard) -> String {
-    match g {
-        Guard::Changed(n) => format!("changed({n})"),
-        Guard::ExitOk(n) => format!("exit_ok({n})"),
-        Guard::Not(g) => format!("!{}", guard(g)),
-    }
 }
 
 fn op_line(out: &mut String, id: usize, op: &OpNode, os: &Os) {
@@ -31,7 +23,10 @@ fn op_line(out: &mut String, id: usize, op: &OpNode, os: &Os) {
         keys(&op.writes)
     );
     if let Some(g) = &op.guard {
-        let _ = write!(out, " when {}", guard(g));
+        let _ = write!(out, " when {g}");
+    }
+    if op.at_end {
+        out.push_str(" at_end");
     }
     if op.allow_fail {
         out.push_str(" allow_fail");
@@ -139,6 +134,7 @@ fn window_kind(k: WindowKind) -> &'static str {
         WindowKind::NonMutating => "non-mutating",
         WindowKind::ImplicitBarrier => "implicit barrier",
         WindowKind::Final => "final",
+        WindowKind::AtEnd => "at end",
     }
 }
 
@@ -157,7 +153,14 @@ pub fn render_windows(name: &str, os: &Os, blocking_reads: usize, windows: &[Win
         let _ = writeln!(out, "\nwindow {} ({})", w.number, window_kind(w.kind));
         let mut role: Option<&str> = None;
         for op in &w.ops {
-            let r = op.members[0].role.as_str();
+            // The role of the member whose position the op takes.
+            let r = op
+                .members
+                .iter()
+                .find(|m| m.id == op.id)
+                .unwrap_or(&op.members[0])
+                .role
+                .as_str();
             if role != Some(r) {
                 let _ = writeln!(out, "role {}", role_name(r));
                 role = Some(r);

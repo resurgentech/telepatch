@@ -6,7 +6,12 @@
 //! 2. Merge: `pkg` ops with the same manager, mode, `RunAs`, guard and
 //!    `allow_fail` are folded into the earliest one when
 //!    [`Graph::hoist_is_safe`] holds, i.e. no other item between the
-//!    earliest and the latest member has an edge to a member.
+//!    earliest and the latest member has an edge to a member. Then guarded
+//!    ops with an equal spec (any kind), `RunAs` and `allow_fail` are folded
+//!    into the latest one, their guards or-joined, when
+//!    [`Graph::sink_is_safe`] holds: the earlier op moves forward, so no
+//!    item it passes may overlap its effects or be guarded on it. The
+//!    later position keeps every guard's sources before the merged op.
 //! 3. Schedule: the surviving ops in trace order ([`Graph::schedule`]).
 //!
 //! Merging is per call: the engine calls this once per window, so ops
@@ -82,6 +87,25 @@ fn merge_key(item: &Item) -> Option<MergeKey> {
     }
 }
 
+/// What must be equal for two guarded ops to merge with their guards
+/// or-joined.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SameKey {
+    spec: OpSpec,
+    run_as: RunAs,
+    allow_fail: bool,
+}
+
+fn same_key(item: &Item) -> Option<SameKey> {
+    let Item::Op(w) = item else { return None };
+    w.node.guard.as_ref()?;
+    Some(SameKey {
+        spec: w.node.spec.clone(),
+        run_as: w.node.run_as.clone(),
+        allow_fail: w.node.allow_fail,
+    })
+}
+
 /// The per-host graph. Indices are positions in the item list given to
 /// [`Graph::from_items`]; a merged-away item leaves a hole.
 #[derive(Debug, Clone)]
@@ -91,12 +115,16 @@ pub struct Graph {
     cluster: Vec<Vec<usize>>,
     /// Pass 1 edges `(a, b)`, `a < b`, over original indices.
     edges: BTreeSet<(usize, usize)>,
+    /// Trace ids merged away by the guarded-op merge, and the op they now
+    /// are; applied to guards by [`Graph::schedule`].
+    renamed: Vec<(NodeId, NodeId)>,
 }
 
 /// Run the passes. Callers apply [`Graph::schedule`] for pass 3.
 pub fn optimize(items: Vec<Item>) -> Graph {
     let mut g = Graph::from_items(items);
     g.merge_pass();
+    g.merge_guarded_pass();
     g
 }
 
@@ -116,6 +144,7 @@ impl Graph {
             cluster: (0..items.len()).map(|i| vec![i]).collect(),
             items: items.into_iter().map(Some).collect(),
             edges,
+            renamed: Vec::new(),
         }
     }
 
@@ -187,36 +216,135 @@ impl Graph {
         }
     }
 
+    /// The trace ids of the members of live item `x`.
+    fn member_ids(&self, x: usize) -> Vec<NodeId> {
+        match &self.items[x] {
+            Some(Item::Op(w)) => w.members.iter().map(|m| m.id).collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    fn guard_sources(&self, x: usize) -> Vec<NodeId> {
+        match &self.items[x] {
+            Some(Item::Op(w)) => w.node.guard.as_ref().map_or(Vec::new(), |g| g.sources()),
+            _ => Vec::new(),
+        }
+    }
+
+    /// May live item `from` move forward to `to` and become one op with it?
+    /// Not if either guard names the other's members (the merged op would
+    /// be guarded on itself), and not if a live item strictly between has
+    /// an edge to any original member of `from` or is guarded on one of
+    /// `from`'s members (it would read the outcome before the op ran).
+    pub fn sink_is_safe(&self, from: usize, to: usize) -> bool {
+        let moving = self.member_ids(from);
+        let staying = self.member_ids(to);
+        if self.guard_sources(from).iter().any(|s| staying.contains(s))
+            || self.guard_sources(to).iter().any(|s| moving.contains(s))
+        {
+            return false;
+        }
+        (from + 1..to)
+            .filter(|x| self.items[*x].is_some())
+            .all(|x| {
+                let overlap = self.cluster[x]
+                    .iter()
+                    .any(|&p| self.cluster[from].iter().any(|&q| self.has_edge(p, q)));
+                let reads = self.guard_sources(x).iter().any(|s| moving.contains(s));
+                !overlap && !reads
+            })
+    }
+
+    /// Fold `from` into the later `to` (callers check [`Graph::sink_is_safe`]
+    /// and [`same_key`] equality): members join in trace order, the guards
+    /// are or-joined (kept once when equal), effects and postconditions
+    /// are unioned. A guard naming a member of `from` is renamed to `to`,
+    /// except for a `pkg` op, whose members keep their ids (the member rule
+    /// of `changed`).
+    fn sink(&mut self, from: usize, to: usize) {
+        let Some(Item::Op(other)) = self.items[from].take() else {
+            panic!("sink: not an op");
+        };
+        let moved = std::mem::take(&mut self.cluster[from]);
+        self.cluster[to].extend(moved);
+        let Some(Item::Op(h)) = self.items[to].as_mut() else {
+            panic!("sink: not an op");
+        };
+        if !matches!(h.node.spec, OpSpec::Pkg(_)) {
+            for m in &other.members {
+                self.renamed.push((m.id, h.id));
+            }
+        }
+        let mut members = other.members;
+        members.append(&mut h.members);
+        members.sort_by_key(|m| m.id);
+        h.members = members;
+        h.node.guard = match (other.node.guard, h.node.guard.take()) {
+            (Some(a), Some(b)) if a == b => Some(a),
+            (Some(a), Some(b)) => Some(a | b),
+            (a, b) => a.or(b),
+        };
+        h.node.reads.extend(other.node.reads);
+        h.node.writes.extend(other.node.writes);
+        for (k, v) in other.node.post {
+            h.node.post.entry(k).or_insert(v);
+        }
+    }
+
+    /// Pass 2, guarded ops: each joins the latest earlier op with an equal
+    /// [`SameKey`] it can safely sink into it, else starts its own group.
+    fn merge_guarded_pass(&mut self) {
+        let mut groups: Vec<(SameKey, usize)> = Vec::new();
+        for i in 0..self.items.len() {
+            let Some(item) = &self.items[i] else { continue };
+            let Some(key) = same_key(item) else { continue };
+            let joined = groups
+                .iter()
+                .position(|(k, head)| *k == key && self.sink_is_safe(*head, i));
+            match joined {
+                Some(g) => {
+                    let head = groups[g].1;
+                    self.sink(head, i);
+                    groups[g].1 = i;
+                }
+                None => groups.push((key, i)),
+            }
+        }
+    }
+
     /// Pass 3: the ops in trace order (barriers have done their job). A
-    /// guard that names a merged-away op now names the merged one.
+    /// guard that names an op merged away by the guarded-op merge now names
+    /// the merged one. A merged `pkg` op's members keep their own ids.
     pub fn schedule(self) -> Vec<WindowOp> {
-        let mut renamed: Vec<(NodeId, NodeId)> = Vec::new();
         let mut ops: Vec<WindowOp> = Vec::new();
         for item in self.items.into_iter().flatten() {
             if let Item::Op(w) = item {
-                for m in w.members.iter().skip(1) {
-                    renamed.push((m.id, w.id));
-                }
                 ops.push(w);
             }
         }
         for w in &mut ops {
             if let Some(g) = &mut w.node.guard {
-                rename_guard(g, &renamed);
+                rename_guard(g, &self.renamed);
             }
         }
         ops
     }
 }
 
+/// Rename the ops `g` names along `renamed` (`from -> to`), following
+/// chains (`a -> b`, `b -> c` renames `a` to `c`).
 fn rename_guard(g: &mut Guard, renamed: &[(NodeId, NodeId)]) {
     match g {
         Guard::Changed(n) | Guard::ExitOk(n) => {
-            if let Some((_, to)) = renamed.iter().find(|(from, _)| from == n) {
+            while let Some((_, to)) = renamed.iter().find(|(from, _)| from == n) {
                 *n = *to;
             }
         }
         Guard::Not(inner) => rename_guard(inner, renamed),
+        Guard::Or(a, b) | Guard::And(a, b) => {
+            rename_guard(a, renamed);
+            rename_guard(b, renamed);
+        }
     }
 }
 
@@ -241,11 +369,13 @@ mod tests {
                 allow_fail: false,
                 site: None,
                 allowed: Vec::new(),
+                at_end: false,
                 spec,
             },
             members: vec![Member {
                 id: NodeId(id),
                 role: format!("r{id}"),
+                pkg_names: Vec::new(),
             }],
         })
     }
@@ -317,7 +447,7 @@ mod tests {
     }
 
     #[test]
-    fn equal_guards_merge_and_guard_is_renamed() {
+    fn equal_guards_merge_and_a_pkg_member_keeps_its_id() {
         let g1 = |n: &mut OpNode| n.guard = Some(Guard::Changed(NodeId(0)));
         let items = vec![
             file(0, "/x"),
@@ -329,7 +459,108 @@ mod tests {
         let ops = optimize(items).schedule();
         assert_eq!(ops.len(), 4);
         assert_eq!(ops[1].members.len(), 2);
-        assert_eq!(ops[3].node.guard, Some(Guard::Changed(NodeId(1))));
+        // A merged pkg member keeps its own id in a guard: its `changed` is
+        // its own names' (the member rule), not the merged op's.
+        assert_eq!(ops[3].node.guard, Some(Guard::Changed(NodeId(3))));
+    }
+
+    fn restart(id: usize, guard: Guard) -> Item {
+        let spec = OpSpec::Raw {
+            script: "systemctl restart docker".into(),
+        };
+        with(op(id, spec, &[], &[Key::svc("docker")]), |n| {
+            n.guard = Some(guard)
+        })
+    }
+
+    #[test]
+    fn equal_guarded_ops_merge_at_the_later_position_or_joined() {
+        let items = vec![
+            pkg(0, "toolkit"),
+            restart(1, Guard::Changed(NodeId(0))),
+            file(2, "/etc/docker/daemon.json"),
+            restart(3, Guard::Changed(NodeId(2))),
+            with(file(4, "/z"), |n| n.guard = Some(Guard::Changed(NodeId(1)))),
+        ];
+        let ops = optimize(items).schedule();
+        let at: Vec<usize> = ops.iter().map(|w| w.id.0).collect();
+        assert_eq!(at, [0, 2, 3, 4]);
+        assert_eq!(
+            ops[2].members.iter().map(|m| m.id.0).collect::<Vec<_>>(),
+            [1, 3]
+        );
+        assert_eq!(
+            ops[2].node.guard,
+            Some(Guard::Changed(NodeId(0)) | Guard::Changed(NodeId(2)))
+        );
+        // A guard on the merged-away op names the merged one.
+        assert_eq!(ops[3].node.guard, Some(Guard::Changed(NodeId(3))));
+    }
+
+    #[test]
+    fn equal_guards_on_equal_ops_are_not_doubled() {
+        let g = Guard::Changed(NodeId(0));
+        let ops = optimize(vec![
+            file(0, "/x"),
+            restart(1, g.clone()),
+            restart(2, g.clone()),
+        ])
+        .schedule();
+        assert_eq!(ops.len(), 2);
+        assert_eq!(ops[1].node.guard, Some(g));
+    }
+
+    #[test]
+    fn an_op_guarded_on_the_earlier_member_blocks_the_move() {
+        let items = vec![
+            file(0, "/a"),
+            restart(1, Guard::Changed(NodeId(0))),
+            with(file(2, "/b"), |n| n.guard = Some(Guard::ExitOk(NodeId(1)))),
+            restart(3, Guard::Changed(NodeId(0))),
+        ];
+        assert_eq!(ids(optimize(items)), [vec![0], vec![1], vec![2], vec![3]]);
+    }
+
+    #[test]
+    fn an_effect_overlap_between_blocks_the_move() {
+        let items = vec![
+            file(0, "/a"),
+            restart(1, Guard::Changed(NodeId(0))),
+            with(file(2, "/b"), |n| {
+                n.reads.insert(Key::svc("docker"));
+            }),
+            restart(3, Guard::Changed(NodeId(2))),
+        ];
+        assert_eq!(ids(optimize(items)), [vec![0], vec![1], vec![2], vec![3]]);
+    }
+
+    #[test]
+    fn a_merge_never_makes_a_guard_name_its_own_op() {
+        let items = vec![
+            file(0, "/a"),
+            restart(1, Guard::Changed(NodeId(0))),
+            restart(2, Guard::Changed(NodeId(1))),
+        ];
+        assert_eq!(ids(optimize(items)), [vec![0], vec![1], vec![2]]);
+    }
+
+    #[test]
+    fn unguarded_equal_ops_do_not_merge() {
+        let spec = OpSpec::Raw { script: "x".into() };
+        let a = op(0, spec.clone(), &[], &[Key::svc("d")]);
+        let b = op(1, spec, &[], &[Key::svc("d")]);
+        assert_eq!(ids(optimize(vec![a, b])), [vec![0], vec![1]]);
+    }
+
+    #[test]
+    fn rename_guard_handles_or_and_not() {
+        let mut g =
+            (Guard::Changed(NodeId(1)) | Guard::ExitOk(NodeId(5))) & !Guard::Changed(NodeId(1));
+        rename_guard(&mut g, &[(NodeId(1), NodeId(3)), (NodeId(3), NodeId(4))]);
+        assert_eq!(
+            g,
+            (Guard::Changed(NodeId(4)) | Guard::ExitOk(NodeId(5))) & !Guard::Changed(NodeId(4))
+        );
     }
 
     #[test]

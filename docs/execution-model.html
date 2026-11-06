@@ -315,7 +315,7 @@ echo "__tp_${nonce} ${id} {\"rc\":${rc},\"changed\":${changed}}"</code></pre>
 }
 
 <span class="k">enum</span> Source  { Confirmed, Postcondition(NodeId) }     <span class="c">// speculation would add Journaled</span>
-<span class="k">enum</span> Guard   { Changed(NodeId), ExitOk(NodeId), Not(Box&lt;Guard&gt;) }</code></pre>
+<span class="k">enum</span> Guard   { Changed(NodeId), ExitOk(NodeId), Not(Box&lt;Guard&gt;), Or(Box&lt;Guard&gt;, Box&lt;Guard&gt;), And(Box&lt;Guard&gt;, Box&lt;Guard&gt;) }</code></pre>
 <p><code>Key</code> is a fine-grained effect address: <code>pkg:nginx</code>, <code>file:/etc/nginx/nginx.conf</code>, <code>svc:nginx</code>, <code>user:deploy</code>. Ops whose effects can't be enumerated (<code>shell</code>) declare <code>writes: *</code>, which makes them a barrier for free. The ordering edges between ops are derived from key overlap, so a user who writes <code>pkg(..)</code> then <code>svc(..).restart()</code> never has to state the dependency.</p>
 <p>Two distinctions matter later:</p>
 <ul>
@@ -685,7 +685,7 @@ echo "__tp_${nonce} ${id} {\"rc\":${rc},\"changed\":${changed}}"</code></pre>
 </table>
 </div>
 <section class="prose">
-<p>Every op takes the same handle methods: <code>.when(g)</code> and <code>.at_end()</code> (<a href="#d-triggers">Change triggers</a>), <code>.allow(Policy, reason)</code> (<a href="#d-policy">Policy errors</a>), <code>.retry(n)</code> and <code>.timeout(d)</code> (<a href="#d-run-controls">Run controls</a>), <code>.allow_fail()</code>, <code>.needs_reboot()</code> (<a href="#d-reboot">Reboot</a>). Of these only <code>.when</code> (traced and planned, refused by the executor), <code>.allow(..)</code> and <code>.allow_fail()</code> are built.</p>
+<p>Every op takes the same handle methods: <code>.when(g)</code> and <code>.at_end()</code> (<a href="#d-triggers">Change triggers</a>), <code>.allow(Policy, reason)</code> (<a href="#d-policy">Policy errors</a>), <code>.retry(n)</code> and <code>.timeout(d)</code> (<a href="#d-run-controls">Run controls</a>), <code>.allow_fail()</code>, <code>.needs_reboot()</code> (<a href="#d-reboot">Reboot</a>). Of these <code>.when</code>, <code>.at_end()</code>, <code>.allow(..)</code> and <code>.allow_fail()</code> are built.</p>
 <p>Facts, as distinct from ops: <code>os</code> (family, distro, version, codename; a rolling distro, one whose os-release says <code>BUILD_ID=rolling</code>, has the version <code>rolling</code>, since its <code>VERSION_ID</code> is a build date that drifts weekly and nothing reads it), <code>exists(p)</code>, <code>bin_exists(cmd)</code> and <code>bin_version(cmd)</code> are built; <code>user_info(u)</code> (home, shell, exists), <code>stat(p)</code>, <code>pkg_installed(n)</code>, the general <code>check(cmd)</code> that returns rc and stdout, and <code>h.assert(..)</code> are designed (<a href="#d-facts">Facts and assertions</a>). Of the old tier two, <code>git</code> and <code>reboot</code> have rows above, <code>unarchive</code> is <code>h.file(p).unpack(fetched)</code>, and <code>mount</code> and <code>firewall</code> are among the proposals nobody has ruled on (<a href="#held">Held, and out</a>).</p>
 <p>The four galaxy roles are the real porting cost. <code>geerlingguy.docker</code> is repo + pkg + svc + user groups, maybe 20 lines. <code>gantsign.golang</code> is a <code>pkg</code> with a binary-release source, and <code>stephdewit.nvm</code> is a <code>mise</code> tool. <code>geerlingguy.firewall</code> needs the firewall proposal, which is unruled.</p>
 </section>
@@ -807,7 +807,7 @@ h.svc(&amp;format!("tigervncserver@:{n}")).enabled();   <span class="c">// templ
 <section class="prose" id="d-restart-guard">
 <h3>Restart and reload carry a guard</h3>
 <p>Restart and reload are actions, and an action names what triggers it.</p>
-<p class="status">Status: <strong>designed</strong>: guards are traced and planned, and the executor refuses them at prepare</p>
+<p class="status">Status: <strong>designed</strong>: guards are built (<a href="#d-triggers">Change triggers</a>); <code>.restart()</code>, <code>.reload()</code>, <code>.restart_on(..)</code> and <code>UnguardedRestart</code> are not</p>
 <pre><code>let toolkit = h.pkg(["nvidia-container-toolkit"]);
 h.svc("docker").restart().when(toolkit.changed());
 
@@ -833,7 +833,7 @@ h.svc("flaky-agent")
 <section class="prose" id="d-triggers">
 <h3>Change triggers</h3>
 <p>An op that depends on a change carries a guard that names the change.</p>
-<p class="status">Status: <strong>designed</strong>: <code>.when(op.changed())</code> is traced and planned; <code>.ok()</code>, <code>| &amp; !</code>, or-joined merges and <code>.at_end()</code> are not built, and the executor refuses guarded ops</p>
+<p class="status">Status: <strong>built</strong>: <code>.changed()</code> and <code>.ok()</code> on every handle, <code>| &amp; !</code>, evaluation in the shell (a variable for a source earlier in the same run, a constant for one already reported), skipped ops, or-joined merges, the merged-<code>pkg</code> member rule and <code>.at_end()</code></p>
 <pre><code>let toolkit = h.pkg(&amp;v.toolkit_packages);
 let daemon = h.file("/etc/docker/daemon.json").content(include_str!("../templates/daemon.json"));
 h.svc("docker").restart().when(toolkit.changed() | daemon.changed());</code></pre>

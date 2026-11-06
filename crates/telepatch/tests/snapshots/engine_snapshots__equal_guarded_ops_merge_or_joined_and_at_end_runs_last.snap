@@ -1,0 +1,57 @@
+---
+source: crates/telepatch/tests/engine_snapshots.rs
+assertion_line: 266
+expression: "telepatch::testing::plan(&pb(run), &host())"
+---
+host web1 (os: Debian/Debian 12)
+blocking reads: 0
+
+window 1 (final)
+role (none)
+  #0 pkg as shell:root reads [] writes [pkg:nvidia-container-toolkit] post [pkg:nvidia-container-toolkit=Installed]
+      | rc=0; changed=0; installed=()
+      | tp_want=('nvidia-container-toolkit')
+      | tp_missing=()
+      | export DEBIAN_FRONTEND=noninteractive
+      | for tp_n in "${tp_want[@]}"; do
+      |   [ "$(dpkg-query -W -f='${db:Status-Status}' "$tp_n" 2>/dev/null)" = installed ] || tp_missing+=("$tp_n")
+      | done
+      | if [ "$rc" -eq 0 ] && [ "${#tp_missing[@]}" -gt 0 ]; then
+      |   if ! find /var/lib/apt/lists -maxdepth 1 -type f ! -name lock 2>/dev/null | grep -q .; then apt-get -q update || rc=$?; fi
+      |   if [ "$rc" -eq 0 ]; then
+      |     apt-get -y -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold install "${tp_missing[@]}"
+      |     rc=$?
+      |     if [ "$rc" -eq 0 ]; then changed=1; installed=("${tp_missing[@]}"); fi
+      |   fi
+      | fi
+  #2 file as shell:root reads [] writes [file:/etc/docker/daemon.json] post [file:/etc/docker/daemon.json=Exists(true)]
+      | rc=0; changed=0
+      | tp_p='/etc/docker/daemon.json'
+      | if [ -d "$tp_p" ]; then echo "telepatch: $tp_p is a directory" >&2; rc=1; fi
+      | tp_b='e30K'
+      | if [ "$rc" -eq 0 ] && ! { [ -f "$tp_p" ] && printf %s "$tp_b" | base64 -d | cmp -s - "$tp_p"; }; then
+      |   tp_t=$(mktemp "$tp_p.tpXXXXXX") || rc=$?
+      |   if [ "$rc" -eq 0 ]; then
+      |     if printf %s "$tp_b" | base64 -d > "$tp_t"; then
+      |       if [ -e "$tp_p" ]; then
+      |         chmod --reference="$tp_p" "$tp_t"; chown --reference="$tp_p" "$tp_t" 2>/dev/null
+      |       else
+      |         chmod 644 "$tp_t"
+      |       fi
+      |       mv -f "$tp_t" "$tp_p"; rc=$?
+      |     else
+      |       rc=$?
+      |     fi
+      |     if [ "$rc" -eq 0 ]; then changed=1; else rm -f "$tp_t"; fi
+      |   fi
+      | fi
+  #3 sh as shell:root reads [] writes [svc:docker] when changed(#0) | changed(#2)
+      | systemctl restart docker
+      merged from (none) #1, (none) #3
+  #5 sh as shell:root reads [] writes [file:/after]
+      | echo after
+
+window 2 (at end)
+role (none)
+  #4 sh as shell:root reads [] writes [file:/late] when !exit_ok(#2) at_end
+      | echo late
