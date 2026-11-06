@@ -93,10 +93,7 @@ fn blocked_carol(h: Host<()>) -> PlaybookFuture {
 fn ssh_exec_routes_principals_against_sshd() {
     let _serial = SERIAL.blocking_lock();
     let d = Sshd::start();
-    let pb = Playbook {
-        name: "alice",
-        run: alice_pb,
-    };
+    let pb = Playbook::new("alice", alice_pb);
 
     let r1 = go(&d, &pb);
     assert_eq!(r1.hosts[0].status, HostStatus::Changed, "{}", r1.render());
@@ -122,10 +119,7 @@ fn ssh_exec_routes_principals_against_sshd() {
         ("carol", blocked_carol, "sudo -n -iu carol refused"),
     ];
     for (who, run_, want) in cases {
-        let pb = Playbook {
-            name: who,
-            run: run_,
-        };
+        let pb = Playbook::new(who, run_);
         let r = go(&d, &pb);
         let HostStatus::Blocked(why) = &r.hosts[0].status else {
             panic!("{who}: {}", r.render())
@@ -166,10 +160,7 @@ fn ssh_exec_runs_as_a_user_the_run_creates() {
     let _serial = SERIAL.blocking_lock();
     let d = Sshd::start();
     assert_eq!(exec(&d, "getent passwd dave || echo none"), "none\n");
-    let pb = Playbook {
-        name: "dave",
-        run: dave_pb,
-    };
+    let pb = Playbook::new("dave", dave_pb);
 
     let r1 = go(&d, &pb);
     assert_eq!(r1.hosts[0].status, HostStatus::Changed, "{}", r1.render());

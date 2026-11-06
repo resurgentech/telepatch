@@ -62,10 +62,10 @@ fn scrub(s: &str, dir: &std::path::Path) -> String {
 #[test]
 fn e2e_local_twice_second_run_unchanged() {
     let d = tempfile::tempdir().unwrap();
-    let pb = Playbook {
-        name: "e2e",
-        run: e2e_run,
-    };
+    // The snapshots in tests/snapshots/executor_local__*.snap quote line
+    // numbers of this file (the `sh!` warnings below), so keep the count of
+    // lines above them when editing here.
+    let pb = Playbook::new("e2e", e2e_run);
     let (r1, out1) = go(&pb, vec![spec("local", d.path())]);
     assert_eq!(r1.exit_code(), 0, "{}", r1.render());
     assert_eq!(r1.hosts[0].status, HostStatus::Changed);
@@ -115,10 +115,7 @@ fn failing(h: Host<PathBuf>) -> PlaybookFuture {
 #[test]
 fn failure_fails_role_skips_rest_and_exits_nonzero() {
     let d = tempfile::tempdir().unwrap();
-    let pb = Playbook {
-        name: "fail",
-        run: failing,
-    };
+    let pb = Playbook::new("fail", failing);
     let (r, out) = go(&pb, vec![spec("h1", d.path())]);
     assert_eq!(r.exit_code(), 1);
     let HostStatus::Failed {
@@ -156,10 +153,7 @@ fn failure_tail_is_last_40_lines() {
         })
     }
     let d = tempfile::tempdir().unwrap();
-    let pb = Playbook {
-        name: "tail",
-        run: run_,
-    };
+    let pb = Playbook::new("tail", run_);
     let (r, _) = go(&pb, vec![spec("h1", d.path())]);
     let HostStatus::Failed { tail, .. } = &r.hosts[0].status else {
         panic!()
@@ -181,10 +175,7 @@ fn allow_fail_continues() {
         })
     }
     let d = tempfile::tempdir().unwrap();
-    let pb = Playbook {
-        name: "af",
-        run: run_,
-    };
+    let pb = Playbook::new("af", run_);
     let (r, _) = go(&pb, vec![spec("h1", d.path())]);
     assert_eq!(r.exit_code(), 0, "{}", r.render());
     assert!(d.path().join("ok").exists());
@@ -212,10 +203,7 @@ fn failure_spans_windows_and_skips_later_roles() {
         })
     }
     let d = tempfile::tempdir().unwrap();
-    let pb = Playbook {
-        name: "span",
-        run: run_,
-    };
+    let pb = Playbook::new("span", run_);
     let (r, _) = go(&pb, vec![spec("h1", d.path())]);
     assert!(matches!(r.hosts[0].status, HostStatus::Failed { .. }));
     assert_eq!(r.hosts[0].skipped_roles, vec!["b".to_string()]);
@@ -234,10 +222,7 @@ fn unknown_user_blocks_before_apply_other_hosts_continue() {
         })
     }
     let d = tempfile::tempdir().unwrap();
-    let pb = Playbook {
-        name: "blocked",
-        run: bad,
-    };
+    let pb = Playbook::new("blocked", bad);
     let (r, _) = go(&pb, vec![spec("h1", d.path())]);
     let HostStatus::Blocked(why) = &r.hosts[0].status else {
         panic!("{:?}", r.hosts[0].status)
@@ -262,10 +247,7 @@ fn blocked_host_does_not_stop_others() {
     }
     let d1 = tempfile::tempdir().unwrap();
     let d2 = tempfile::tempdir().unwrap();
-    let pb = Playbook {
-        name: "two",
-        run: pbk,
-    };
+    let pb = Playbook::new("two", pbk);
     let (r, _) = go(&pb, vec![spec("bad", d1.path()), spec("good", d2.path())]);
     assert!(matches!(r.hosts[0].status, HostStatus::Blocked(_)));
     assert_eq!(r.hosts[1].status, HostStatus::Changed);
@@ -278,10 +260,7 @@ fn blocked_host_does_not_stop_others() {
 fn jsonl_log_has_events() {
     let d = tempfile::tempdir().unwrap();
     let log = d.path().join("run.jsonl");
-    let pb = Playbook {
-        name: "log",
-        run: e2e_run,
-    };
+    let pb = Playbook::new("log", e2e_run);
     let r = run(
         &pb,
         vec![spec("local", d.path())],
@@ -359,10 +338,7 @@ fn script_present_installs_once() {
         })
     }
     let d = tempfile::tempdir().unwrap();
-    let pb = Playbook {
-        name: "script",
-        run: run_,
-    };
+    let pb = Playbook::new("script", run_);
     let (r1, out1) = go(&pb, vec![spec("h1", d.path())]);
     assert_eq!(r1.hosts[0].status, HostStatus::Changed, "{}", r1.render());
     let line = "h1: window 1 pkg[script] root tool: absent -> present";
@@ -402,10 +378,7 @@ fn script_will_change_is_a_json_event() {
     let d = tempfile::tempdir().unwrap();
     write_exe(&d.path().join("tool"), "#!/bin/sh\necho tool 1.0.0\n");
     let log = d.path().join("run.jsonl");
-    let pb = Playbook {
-        name: "script",
-        run: run_,
-    };
+    let pb = Playbook::new("script", run_);
     let r = run(
         &pb,
         vec![spec("h1", d.path())],
@@ -447,10 +420,7 @@ fn script_pin_mismatch_runs_update() {
     }
     let d = tempfile::tempdir().unwrap();
     write_exe(&d.path().join("tool"), "#!/bin/sh\necho tool 1.0.0\n");
-    let pb = Playbook {
-        name: "pin",
-        run: run_,
-    };
+    let pb = Playbook::new("pin", run_);
     let (r, out) = go(&pb, vec![spec("h1", d.path())]);
     assert_eq!(
         r.hosts[0].status,
@@ -483,10 +453,7 @@ fn script_installer_that_creates_nothing_fails() {
         })
     }
     let d = tempfile::tempdir().unwrap();
-    let pb = Playbook {
-        name: "noop",
-        run: run_,
-    };
+    let pb = Playbook::new("noop", run_);
     let (r, _) = go(&pb, vec![spec("h1", d.path())]);
     let HostStatus::Failed { tail, rc, .. } = &r.hosts[0].status else {
         panic!("{:?}", r.hosts[0].status)
@@ -513,10 +480,7 @@ fn script_latest_command_drives_an_update() {
     }
     let d = tempfile::tempdir().unwrap();
     write_exe(&d.path().join("tool"), "#!/bin/sh\necho tool 1.0.0\n");
-    let pb = Playbook {
-        name: "latest",
-        run: run_,
-    };
+    let pb = Playbook::new("latest", run_);
     let (r, out) = go(&pb, vec![spec("h1", d.path())]);
     assert_eq!(
         r.hosts[0].status,
@@ -549,10 +513,7 @@ fn script_unresolvable_latest_fails_the_op() {
         })
     }
     let d = tempfile::tempdir().unwrap();
-    let pb = Playbook {
-        name: "nolatest",
-        run: run_,
-    };
+    let pb = Playbook::new("nolatest", run_);
     let (r, _) = go(&pb, vec![spec("h1", d.path())]);
     assert!(
         r.render()
@@ -646,10 +607,7 @@ fn cargo_present_installs_missing_in_one_command_then_changed_0() {
     let d = tempfile::tempdir().unwrap();
     cargo_stub(d.path(), "have 1.0.0\n", "");
     let path = stub_path(d.path());
-    let pb = Playbook {
-        name: "cargo",
-        run: run_,
-    };
+    let pb = Playbook::new("cargo", run_);
     let (r1, out1) = go(&pb, vec![cargo_host("h1", d.path(), &path)]);
     assert_eq!(
         r1.hosts[0].status,
@@ -698,10 +656,7 @@ fn cargo_will_change_json_event_is_one_per_name() {
     let d = tempfile::tempdir().unwrap();
     cargo_stub(d.path(), "", "");
     let log = d.path().join("run.jsonl");
-    let pb = Playbook {
-        name: "cargo",
-        run: run_,
-    };
+    let pb = Playbook::new("cargo", run_);
     let r = run(
         &pb,
         vec![cargo_host("h1", d.path(), &stub_path(d.path()))],
@@ -735,10 +690,7 @@ fn cargo_pinned_installs_with_version_when_different() {
     let d = tempfile::tempdir().unwrap();
     cargo_stub(d.path(), "cargo-deb 0.1.0\n", "");
     let path = stub_path(d.path());
-    let pb = Playbook {
-        name: "cargo",
-        run: run_,
-    };
+    let pb = Playbook::new("cargo", run_);
     let (r1, out1) = go(&pb, vec![cargo_host("h1", d.path(), &path)]);
     assert_eq!(
         r1.hosts[0].status,
@@ -775,10 +727,7 @@ fn cargo_latest_asks_cargo_search_on_the_host() {
         "cargo-deb 0.3.0\ncargo-generate-rpm 0.5.0\n",
     );
     let path = stub_path(d.path());
-    let pb = Playbook {
-        name: "cargo",
-        run: run_,
-    };
+    let pb = Playbook::new("cargo", run_);
     let (r1, out1) = go(&pb, vec![cargo_host("h1", d.path(), &path)]);
     assert_eq!(
         r1.hosts[0].status,
@@ -810,10 +759,7 @@ fn cargo_latest_lookup_failure_fails_the_op() {
     }
     let d = tempfile::tempdir().unwrap();
     cargo_stub(d.path(), "", "");
-    let pb = Playbook {
-        name: "cargo",
-        run: run_,
-    };
+    let pb = Playbook::new("cargo", run_);
     let (r, out) = go(&pb, vec![cargo_host("h1", d.path(), &stub_path(d.path()))]);
     assert!(
         matches!(r.hosts[0].status, HostStatus::Failed { .. }),
@@ -841,10 +787,7 @@ fn cargo_install_that_installs_nothing_fails() {
     let d = tempfile::tempdir().unwrap();
     cargo_stub(d.path(), "", "");
     std::fs::write(d.path().join("refuse"), "").unwrap();
-    let pb = Playbook {
-        name: "cargo",
-        run: run_,
-    };
+    let pb = Playbook::new("cargo", run_);
     let (r, _) = go(&pb, vec![cargo_host("h1", d.path(), &stub_path(d.path()))]);
     assert!(
         matches!(r.hosts[0].status, HostStatus::Failed { .. }),
@@ -883,10 +826,7 @@ fn cargo_missing_fails_and_prepare_says_unknown() {
             std::os::unix::fs::symlink(p, bin.join(t)).unwrap();
         }
     }
-    let pb = Playbook {
-        name: "cargo",
-        run: run_,
-    };
+    let pb = Playbook::new("cargo", run_);
     let (r, out) = go(&pb, vec![cargo_host("h1", d.path(), bin.to_str().unwrap())]);
     assert!(
         matches!(r.hosts[0].status, HostStatus::Failed { .. }),
@@ -913,10 +853,7 @@ fn cargo_adjacent_ops_merge_into_one_install() {
     }
     let d = tempfile::tempdir().unwrap();
     cargo_stub(d.path(), "", "");
-    let pb = Playbook {
-        name: "cargo",
-        run: run_,
-    };
+    let pb = Playbook::new("cargo", run_);
     let (r, out) = go(&pb, vec![cargo_host("h1", d.path(), &stub_path(d.path()))]);
     assert_eq!(
         r.hosts[0].status,
@@ -946,10 +883,7 @@ fn cargo_ops_do_not_merge_across_a_star_writer() {
     }
     let d = tempfile::tempdir().unwrap();
     cargo_stub(d.path(), "", "");
-    let pb = Playbook {
-        name: "cargo",
-        run: run_,
-    };
+    let pb = Playbook::new("cargo", run_);
     let (r, out) = go(&pb, vec![cargo_host("h1", d.path(), &stub_path(d.path()))]);
     assert_eq!(
         r.hosts[0].status,
@@ -971,10 +905,7 @@ fn pinned_cargo_ops_never_merge() {
     }
     let d = tempfile::tempdir().unwrap();
     cargo_stub(d.path(), "", "");
-    let pb = Playbook {
-        name: "cargo",
-        run: run_,
-    };
+    let pb = Playbook::new("cargo", run_);
     let (r, out) = go(&pb, vec![cargo_host("h1", d.path(), &stub_path(d.path()))]);
     assert_eq!(
         r.hosts[0].status,
@@ -1097,10 +1028,7 @@ fn mise_present_installs_missing_in_one_command_then_changed_0() {
     )
     .unwrap();
     let path = stub_path(d.path());
-    let pb = Playbook {
-        name: "mise",
-        run: run_,
-    };
+    let pb = Playbook::new("mise", run_);
     let (r1, out1) = go(&pb, vec![mise_host("h1", d.path(), &path)]);
     assert_eq!(
         r1.hosts[0].status,
@@ -1167,10 +1095,7 @@ fn mise_pinned_installs_when_the_pin_is_not_installed() {
     let d = tempfile::tempdir().unwrap();
     mise_stub(d.path(), "just 1.59.0\n", "");
     let path = stub_path(d.path());
-    let pb = Playbook {
-        name: "mise",
-        run: run_,
-    };
+    let pb = Playbook::new("mise", run_);
     let (r1, out1) = go(&pb, vec![mise_host("h1", d.path(), &path)]);
     assert_eq!(
         r1.hosts[0].status,
@@ -1211,10 +1136,7 @@ fn mise_latest_asks_mise_latest_on_the_host() {
         "just 1.59.0\nfd 10.5.0\n",
     );
     let path = stub_path(d.path());
-    let pb = Playbook {
-        name: "mise",
-        run: run_,
-    };
+    let pb = Playbook::new("mise", run_);
     let (r1, out1) = go(&pb, vec![mise_host("h1", d.path(), &path)]);
     assert_eq!(
         r1.hosts[0].status,
@@ -1247,10 +1169,7 @@ fn mise_latest_lookup_failure_fails_the_op_before_anything_changes() {
     }
     let d = tempfile::tempdir().unwrap();
     mise_stub(d.path(), "", "");
-    let pb = Playbook {
-        name: "mise",
-        run: run_,
-    };
+    let pb = Playbook::new("mise", run_);
     let (r, out) = go(&pb, vec![mise_host("h1", d.path(), &stub_path(d.path()))]);
     mise_failed(&r, &out);
     assert!(
@@ -1285,10 +1204,7 @@ fn mise_reshims_when_an_installed_tool_has_no_shim() {
     )
     .unwrap();
     let path = stub_path(d.path());
-    let pb = Playbook {
-        name: "mise",
-        run: run_,
-    };
+    let pb = Playbook::new("mise", run_);
     let (r1, out1) = go(&pb, vec![mise_host("h1", d.path(), &path)]);
     assert_eq!(
         r1.hosts[0].status,
@@ -1319,10 +1235,7 @@ fn mise_install_that_installs_nothing_fails() {
     let d = tempfile::tempdir().unwrap();
     mise_stub(d.path(), "", "");
     std::fs::write(d.path().join("refuse"), "").unwrap();
-    let pb = Playbook {
-        name: "mise",
-        run: run_,
-    };
+    let pb = Playbook::new("mise", run_);
     let (r, out) = go(&pb, vec![mise_host("h1", d.path(), &stub_path(d.path()))]);
     mise_failed(&r, &out);
     assert!(
@@ -1356,10 +1269,7 @@ fn mise_missing_fails_and_prepare_says_unknown() {
             std::os::unix::fs::symlink(p, bin.join(t)).unwrap();
         }
     }
-    let pb = Playbook {
-        name: "mise",
-        run: run_,
-    };
+    let pb = Playbook::new("mise", run_);
     let (r, out) = go(&pb, vec![mise_host("h1", d.path(), bin.to_str().unwrap())]);
     mise_failed(&r, &out);
     assert!(r.render().contains("mise not found"), "{}", r.render());
@@ -1382,10 +1292,7 @@ fn mise_adjacent_ops_merge_into_one_install() {
     }
     let d = tempfile::tempdir().unwrap();
     mise_stub(d.path(), "", "");
-    let pb = Playbook {
-        name: "mise",
-        run: run_,
-    };
+    let pb = Playbook::new("mise", run_);
     let (r, out) = go(&pb, vec![mise_host("h1", d.path(), &stub_path(d.path()))]);
     assert_eq!(
         r.hosts[0].status,
@@ -1601,10 +1508,7 @@ fn rustup_fresh_install_with_target_then_changed_0() {
         },
     );
     let path = tools_path(d.path());
-    let pb = Playbook {
-        name: "rustup",
-        run: run_,
-    };
+    let pb = Playbook::new("rustup", run_);
     let (r1, out1) = go(&pb, vec![rustup_host("h1", d.path(), &path)]);
     assert_eq!(
         r1.hosts[0].status,
@@ -1667,10 +1571,7 @@ fn rustup_toolchain_missing_with_rustup_present_installs_it() {
         },
     );
     let path = stub_path(d.path());
-    let pb = Playbook {
-        name: "rustup",
-        run: run_,
-    };
+    let pb = Playbook::new("rustup", run_);
     let (r1, out1) = go(&pb, vec![rustup_host("h1", d.path(), &path)]);
     assert_eq!(
         r1.hosts[0].status,
@@ -1718,10 +1619,7 @@ fn rustup_latest_updates_when_check_says_so() {
         },
     );
     let path = stub_path(d.path());
-    let pb = Playbook {
-        name: "rustup",
-        run: run_,
-    };
+    let pb = Playbook::new("rustup", run_);
     let (r1, out1) = go(&pb, vec![rustup_host("h1", d.path(), &path)]);
     assert_eq!(
         r1.hosts[0].status,
@@ -1761,10 +1659,7 @@ fn rustup_latest_without_an_update_changes_nothing() {
             ..Default::default()
         },
     );
-    let pb = Playbook {
-        name: "rustup",
-        run: run_,
-    };
+    let pb = Playbook::new("rustup", run_);
     let (r, out) = go(&pb, vec![rustup_host("h1", d.path(), &stub_path(d.path()))]);
     assert_eq!(r.hosts[0].status, HostStatus::Ok, "{}\n{out}", r.render());
     assert!(r.hosts[0].will_change.is_empty());
@@ -1790,10 +1685,7 @@ fn rustup_check_failure_fails_the_op() {
             ..Default::default()
         },
     );
-    let pb = Playbook {
-        name: "rustup",
-        run: run_,
-    };
+    let pb = Playbook::new("rustup", run_);
     let (r, _) = go(&pb, vec![rustup_host("h1", d.path(), &stub_path(d.path()))]);
     let HostStatus::Failed { tail, .. } = &r.hosts[0].status else {
         panic!("{:?}\n{}", r.hosts[0].status, r.render())
@@ -1827,10 +1719,7 @@ fn rustup_default_is_set_only_when_needed() {
         },
     );
     let path = stub_path(d.path());
-    let pb = Playbook {
-        name: "rustup",
-        run: run_,
-    };
+    let pb = Playbook::new("rustup", run_);
     let (r1, out1) = go(&pb, vec![rustup_host("h1", d.path(), &path)]);
     assert_eq!(
         r1.hosts[0].status,
@@ -1887,10 +1776,7 @@ fn rustup_finds_the_installer_s_rustup_under_cargo_home() {
     );
     let path = tools_path(d.path());
     let ch = d.path().join("elsewhere");
-    let pb = Playbook {
-        name: "rustup",
-        run: run_,
-    };
+    let pb = Playbook::new("rustup", run_);
     let host = || rustup_host_with("h1", d.path(), &path, ch.to_str().unwrap());
     let (r1, out1) = go(&pb, vec![host()]);
     assert_eq!(

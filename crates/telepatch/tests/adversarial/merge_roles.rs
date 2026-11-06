@@ -33,5 +33,5 @@ fn run(h: Host<()>) -> PlaybookFuture {
 
 #[test]
 fn merge_across_three_roles() {
-    insta::assert_snapshot!(plan(&Playbook { name: "t", run }, &super::common::ubuntu()));
+    insta::assert_snapshot!(plan(&Playbook::new("t", run), &super::common::ubuntu()));
 }

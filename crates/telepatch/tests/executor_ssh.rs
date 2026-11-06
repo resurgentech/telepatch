@@ -248,10 +248,7 @@ fn routed(h: Host<Vars>) -> PlaybookFuture {
 #[test]
 fn ops_and_fact_reads_go_to_their_principal_shell() {
     let stub = Stub::new();
-    let pb = Playbook {
-        name: "routed",
-        run: routed,
-    };
+    let pb = Playbook::new("routed", routed);
     let (r, out) = go(&pb, &stub, stub.transport());
     assert_eq!(r.exit_code(), 0, "{}\n{out}", r.render());
     assert_eq!(r.hosts[0].status, HostStatus::Changed);
@@ -291,10 +288,7 @@ fn refused_user_shell_blocks_before_the_window_s_root_ops() {
         })
     }
     let stub = Stub::new();
-    let pb = Playbook {
-        name: "refused",
-        run: pb_,
-    };
+    let pb = Playbook::new("refused", pb_);
     let (r, out) = go(&pb, &stub, stub.transport().env("TP_STUB_NO_USER", "1"));
     let HostStatus::Blocked(why) = &r.hosts[0].status else {
         panic!("{:?}\n{out}", r.hosts[0].status)
@@ -325,10 +319,7 @@ fn a_failure_on_a_user_shell_stops_sends_on_the_root_shell() {
         })
     }
     let stub = Stub::new();
-    let pb = Playbook {
-        name: "ufail",
-        run: pb_,
-    };
+    let pb = Playbook::new("ufail", pb_);
     let (r, out) = go(&pb, &stub, stub.transport());
     let HostStatus::Failed { rc, op, .. } = &r.hosts[0].status else {
         panic!("{:?}\n{out}", r.hosts[0].status)
@@ -351,10 +342,7 @@ fn root_limits_map_to_clear_blocked_reasons() {
             Ok(())
         })
     }
-    let pb = Playbook {
-        name: "noop",
-        run: pb_,
-    };
+    let pb = Playbook::new("noop", pb_);
     // A master that cannot connect: the stub ssh named as a missing binary
     // is a spawn error; use a stub that fails the master instead.
     let fail = stub.dir.path().join("ssh-fail");
@@ -429,7 +417,7 @@ fn local_target_blocks_a_user_window_with_the_transport_limit() {
         ("read", read_),
     ] {
         let d = tempfile::tempdir().unwrap();
-        let pb = Playbook { name, run: run_ };
+        let pb = Playbook::new(name, run_);
         let r = run(
             &pb,
             vec![HostSpec {
@@ -475,10 +463,7 @@ fn user_created_by_the_run_is_checked_and_opened_in_window_two() {
         })
     }
     let stub = Stub::new();
-    let pb = Playbook {
-        name: "created",
-        run: pb_,
-    };
+    let pb = Playbook::new("created", pb_);
     let (r, out) = go(&pb, &stub, stub.transport());
     assert_eq!(r.exit_code(), 0, "{}\n{out}", r.render());
     assert_eq!(

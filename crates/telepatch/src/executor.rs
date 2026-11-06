@@ -1822,10 +1822,7 @@ async fn run_one<V: 'static>(
         }
     };
     let host = Host::new(&name, os, Rc::new(spec.vars));
-    let pb = Playbook {
-        name: pb_name,
-        run: pb_run,
-    };
+    let pb = Playbook::new(pb_name, pb_run);
     let shells = HostShells {
         host: name.clone(),
         target,

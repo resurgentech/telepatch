@@ -428,10 +428,7 @@ fn go(pb: &Playbook<PathBuf>, d: &Path, log_path: Option<PathBuf>) -> (Report, S
 }
 
 fn pb_for(run_: fn(Host<PathBuf>) -> PlaybookFuture) -> Playbook<PathBuf> {
-    Playbook {
-        name: "user",
-        run: run_,
-    }
+    Playbook::new("user", run_)
 }
 
 /// `h.vars` is the state dir; the hash is read from its `hash` file so

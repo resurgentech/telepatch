@@ -36,5 +36,5 @@ fn different_os_different_merged_plans() {
         super::common::fixture("u1", "ubuntu2404"),
         super::common::fixture("r1", "rockylinux10"),
     ];
-    insta::assert_snapshot!(plan_all(&Playbook { name: "t", run }, &hosts));
+    insta::assert_snapshot!(plan_all(&Playbook::new("t", run), &hosts));
 }

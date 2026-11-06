@@ -526,10 +526,7 @@ fn plan_shows_rustup_merged() {
     .unwrap();
     let fx = telepatch::testing::FixtureHost::new("h", os, Rc::new(()));
     insta::assert_snapshot!(telepatch::testing::plan(
-        &telepatch::Playbook {
-            name: "t",
-            run: two_rustups
-        },
+        &telepatch::Playbook::new("t", two_rustups),
         &fx
     ));
 }

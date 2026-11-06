@@ -24,7 +24,7 @@ fn run(h: Host<()>) -> PlaybookFuture {
 
 #[test]
 fn locked_merges_with_locked_never_with_unlocked() {
-    let out = plan(&Playbook { name: "t", run }, &super::common::ubuntu());
+    let out = plan(&Playbook::new("t", run), &super::common::ubuntu());
     assert_eq!(out.matches("cargo install --locked").count(), 1, "{out}");
     insta::assert_snapshot!(out);
 }

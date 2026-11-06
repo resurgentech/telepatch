@@ -35,7 +35,7 @@ fn run(h: Host<()>) -> PlaybookFuture {
 
 #[test]
 fn two_rustup_ops_merge_across_roles() {
-    let out = plan(&Playbook { name: "t", run }, &super::common::ubuntu());
+    let out = plan(&Playbook::new("t", run), &super::common::ubuntu());
     assert!(out.contains("merged from a #1, b #"), "{out}");
     insta::assert_snapshot!(out);
 }

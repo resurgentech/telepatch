@@ -15,5 +15,5 @@ fn run(h: Host<()>) -> PlaybookFuture {
 
 #[test]
 fn build_dep_does_not_merge_with_install() {
-    insta::assert_snapshot!(plan(&Playbook { name: "t", run }, &super::common::ubuntu()));
+    insta::assert_snapshot!(plan(&Playbook::new("t", run), &super::common::ubuntu()));
 }

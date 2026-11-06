@@ -50,7 +50,7 @@ fn run(h: Host<Vars>) -> PlaybookFuture {
 }
 
 fn playbook() -> Playbook<Vars> {
-    Playbook { name: "toy", run }
+    Playbook::new("toy", run)
 }
 
 fn host(name: &str, fixture: &str) -> FixtureHost<Vars> {

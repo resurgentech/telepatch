@@ -70,7 +70,7 @@ fn pb_bad(h: Host<()>) -> PlaybookFuture {
 
 /// Run `f` on the container; the report and the captured stream.
 fn go(ctr: &Container, name: &'static str, f: fn(Host<()>) -> PlaybookFuture) -> (Report, String) {
-    let pb = Playbook { name, run: f };
+    let pb = Playbook::new(name, f);
     let out = Rc::new(RefCell::new(String::new()));
     let r = run(
         &pb,

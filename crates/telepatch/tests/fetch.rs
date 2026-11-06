@@ -322,10 +322,7 @@ if [ -f "$D/www/$n" ]; then cp "$D/www/$n" "$out"; else echo "wget: server retur
     /// Run on one local host with `path` as the whole PATH.
     fn go(&self, v: &V, path: &str) -> (Report, String) {
         self.clear_log();
-        let pb = Playbook {
-            name: "fetch",
-            run: pb_fetch,
-        };
+        let pb = Playbook::new("fetch", pb_fetch);
         let out = Rc::new(RefCell::new(String::new()));
         let report = run(
             &pb,
@@ -948,10 +945,7 @@ fn two_ops_on_one_fetch_download_it_once() {
     e.clear_log();
     let out = Rc::new(RefCell::new(String::new()));
     let r = run(
-        &Playbook {
-            name: "two",
-            run: pb,
-        },
+        &Playbook::new("two", pb),
         vec![HostSpec {
             name: "h1".into(),
             target: Target::Local(
@@ -1131,10 +1125,7 @@ esac
     /// report, the output and the JSON events.
     fn go_c(&self, v: &C, path: &str) -> (Report, String, Vec<serde_json::Value>) {
         self.clear_log();
-        let pb = Playbook {
-            name: "curl_fetch",
-            run: pb_curl,
-        };
+        let pb = Playbook::new("curl_fetch", pb_curl);
         let out = Rc::new(RefCell::new(String::new()));
         let events = self.p("events.jsonl");
         let report = run(
@@ -1350,10 +1341,7 @@ fn a_fetch_before_the_pkg_op_that_installs_curl_blocks_as_before() {
 #[test]
 fn the_plan_shows_where_a_window_would_split_and_why() {
     let e = Env::new();
-    let pb = Playbook {
-        name: "curl_fetch",
-        run: pb_curl,
-    };
+    let pb = Playbook::new("curl_fetch", pb_curl);
     let fh = |v: C| telepatch::testing::FixtureHost::new("h1", os(), Rc::new(v));
     let plan = telepatch::testing::plan(&pb, &fh(e.c(true)));
     let line = "  -- split after #0 (pkg curl) when the host has neither curl nor wget: #1 needs a download --";
@@ -1384,10 +1372,7 @@ fn pb_stale(h: Host<C>) -> PlaybookFuture {
 #[test]
 fn the_engine_runs_the_head_then_the_rest_and_a_declined_window_notes_nothing() {
     let e = Env::new();
-    let pb = Playbook {
-        name: "stale",
-        run: pb_stale,
-    };
+    let pb = Playbook::new("stale", pb_stale);
     let fh = telepatch::testing::FixtureHost::new("h1", os(), Rc::new(e.c(true)));
     let whole = telepatch::testing::plan(&pb, &fh);
     assert!(whole.contains("\nwindow 1 (final)\n"), "{whole}");

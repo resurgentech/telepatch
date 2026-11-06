@@ -23,5 +23,5 @@ fn run(h: Host<()>) -> PlaybookFuture {
 
 #[test]
 fn same_fact_from_two_roles_one_round_trip() {
-    insta::assert_snapshot!(plan(&Playbook { name: "t", run }, &super::common::ubuntu()));
+    insta::assert_snapshot!(plan(&Playbook::new("t", run), &super::common::ubuntu()));
 }

@@ -31,5 +31,5 @@ fn run(h: Host<()>) -> PlaybookFuture {
 
 #[test]
 fn sh_between_pkgs_blocks_hoist() {
-    insta::assert_snapshot!(plan(&Playbook { name: "t", run }, &super::common::ubuntu()));
+    insta::assert_snapshot!(plan(&Playbook::new("t", run), &super::common::ubuntu()));
 }

@@ -121,13 +121,24 @@ pub fn plan_for<V>(distro: &str, playbook: &Playbook<V>, vars: V) -> String {
 
 /// [`plan_for`] with vars built by the four layers (see [`crate::vars`])
 /// from `vars_toml` (a vars file's text, `""` for none) and the playbook's
-/// `defaults`. Panics with the loader's message when the vars are invalid.
+/// own defaults. Panics with the loader's message when the vars are invalid.
 pub fn plan_for_layers<V: serde::de::DeserializeOwned>(
     distro: &str,
     playbook: &Playbook<V>,
     vars_toml: &str,
-    defaults: &str,
 ) -> String {
-    let vars = crate::vars::load("vars", vars_toml, defaults).unwrap_or_else(|e| panic!("{e}"));
+    let vars = crate::vars::load_for(playbook, "vars", vars_toml).unwrap_or_else(|e| panic!("{e}"));
+    plan_for(distro, playbook, vars)
+}
+
+/// [`plan_for_layers`] with the vars file read from `vars_file` (none: no
+/// file): the layers exactly as `tp plan <name> [--vars f] --distro D` runs
+/// them. Panics with the loader's message when the vars are invalid.
+pub fn plan_for_playbook<V: serde::de::DeserializeOwned + Default>(
+    distro: &str,
+    playbook: &Playbook<V>,
+    vars_file: Option<&std::path::Path>,
+) -> String {
+    let vars = crate::vars::load_file_for(playbook, vars_file).unwrap_or_else(|e| panic!("{e}"));
     plan_for(distro, playbook, vars)
 }

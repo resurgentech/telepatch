@@ -30,7 +30,7 @@ fn error_of(run: fn(Host<()>) -> PlaybookFuture) -> (String, bool) {
     let host = super::common::ubuntu();
     let h = Host::new("web1", host.os.clone(), host.vars.clone());
     let mut engine = Engine::new(FakeExecutor::new());
-    let r = block_on(engine.run_host(&Playbook { name: "t", run }, h));
+    let r = block_on(engine.run_host(&Playbook::new("t", run), h));
     let applied = engine
         .executor
         .calls
@@ -90,12 +90,5 @@ fn equal_effective_options_are_no_conflict() {
     let host = super::common::ubuntu();
     let h = Host::new("web1", host.os.clone(), host.vars.clone());
     let mut engine = Engine::new(FakeExecutor::new());
-    block_on(engine.run_host(
-        &Playbook {
-            name: "t",
-            run: same_run,
-        },
-        h,
-    ))
-    .unwrap();
+    block_on(engine.run_host(&Playbook::new("t", same_run), h)).unwrap();
 }

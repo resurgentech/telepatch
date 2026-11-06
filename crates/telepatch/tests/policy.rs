@@ -141,10 +141,7 @@ fn legacy_run(h: Host<()>) -> PlaybookFuture {
 
 #[test]
 fn the_plan_lists_every_allowance() {
-    let pb = Playbook {
-        name: "legacy",
-        run: legacy_run,
-    };
+    let pb = Playbook::new("legacy", legacy_run);
     let fx = FixtureHost::new("ws1", os(), Rc::new(()));
     let p = plan(&pb, &fx);
     assert!(
@@ -178,10 +175,7 @@ fn the_run_report_lists_every_allowance() {
     let d = tempfile::tempdir().unwrap();
     let out = Rc::new(std::cell::RefCell::new(String::new()));
     let report = run(
-        &Playbook {
-            name: "allowed",
-            run: allowed_tmp_run,
-        },
+        &Playbook::new("allowed", allowed_tmp_run),
         vec![HostSpec {
             name: "local".into(),
             target: Target::Local(LocalTransport::new().uid(0)),

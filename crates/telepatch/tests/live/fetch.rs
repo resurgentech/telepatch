@@ -86,7 +86,7 @@ fn go(
     v: &V,
     f: fn(Host<V>) -> PlaybookFuture,
 ) -> (Report, String) {
-    let pb = Playbook { name, run: f };
+    let pb = Playbook::new(name, f);
     let out = Rc::new(RefCell::new(String::new()));
     let r = run(
         &pb,
@@ -316,10 +316,7 @@ fn pb_binary_release(h: Host<B>) -> PlaybookFuture {
 }
 
 fn go_b(ctr: &Container) -> (Report, String) {
-    let pb = Playbook {
-        name: "binary_release",
-        run: pb_binary_release,
-    };
+    let pb = Playbook::new("binary_release", pb_binary_release);
     let out = Rc::new(RefCell::new(String::new()));
     let r = run(
         &pb,
@@ -631,10 +628,7 @@ fn fetch_after_the_op_that_installs_curl(image: &str) {
     assert_eq!(rc, 0, "the server did not come up: {o}");
     let (_, tmp_before) = exec(&ctr, "ls -A /tmp");
 
-    let pb = Playbook {
-        name: "after_curl",
-        run: pb_after_curl,
-    };
+    let pb = Playbook::new("after_curl", pb_after_curl);
     let out = Rc::new(RefCell::new(String::new()));
     let r = run(
         &pb,

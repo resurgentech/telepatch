@@ -497,10 +497,7 @@ fn pb_docker() -> Playbook<PathBuf> {
             Ok(())
         })
     }
-    Playbook {
-        name: "svc",
-        run: run_,
-    }
+    Playbook::new("svc", run_)
 }
 
 #[test]
@@ -590,10 +587,7 @@ fn executor_merges_wants_of_one_unit_and_names_it_once() {
             Ok(())
         })
     }
-    let pb = Playbook {
-        name: "svc",
-        run: run_,
-    };
+    let pb = Playbook::new("svc", run_);
     let d = tempfile::tempdir().unwrap();
     let bin = stubs(d.path());
     let (_, out) = go(&pb, d.path(), &bin, true);
@@ -654,10 +648,7 @@ fn executor_no_systemctl_yet_is_decided_at_run_time() {
             Ok(())
         })
     }
-    let pb = Playbook {
-        name: "svc",
-        run: run_,
-    };
+    let pb = Playbook::new("svc", run_);
     let d = tempfile::tempdir().unwrap();
     stubs(d.path());
     let bin = no_systemctl_bin(d.path());
@@ -935,10 +926,7 @@ fn pb_off() -> Playbook<PathBuf> {
             Ok(())
         })
     }
-    Playbook {
-        name: "svc",
-        run: run_,
-    }
+    Playbook::new("svc", run_)
 }
 
 #[test]
@@ -1146,13 +1134,7 @@ fn a_guard_or_an_allowance_after_restart_satisfies_the_policy() {
     let host = telepatch::testing::FixtureHost::new("h", os(), Rc::new(()));
     let h = Host::new(host.name.clone(), host.os.clone(), host.vars.clone());
     let mut engine = telepatch::engine::Engine::new(telepatch::testing::FakeExecutor::new());
-    let res = telepatch::testing::block_on(engine.run_host(
-        &Playbook {
-            name: "t",
-            run: run_,
-        },
-        h,
-    ));
+    let res = telepatch::testing::block_on(engine.run_host(&Playbook::new("t", run_), h));
     assert!(res.is_ok(), "{res:?}");
 }
 
@@ -1198,13 +1180,7 @@ fn trace_error(run_: fn(Host<()>) -> PlaybookFuture) -> String {
     let host = telepatch::testing::FixtureHost::new("h", os(), Rc::new(()));
     let h = Host::new(host.name.clone(), host.os.clone(), host.vars.clone());
     let mut engine = telepatch::engine::Engine::new(telepatch::testing::FakeExecutor::new());
-    let res = telepatch::testing::block_on(engine.run_host(
-        &Playbook {
-            name: "t",
-            run: run_,
-        },
-        h,
-    ));
+    let res = telepatch::testing::block_on(engine.run_host(&Playbook::new("t", run_), h));
     match res {
         Err(telepatch::engine::EngineError::Playbook(e)) => e.to_string(),
         other => panic!("expected a trace error, got {other:?}"),
@@ -1225,10 +1201,7 @@ fn pb_restart() -> Playbook<PathBuf> {
             Ok(())
         })
     }
-    Playbook {
-        name: "svc",
-        run: run_,
-    }
+    Playbook::new("svc", run_)
 }
 
 fn restarts(d: &Path) -> usize {
@@ -1297,10 +1270,7 @@ fn executor_restart_of_a_unit_the_run_starts_is_skipped() {
             Ok(())
         })
     }
-    let pb = Playbook {
-        name: "svc",
-        run: run_,
-    };
+    let pb = Playbook::new("svc", run_);
     let d = tempfile::tempdir().unwrap();
     let bin = stubs(d.path());
     let (r1, out1) = go(&pb, d.path(), &bin, true);
@@ -1339,10 +1309,7 @@ fn pb_enable_start_then_restart() -> Playbook<PathBuf> {
             Ok(())
         })
     }
-    Playbook {
-        name: "svc",
-        run: run_,
-    }
+    Playbook::new("svc", run_)
 }
 
 fn changed_column(r: &Report) -> String {
@@ -1426,10 +1393,7 @@ fn executor_guarded_restarts_of_one_unit_merge_across_roles() {
             Ok(())
         })
     }
-    let pb = Playbook {
-        name: "svc",
-        run: run_,
-    };
+    let pb = Playbook::new("svc", run_);
     let d = tempfile::tempdir().unwrap();
     let bin = stubs(d.path());
     set(d.path(), "active", "");
@@ -1466,10 +1430,7 @@ fn executor_allowed_unguarded_restart_runs_every_run_and_says_so() {
             Ok(())
         })
     }
-    let pb = Playbook {
-        name: "svc",
-        run: run_,
-    };
+    let pb = Playbook::new("svc", run_);
     let d = tempfile::tempdir().unwrap();
     let bin = stubs(d.path());
     for n in 1..=2 {
@@ -1669,10 +1630,7 @@ fn pb_chain() -> Playbook<PathBuf> {
             Ok(())
         })
     }
-    Playbook {
-        name: "svc",
-        run: run_,
-    }
+    Playbook::new("svc", run_)
 }
 
 #[test]
@@ -1749,10 +1707,7 @@ fn executor_a_chained_restart_merges_with_another_roles_restart() {
             Ok(())
         })
     }
-    let pb = Playbook {
-        name: "svc",
-        run: run_,
-    };
+    let pb = Playbook::new("svc", run_);
     let d = tempfile::tempdir().unwrap();
     let bin = stubs(d.path());
     set(d.path(), "state", "enabled");

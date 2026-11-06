@@ -31,5 +31,5 @@ fn run(h: Host<()>) -> PlaybookFuture {
 
 #[test]
 fn narrowed_sh_does_not_block_hoist() {
-    insta::assert_snapshot!(plan(&Playbook { name: "t", run }, &super::common::ubuntu()));
+    insta::assert_snapshot!(plan(&Playbook::new("t", run), &super::common::ubuntu()));
 }

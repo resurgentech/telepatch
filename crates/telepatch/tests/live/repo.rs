@@ -45,10 +45,7 @@ fn pb_run(h: Host<()>) -> PlaybookFuture {
 }
 
 fn go(ctr: &Container) -> Report {
-    let pb = Playbook {
-        name: "repo",
-        run: pb_run,
-    };
+    let pb = Playbook::new("repo", pb_run);
     run(
         &pb,
         vec![HostSpec {

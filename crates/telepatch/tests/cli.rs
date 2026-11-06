@@ -28,10 +28,7 @@ fn entry(h: Host<Vars>) -> PlaybookFuture {
 }
 
 fn pbs() -> Vec<Playbook<Vars>> {
-    vec![Playbook {
-        name: "greet",
-        run: entry,
-    }]
+    vec![Playbook::new("greet", entry)]
 }
 
 fn args(a: &[&str]) -> Vec<String> {
@@ -430,9 +427,9 @@ fn ssh_key_and_options_reach_every_host() {
 
 mod sectioned {
     use super::*;
-    use telepatch::cli::run_with_args_and_defaults;
+    use telepatch::cli::run_with_args;
 
-    #[derive(Deserialize, Clone)]
+    #[derive(Deserialize, serde::Serialize, Clone)]
     #[serde(deny_unknown_fields, default)]
     struct Hello {
         greeting: String,
@@ -447,7 +444,7 @@ mod sectioned {
         }
     }
 
-    #[derive(Deserialize, Default, Clone)]
+    #[derive(Deserialize, serde::Serialize, Default, Clone)]
     #[serde(deny_unknown_fields, default)]
     struct Vars {
         hello: Hello,
@@ -467,17 +464,42 @@ mod sectioned {
         Box::pin(async move { hello(&h).await })
     }
 
-    fn go(defaults: &str, a: &[&str]) -> (String, i32) {
-        run_with_args_and_defaults(
+    /// Defaults for the playbook `hello`: `who = ["x"]`, greeting "def".
+    fn def_x() -> Vars {
+        Vars {
+            hello: Hello {
+                greeting: "def".into(),
+                who: vec!["x".into()],
+            },
+        }
+    }
+
+    /// Defaults for `hello2`: `who = ["y"]`, the role's own greeting.
+    fn def_y() -> Vars {
+        Vars {
+            hello: Hello {
+                who: vec!["y".into()],
+                ..Hello::default()
+            },
+        }
+    }
+
+    fn go_with(pbs: &[Playbook<Vars>], a: &[&str]) -> (String, i32) {
+        run_with_args(
             &args(a),
-            &[Playbook {
-                name: "hello",
-                run: entry,
-            }],
-            defaults,
+            pbs,
             || LocalTransport::new().uid(0),
             SshTransport::new,
         )
+    }
+
+    fn go(defaults: Option<fn() -> Vars>, a: &[&str]) -> (String, i32) {
+        let pb = Playbook::new("hello", entry);
+        let pb = match defaults {
+            Some(f) => pb.defaults(f),
+            None => pb,
+        };
+        go_with(&[pb], a)
     }
 
     #[test]
@@ -485,17 +507,17 @@ mod sectioned {
         let d = tempfile::tempdir().unwrap();
         let v = vars_file(d.path(), "who = [\"a\"]\n[hello]\ngreeting = \"yo\"\n");
         let (out, code) = go(
-            "who = [\"x\"]\n[hello]\ngreeting = \"def\"\n",
+            Some(def_x),
             &["plan", "hello", "--distro", "arch", "--vars", &v],
         );
         assert_eq!(code, 0, "{out}");
         // the plan carries the file body base64: "yo a\n"
         assert!(out.contains("eW8gYQo="), "{out}");
         // no file: the playbook defaults, then the role's own
-        let (out, code) = go("who = [\"x\"]\n", &["plan", "hello", "--distro", "arch"]);
+        let (out, code) = go(Some(def_x), &["plan", "hello", "--distro", "arch"]);
         assert_eq!(code, 0, "{out}");
-        // "hi x\n"
-        assert!(out.contains("aGkgeAo="), "{out}");
+        // "def x\n": the playbook's greeting and who
+        assert!(out.contains("ZGVmIHgK"), "{out}");
     }
 
     #[test]
@@ -507,15 +529,60 @@ mod sectioned {
             ("\n[hello]\ngreeting = 5\n", 3, "invalid type"),
         ] {
             let v = vars_file(d.path(), body);
-            let (out, code) = go("", &["plan", "hello", "--distro", "arch", "--vars", &v]);
+            let (out, code) = go(None, &["plan", "hello", "--distro", "arch", "--vars", &v]);
             assert_eq!(code, 2, "{out}");
             assert!(
                 out.starts_with(&format!("{v}:{line}:")) && out.contains(what),
                 "{out}"
             );
-            let (out, code) = go("", &["run", "hello", "--local", "--vars", &v]);
+            let (out, code) = go(None, &["run", "hello", "--local", "--vars", &v]);
             assert_eq!(code, 2, "{out}");
             assert!(out.starts_with(&format!("{v}:{line}:")), "{out}");
+        }
+    }
+
+    #[test]
+    fn two_playbooks_in_one_binary_plan_with_their_own_defaults() {
+        let pbs = [
+            Playbook::new("hello", entry).defaults(def_x),
+            Playbook::new("hello2", entry).defaults(def_y),
+        ];
+        let plan = |name: &str| go_with(&pbs, &["plan", name, "--distro", "arch"]);
+        let (a, ca) = plan("hello");
+        let (b, cb) = plan("hello2");
+        assert_eq!((ca, cb), (0, 0), "{a}{b}");
+        assert!(a.contains("ZGVmIHgK"), "{a}"); // "def x\n"
+        assert!(b.contains("aGkgeQo="), "{b}"); // "hi y\n"
+    }
+
+    /// A default that will not serialize (a `None` inside an array) fails at
+    /// load, naming the playbook, for `plan` and `run` alike.
+    #[test]
+    fn an_unserializable_default_fails_at_load_naming_the_playbook() {
+        #[derive(Deserialize, serde::Serialize, Default, Clone)]
+        #[serde(default)]
+        struct Bad {
+            xs: Vec<Option<u32>>,
+        }
+        fn bad() -> Bad {
+            Bad { xs: vec![None] }
+        }
+        fn e(_h: Host<Bad>) -> PlaybookFuture {
+            Box::pin(async { Ok(()) })
+        }
+        let pbs = [Playbook::new("bad", e).defaults(bad)];
+        for a in [
+            &["plan", "bad", "--distro", "arch"][..],
+            &["run", "bad", "--local"][..],
+        ] {
+            let (out, code) = run_with_args(
+                &args(a),
+                &pbs,
+                || LocalTransport::new().uid(0),
+                SshTransport::new,
+            );
+            assert_eq!(code, 2, "{out}");
+            assert!(out.starts_with("playbook bad defaults: "), "{out}");
         }
     }
 }

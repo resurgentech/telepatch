@@ -21,5 +21,5 @@ fn run(h: Host<()>) -> PlaybookFuture {
 
 #[test]
 fn explicit_barrier_blocks_merge() {
-    insta::assert_snapshot!(plan(&Playbook { name: "t", run }, &super::common::ubuntu()));
+    insta::assert_snapshot!(plan(&Playbook::new("t", run), &super::common::ubuntu()));
 }

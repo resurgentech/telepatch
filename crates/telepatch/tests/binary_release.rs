@@ -372,10 +372,7 @@ if [ "$out" = - ]; then cat "$D/www/$n"; else cp "$D/www/$n" "$out"; fi"#
     }
     fn go_path(&self, v: &V, path: &str) -> (Report, String) {
         let _ = std::fs::remove_file(self.p("log"));
-        let pb = Playbook {
-            name: "binary_release",
-            run: pb,
-        };
+        let pb = Playbook::new("binary_release", pb);
         let out = Rc::new(RefCell::new(String::new()));
         let report = run(
             &pb,
@@ -864,10 +861,7 @@ fn pb_merge(h: Host<()>) -> PlaybookFuture {
 
 #[test]
 fn a_merged_member_s_allowance_is_listed_in_the_plan_and_the_report() {
-    let pb = Playbook {
-        name: "merge",
-        run: pb_merge,
-    };
+    let pb = Playbook::new("merge", pb_merge);
     let plan = telepatch::testing::plan(&pb, &FixtureHost::new("h1", os(), Rc::new(())));
     assert!(plan.contains("merged from (none) #0, (none) #1"), "{plan}");
     let line = plan
@@ -1068,10 +1062,7 @@ esac
     }
     fn go_c(&self, v: &VC, path: &str) -> (Report, String, Vec<serde_json::Value>) {
         let _ = std::fs::remove_file(self.p("log"));
-        let pb = Playbook {
-            name: "curl_binary_release",
-            run: pb_curl,
-        };
+        let pb = Playbook::new("curl_binary_release", pb_curl);
         let out = Rc::new(RefCell::new(String::new()));
         let events = self.p("events.jsonl");
         let report = run(

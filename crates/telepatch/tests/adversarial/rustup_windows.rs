@@ -34,7 +34,7 @@ fn run(h: Host<()>) -> PlaybookFuture {
 
 #[test]
 fn later_window_only_adds_what_the_earlier_lacked() {
-    let out = plan(&Playbook { name: "t", run }, &super::common::ubuntu());
+    let out = plan(&Playbook::new("t", run), &super::common::ubuntu());
     let w2 = out.split("window 2").nth(1).expect("two windows");
     assert!(w2.contains("aarch64-unknown-linux-gnu"), "{out}");
     assert!(!w2.contains("'x86_64-unknown-linux-musl'"), "{out}");

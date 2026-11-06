@@ -111,13 +111,7 @@ fn every_handle_has_changed_and_ok() {
         telepatch::facts::os::Os::fixture("debian12").unwrap(),
         Rc::new(()),
     );
-    let _ = telepatch::testing::plan(
-        &Playbook {
-            name: "t",
-            run: run_,
-        },
-        &host,
-    );
+    let _ = telepatch::testing::plan(&Playbook::new("t", run_), &host);
 }
 
 // ---- one shell: a file op and a guarded sh! -------------------------------
@@ -137,10 +131,7 @@ fn file_then_guarded(h: Host<PathBuf>) -> PlaybookFuture {
 #[test]
 fn guarded_sh_runs_when_the_file_changed_then_is_skipped_when_settled() {
     let d = tempfile::tempdir().unwrap();
-    let pb = Playbook {
-        name: "g",
-        run: file_then_guarded,
-    };
+    let pb = Playbook::new("g", file_then_guarded);
     let (r1, out1) = local(&pb, d.path());
     assert_eq!(r1.exit_code(), 0, "{}\n{out1}", r1.render());
     assert_eq!(read(d.path(), "log"), "MARK_ON_CHANGE\n", "{out1}");
@@ -180,10 +171,7 @@ fn a_skipped_op_does_not_make_the_host_changed() {
         })
     }
     let d = tempfile::tempdir().unwrap();
-    let pb = Playbook {
-        name: "g",
-        run: run_,
-    };
+    let pb = Playbook::new("g", run_);
     let _ = local(&pb, d.path());
     let (r2, out2) = local(&pb, d.path());
     assert_eq!(
@@ -215,10 +203,7 @@ fn a_skipped_source_is_unchanged_and_ok() {
         })
     }
     let d = tempfile::tempdir().unwrap();
-    let pb = Playbook {
-        name: "g",
-        run: run_,
-    };
+    let pb = Playbook::new("g", run_);
     let (r1, _) = local(&pb, d.path());
     assert_eq!(r1.exit_code(), 0, "{}", r1.render());
     assert_eq!(read(d.path(), "log"), "MARK_MID\nMARK_C\nMARK_OK\n");
@@ -245,10 +230,7 @@ fn a_guarded_op_whose_source_failed_is_skipped_not_failed() {
         })
     }
     let d = tempfile::tempdir().unwrap();
-    let pb = Playbook {
-        name: "g",
-        run: run_,
-    };
+    let pb = Playbook::new("g", run_);
     let (r, out) = local(&pb, d.path());
     assert_eq!(r.exit_code(), 0, "{}\n{out}", r.render());
     assert_eq!(outcome(&r, "MARK_SRC"), Outcome::AllowedFail);
@@ -271,10 +253,7 @@ fn a_guarded_op_after_a_failed_source_is_not_run() {
         })
     }
     let d = tempfile::tempdir().unwrap();
-    let pb = Playbook {
-        name: "g",
-        run: run_,
-    };
+    let pb = Playbook::new("g", run_);
     let (r, out) = local(&pb, d.path());
     assert!(
         matches!(r.hosts[0].status, HostStatus::Failed { .. }),
@@ -304,10 +283,7 @@ fn across_windows(h: Host<PathBuf>) -> PlaybookFuture {
 #[test]
 fn a_source_in_an_earlier_window_is_a_constant() {
     let d = tempfile::tempdir().unwrap();
-    let pb = Playbook {
-        name: "g",
-        run: across_windows,
-    };
+    let pb = Playbook::new("g", across_windows);
     let (r1, out1) = local(&pb, d.path());
     assert_eq!(r1.exit_code(), 0, "{}\n{out1}", r1.render());
     assert_eq!(read(d.path(), "log"), "MARK_ON_CHANGE\n", "{out1}");
@@ -380,10 +356,7 @@ fn member_rule(h: Host<PathBuf>) -> PlaybookFuture {
 fn a_merged_pkg_member_changed_only_when_its_own_names_were_installed() {
     let d = tempfile::tempdir().unwrap();
     let path = cargo_stub(d.path(), "have 1.0.0\n");
-    let pb = Playbook {
-        name: "g",
-        run: member_rule,
-    };
+    let pb = Playbook::new("g", member_rule);
     let (r, out) = go(&pb, vec![local_spec(d.path(), Some(&path))]);
     assert_eq!(r.exit_code(), 0, "{}\n{out}", r.render());
     assert_eq!(read(d.path(), "cargo.log"), "install new\n");
@@ -420,10 +393,7 @@ fn member_rule_later(h: Host<PathBuf>) -> PlaybookFuture {
 fn the_member_rule_holds_across_windows() {
     let d = tempfile::tempdir().unwrap();
     let path = cargo_stub(d.path(), "have 1.0.0\n");
-    let pb = Playbook {
-        name: "g",
-        run: member_rule_later,
-    };
+    let pb = Playbook::new("g", member_rule_later);
     let (r, out) = go(&pb, vec![local_spec(d.path(), Some(&path))]);
     assert_eq!(r.exit_code(), 0, "{}\n{out}", r.render());
     assert_eq!(read(d.path(), "log"), "MARK_NEW\n", "{out}");
@@ -491,10 +461,7 @@ fn start_then_restart(h: Host<PathBuf>) -> PlaybookFuture {
 #[test]
 fn a_restart_after_a_start_in_an_earlier_window_is_skipped() {
     let d = tempfile::tempdir().unwrap();
-    let pb = Playbook {
-        name: "g",
-        run: start_then_restart,
-    };
+    let pb = Playbook::new("g", start_then_restart);
     let (r1, out1) = go(&pb, vec![svc_spec(d.path())]);
     assert_eq!(r1.exit_code(), 0, "{}\n{out1}", r1.render());
     assert!(
@@ -531,10 +498,7 @@ fn restart_on_member(h: Host<PathBuf>) -> PlaybookFuture {
 fn a_restart_names_its_trigger_and_a_second_run_changes_nothing() {
     let d = tempfile::tempdir().unwrap();
     std::fs::write(d.path().join("active"), "").unwrap();
-    let pb = Playbook {
-        name: "g",
-        run: restart_on_member,
-    };
+    let pb = Playbook::new("g", restart_on_member);
     let (r1, out1) = go(&pb, vec![svc_spec(d.path())]);
     assert_eq!(r1.exit_code(), 0, "{}\n{out1}", r1.render());
     assert!(
@@ -590,10 +554,7 @@ fn merged(h: Host<PathBuf>) -> PlaybookFuture {
 #[test]
 fn two_equal_guarded_ops_merge_with_their_guards_or_joined() {
     let d = tempfile::tempdir().unwrap();
-    let pb = Playbook {
-        name: "g",
-        run: merged,
-    };
+    let pb = Playbook::new("g", merged);
     let (r1, out1) = local(&pb, d.path());
     assert_eq!(r1.exit_code(), 0, "{}\n{out1}", r1.render());
     assert_eq!(read(d.path(), "restart.log"), "MARK_RESTART\n", "{out1}");
@@ -643,10 +604,7 @@ fn late(h: Host<PathBuf>) -> PlaybookFuture {
 #[test]
 fn at_end_moves_an_op_after_the_last_window() {
     let d = tempfile::tempdir().unwrap();
-    let pb = Playbook {
-        name: "g",
-        run: late,
-    };
+    let pb = Playbook::new("g", late);
     let (r, out) = local(&pb, d.path());
     assert_eq!(r.exit_code(), 0, "{}\n{out}", r.render());
     assert_eq!(
@@ -670,13 +628,7 @@ fn trace_error(run_: fn(Host<()>) -> PlaybookFuture) -> String {
     );
     let h = Host::new(host.name.clone(), host.os.clone(), host.vars.clone());
     let mut engine = telepatch::engine::Engine::new(telepatch::testing::FakeExecutor::new());
-    let res = telepatch::testing::block_on(engine.run_host(
-        &Playbook {
-            name: "t",
-            run: run_,
-        },
-        h,
-    ));
+    let res = telepatch::testing::block_on(engine.run_host(&Playbook::new("t", run_), h));
     match res {
         Err(telepatch::engine::EngineError::Playbook(e)) => e.to_string(),
         other => panic!("expected a trace error, got {other:?}"),
@@ -833,10 +785,7 @@ fn principals(h: Host<Vars>) -> PlaybookFuture {
 #[test]
 fn guards_cross_principals() {
     let stub = ssh_stub();
-    let pb = Playbook {
-        name: "g",
-        run: principals,
-    };
+    let pb = Playbook::new("g", principals);
     let (r1, out1) = ssh_go(&pb, stub.path());
     assert_eq!(r1.exit_code(), 0, "{}\n{out1}", r1.render());
     let work = stub.path().join("work");

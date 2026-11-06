@@ -24,5 +24,5 @@ fn run(h: Host<()>) -> PlaybookFuture {
 
 #[test]
 fn read_forces_implicit_barrier_and_splits_merging() {
-    insta::assert_snapshot!(plan(&Playbook { name: "t", run }, &super::common::ubuntu()));
+    insta::assert_snapshot!(plan(&Playbook::new("t", run), &super::common::ubuntu()));
 }

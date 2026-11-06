@@ -48,10 +48,7 @@ fn pb_run(h: Host<()>) -> PlaybookFuture {
 }
 
 fn go(ctr: &Container) -> Report {
-    let pb = Playbook {
-        name: "pkg",
-        run: pb_run,
-    };
+    let pb = Playbook::new("pkg", pb_run);
     run(
         &pb,
         vec![HostSpec {
@@ -117,10 +114,7 @@ fn versioned_run(h: Host<Want>) -> PlaybookFuture {
 }
 
 fn go_versioned(ctr: &Container, pin: Option<&str>) -> Report {
-    let pb = Playbook {
-        name: "pkg-versioned",
-        run: versioned_run,
-    };
+    let pb = Playbook::new("pkg-versioned", versioned_run);
     run(
         &pb,
         vec![HostSpec {

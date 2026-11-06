@@ -49,7 +49,7 @@ fn pb_svc(h: Host<()>) -> PlaybookFuture {
 }
 
 fn go(ctr: &Container, name: &'static str, f: fn(Host<()>) -> PlaybookFuture) -> Report {
-    let pb = Playbook { name, run: f };
+    let pb = Playbook::new(name, f);
     run(
         &pb,
         vec![HostSpec {

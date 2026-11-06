@@ -7,7 +7,8 @@
 //! 1. the vars file's `[s]` table, key `f`;
 //! 2. the vars file's top-level key `f` (every section with a field of
 //!    that name gets it);
-//! 3. the playbook's defaults (a TOML text of the same shape);
+//! 3. the playbook's defaults ([`crate::Playbook::defaults`]: a typed value,
+//!    serialized to TOML of the same shape, for that playbook only);
 //! 4. the section struct's own `Default` (`#[serde(default)]`).
 //!
 //! Field names are learned by deserializing `V` from a probing
@@ -24,6 +25,8 @@
 use std::cell::RefCell;
 use std::path::Path;
 use std::rc::Rc;
+
+use crate::role::Playbook;
 
 use serde::de::{
     self, DeserializeOwned, DeserializeSeed, Deserializer, EnumAccess, IntoDeserializer, MapAccess,
@@ -49,6 +52,24 @@ pub fn load_file<V: DeserializeOwned + Default>(
             load(&p.display().to_string(), &text, defaults)
         }
     }
+}
+
+/// [`load_file`] with the defaults of `playbook` as layer 3. A default that
+/// will not serialize is the error `playbook <name> defaults: ...`.
+pub fn load_file_for<V: DeserializeOwned + Default>(
+    playbook: &Playbook<V>,
+    path: Option<&Path>,
+) -> Result<V, String> {
+    load_file(path, &playbook.defaults_toml()?)
+}
+
+/// [`load`] with the defaults of `playbook` as layer 3.
+pub fn load_for<V: DeserializeOwned>(
+    playbook: &Playbook<V>,
+    source: &str,
+    text: &str,
+) -> Result<V, String> {
+    load(source, text, &playbook.defaults_toml()?)
 }
 
 /// Load `V` from vars `text` (called `source` in errors) and `defaults`.

@@ -601,10 +601,7 @@ fn pb_two_units() -> Playbook<()> {
             Ok(())
         })
     }
-    Playbook {
-        name: "units",
-        run: run_,
-    }
+    Playbook::new("units", run_)
 }
 
 #[test]
@@ -694,10 +691,7 @@ fn pb_unit_with_restart(body: &'static str) -> Playbook<()> {
             Ok(())
         })
     }
-    Playbook {
-        name: "restart",
-        run: if body == "a" { run_a } else { run_b },
-    }
+    Playbook::new("restart", if body == "a" { run_a } else { run_b })
 }
 
 #[test]
@@ -776,10 +770,7 @@ fn executor_a_unit_in_an_earlier_window_reloads_before_a_later_svc_op() {
             Ok(())
         })
     }
-    let pb = Playbook {
-        name: "windows",
-        run: run_,
-    };
+    let pb = Playbook::new("windows", run_);
     let d = tempfile::tempdir().unwrap();
     let bin = stubs(d.path());
     let (r1, out1) = go(&pb, d.path(), &bin, true);
@@ -805,10 +796,7 @@ fn executor_prepare_says_not_verified_without_systemd_analyze() {
             Ok(())
         })
     }
-    let pb = Playbook {
-        name: "noanalyze",
-        run: run_,
-    };
+    let pb = Playbook::new("noanalyze", run_);
     let d = tempfile::tempdir().unwrap();
     let bin = bare_bin(d.path());
     let (r1, out1) = go(&pb, d.path(), &bin, false);
@@ -852,10 +840,7 @@ fn pb_stop_then_remove() -> Playbook<()> {
             Ok(())
         })
     }
-    Playbook {
-        name: "remove",
-        run: run_,
-    }
+    Playbook::new("remove", run_)
 }
 
 #[test]
@@ -940,10 +925,7 @@ fn executor_a_unit_changed_in_one_window_reloads_at_its_end_not_in_the_next() {
             Ok(())
         })
     }
-    let pb = Playbook {
-        name: "windows",
-        run: run_,
-    };
+    let pb = Playbook::new("windows", run_);
     let d = tempfile::tempdir().unwrap();
     let bin = stubs(d.path());
     let (r1, out1) = go(&pb, d.path(), &bin, true);
@@ -981,10 +963,7 @@ fn executor_a_failed_flush_fails_the_host_with_systemctls_message() {
             Ok(())
         })
     }
-    let pb = Playbook {
-        name: "fail",
-        run: run_,
-    };
+    let pb = Playbook::new("fail", run_);
     let d = tempfile::tempdir().unwrap();
     let bin = stubs(d.path());
     std::fs::write(d.path().join("reloadfail"), "").unwrap();
@@ -1018,10 +997,7 @@ fn executor_not_booted_a_changed_unit_alone_does_not_reload() {
             Ok(())
         })
     }
-    let pb = Playbook {
-        name: "offline",
-        run: run_,
-    };
+    let pb = Playbook::new("offline", run_);
     let d = tempfile::tempdir().unwrap();
     let bin = stubs(d.path());
     let (r1, out1) = go(&pb, d.path(), &bin, false);
@@ -1063,10 +1039,7 @@ fn unit_op_and_probe_need_no_cmp_or_diff_on_the_host() {
             Ok(())
         })
     }
-    let pb = Playbook {
-        name: "nocmp",
-        run: run_,
-    };
+    let pb = Playbook::new("nocmp", run_);
     let d = tempfile::tempdir().unwrap();
     let bin = nocmp_bin(d.path());
     let target = unit_dir(d.path()).join("a.service");

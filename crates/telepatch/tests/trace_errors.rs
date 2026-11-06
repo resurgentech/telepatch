@@ -89,7 +89,7 @@ fn engine_returns_the_recorded_error_before_applying() {
         let host = host_for(fx);
         let h = Host::new("h", host.os.clone(), host.vars.clone());
         let mut engine = Engine::new(FakeExecutor::new());
-        let r = block_on(engine.run_host(&Playbook { name, run }, h));
+        let r = block_on(engine.run_host(&Playbook::new(name, run), h));
         match r {
             Err(EngineError::Playbook(e)) => {
                 assert!(e.to_string().contains(msg), "{name}: {e}")
@@ -111,7 +111,7 @@ fn engine_returns_the_recorded_error_before_applying() {
 fn testing_trace_fails_with_the_recorded_error() {
     for (name, run, fx, msg) in CASES {
         let host = host_for(fx);
-        let r = std::panic::catch_unwind(|| trace(&Playbook { name, run }, &host));
+        let r = std::panic::catch_unwind(|| trace(&Playbook::new(name, run), &host));
         let payload = r.expect_err(name);
         let text = payload
             .downcast_ref::<String>()

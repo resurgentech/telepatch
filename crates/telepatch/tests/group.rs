@@ -232,10 +232,7 @@ fn group_executor_prepare_line_then_changed_0() {
     let d = tempfile::tempdir().unwrap();
     stubs(d.path());
     std::fs::write(d.path().join("groups"), "have\n").unwrap();
-    let pb = Playbook {
-        name: "group",
-        run: run_,
-    };
+    let pb = Playbook::new("group", run_);
     let (r1, out1) = go(&pb, d.path());
     assert_eq!(
         r1.hosts[0].status,
@@ -293,10 +290,7 @@ fn group_will_create_is_a_json_event() {
     }
     let d = tempfile::tempdir().unwrap();
     stubs(d.path());
-    let pb = Playbook {
-        name: "group",
-        run: run_,
-    };
+    let pb = Playbook::new("group", run_);
     let bin = d.path().join("bin");
     let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap());
     let log_path = d.path().join("events.jsonl");

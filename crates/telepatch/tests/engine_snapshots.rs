@@ -18,7 +18,7 @@ fn host() -> FixtureHost<()> {
 }
 
 fn pb(run: fn(Host<()>) -> PlaybookFuture) -> Playbook<()> {
-    Playbook { name: "t", run }
+    Playbook::new("t", run)
 }
 
 fn go(run: fn(Host<()>) -> PlaybookFuture, fake: FakeExecutor) -> String {
