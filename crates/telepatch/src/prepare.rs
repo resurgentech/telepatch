@@ -23,7 +23,7 @@ use crate::engine::Window;
 use crate::facts::os::Os;
 use crate::ops::pkg::{Manager, PkgMode, PkgSpec, Source, Wanted};
 use crate::pool::{Shell, ShellError};
-use crate::report::{WillChange, WillCreate, WillInstall};
+use crate::report::{FetchLine, FetchState, WillChange, WillCreate, WillInstall};
 use crate::sh::quote;
 use crate::trace::{OpNode, OpSpec, Principal};
 use crate::trailer::{OpKind, wrap};
@@ -287,6 +287,7 @@ pub struct Prepared {
     pub will_install: Vec<WillInstall>,
     pub will_change: Vec<WillChange>,
     pub will_create: Vec<WillCreate>,
+    pub fetches: Vec<FetchLine>,
 }
 
 /// Names of the groups the window's `group` ops ensure, first-seen order,
@@ -449,6 +450,34 @@ pub async fn prepare_window<S: ShellSet>(
         shells.open_user(u).await?;
     }
 
+    // Downloads, one script for the window, on the root shell; before any
+    // probe is sent, since a failure here blocks the host.
+    let fetch_items = crate::ops::fetch::items(window);
+    let mut fetches = Vec::new();
+    if !fetch_items.is_empty() {
+        let id = next();
+        let root = shell_of(shells, &Principal::Root)?;
+        let (_, out) = probe(root, id, &crate::ops::fetch::prepare_script(&fetch_items)).await?;
+        for (it, found) in fetch_items
+            .iter()
+            .zip(crate::ops::fetch::parse(&fetch_items, &out))
+        {
+            use crate::ops::fetch::Found;
+            let state = match found {
+                Found::Cached => FetchState::Cached,
+                Found::Fetched => FetchState::Fetched,
+                Found::Staged => FetchState::Unverified,
+                Found::Blocked(why) => return Err(format!("{why} (window {})", window.number)),
+            };
+            fetches.push(FetchLine {
+                window: window.number,
+                url: it.url.clone(),
+                sha256: it.sum.clone(),
+                state,
+            });
+        }
+    }
+
     // Send every query, then collect: one round trip.
     let mut pkg_ids = Vec::new();
     for (m, names) in &groups {
@@ -591,7 +620,10 @@ pub async fn prepare_window<S: ShellSet>(
         }
     }
 
-    let mut will = Prepared::default();
+    let mut will = Prepared {
+        fetches,
+        ..Prepared::default()
+    };
     for ((m, names), id) in groups.iter().zip(pkg_ids) {
         // Gather only: a failed probe means "unknown", not "blocked".
         let root = shell_of(shells, &Principal::Root)?;

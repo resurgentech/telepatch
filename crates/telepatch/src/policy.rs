@@ -3,10 +3,12 @@
 //! it: `.allow(Policy::Name, "reason")`. The reason is required; the plan
 //! and the run report list every allowance with its reason.
 //!
-//! Checked so far: [`Policy::UnitViaFile`] and [`Policy::UnguardedRestart`]
+//! Checked so far: [`Policy::UnitViaFile`], [`Policy::UnguardedRestart`]
 //! (an `svc` `.restart()` / `.reload()` with no guard when the trace is
-//! read, so a `.when(g)` later in the chain counts). `Unverified` exists so
-//! an op can name it; nothing trips it yet.
+//! read, so a `.when(g)` later in the chain counts) and
+//! [`Policy::Unverified`] (a `file` op that places or unpacks a fetch with
+//! no `.sha256(..)`: the fetch is not an op, so the file op that takes it
+//! carries the error and the allowance).
 
 use std::fmt;
 
@@ -75,29 +77,52 @@ pub fn violations(trace: &Trace) -> Vec<TraceError> {
         .iter()
         .enumerate()
         .filter_map(|(i, n)| match n {
-            Node::Op(op) => trips(op).map(|(p, msg)| (i, p, msg, op)),
+            Node::Op(op) => Some(
+                trips(op)
+                    .into_iter()
+                    .map(|(p, msg)| (i, p, msg, op))
+                    .collect::<Vec<_>>(),
+            ),
             _ => None,
         })
+        .flatten()
         .filter(|(_, p, _, op)| !op.allowed.iter().any(|a| a.policy == *p))
         .map(|(i, p, msg, _)| trace.locate(NodeId(i), TraceError::policy(p, msg)))
         .collect()
 }
 
-/// The policy `op` trips, with the error message, if any.
-fn trips(op: &OpNode) -> Option<(Policy, String)> {
+/// The policies `op` trips, with the error messages.
+fn trips(op: &OpNode) -> Vec<(Policy, String)> {
+    let mut out = Vec::new();
     match &op.spec {
-        OpSpec::File(f) if under_etc_systemd_system(&f.path) => Some((
-            Policy::UnitViaFile,
-            format!("file {}: unit files go through h.unit", f.path),
-        )),
-        OpSpec::Svc(sv) if op.guard.is_none() => sv.action().map(|a| {
-            (
-                Policy::UnguardedRestart,
-                format!("svc {}: .{}() has no guard", sv.key_name(), a.name()),
-            )
-        }),
-        _ => None,
+        OpSpec::File(f) => {
+            if under_etc_systemd_system(&f.path) {
+                out.push((
+                    Policy::UnitViaFile,
+                    format!("file {}: unit files go through h.unit", f.path),
+                ));
+            }
+            if let Some(src) = &f.src
+                && src.fetched.sha256.is_none()
+                && src.fetched.problem().is_none()
+            {
+                out.push((
+                    Policy::Unverified,
+                    format!("file {}: fetch {} has no sha256", f.path, src.fetched.url),
+                ));
+            }
+        }
+        OpSpec::Svc(sv) if op.guard.is_none() => {
+            if let Some(a) = sv.action() {
+                out.push((
+                    Policy::UnguardedRestart,
+                    format!("svc {}: .{}() has no guard", sv.key_name(), a.name()),
+                ));
+            }
+        }
+        _ => {}
     }
+    out
 }
 
 /// `path` is strictly below `/etc/systemd/system`, after collapsing

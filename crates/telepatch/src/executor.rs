@@ -353,6 +353,9 @@ pub struct HostExec {
     /// It is dropped when one of them started the unit ("Restart and
     /// reload").
     suppress: HashMap<NodeId, Vec<NodeId>>,
+    /// A window had a fetch, so the run's staging directory may exist on
+    /// the host: it is removed when the host is done.
+    fetch_staged: bool,
 }
 
 /// What a guard can know about a reported op.
@@ -798,11 +801,20 @@ fn describe(op: &OpNode) -> String {
         OpSpec::File(f) => {
             use crate::ops::file::FileKind;
             let what = match f.kind {
-                FileKind::Dir => "dir",
-                FileKind::Absent => "absent",
-                FileKind::File if f.content.is_some() => "content",
-                FileKind::File if !f.lines.is_empty() => "lines",
-                FileKind::File => "attrs",
+                FileKind::Dir => "dir".to_string(),
+                FileKind::Absent => "absent".to_string(),
+                FileKind::File if f.src.is_some() => {
+                    let src = f.src.as_ref().unwrap();
+                    let verb = if src.unpack.is_some() {
+                        "unpack"
+                    } else {
+                        "from"
+                    };
+                    format!("{verb} {}", src.fetched.url)
+                }
+                FileKind::File if f.content.is_some() => "content".to_string(),
+                FileKind::File if !f.lines.is_empty() => "lines".to_string(),
+                FileKind::File => "attrs".to_string(),
             };
             format!("file {} {what}", f.path)
         }
@@ -879,6 +891,7 @@ impl HostExec {
             subjects: HashMap::new(),
             starts: Vec::new(),
             suppress: HashMap::new(),
+            fetch_staged: false,
         }
     }
 
@@ -1243,6 +1256,21 @@ impl HostExec {
         self.shells.shell(who)
     }
 
+    /// Remove the run's staging directory on the host (what a fetch with no
+    /// checksum left there). Best effort: a failure is not the run's.
+    async fn cleanup_stage(&mut self) {
+        if !self.fetch_staged {
+            return;
+        }
+        self.seq += 1;
+        let _ = prepare::probe(
+            &mut self.shells.root,
+            self.seq,
+            &crate::ops::fetch::cleanup_script(),
+        )
+        .await;
+    }
+
     fn finish(mut self, res: Result<(), EngineError>) -> (HostReport, HostShells) {
         let mut rep = std::mem::replace(&mut self.report, HostReport::new(&self.name));
         if let Err(e) = res
@@ -1387,6 +1415,9 @@ impl Executor for HostExec {
             return Ok(());
         }
         let actions = self.and_not_starts(window);
+        if !crate::ops::fetch::items(window).is_empty() {
+            self.fetch_staged = true;
+        }
 
         // Prepare: nothing is sent to be applied until all of it passes.
         let prepared = prepare::prepare_window(
@@ -1414,6 +1445,14 @@ impl Executor for HostExec {
                     self.sink.event(json!({"ev":"will_install","host":self.name,
                         "window":w.window,"manager":w.manager,"names":w.names}));
                     self.report.will_install.push(w);
+                }
+                for fl in will.fetches {
+                    self.sink
+                        .line(&format!("== {} [prepare] {} ==", self.name, fl.line()));
+                    self.sink.event(json!({"ev":"fetch","host":self.name,
+                        "window":fl.window,"url":fl.url,"sha256":fl.sha256,
+                        "state":fl.state.words()}));
+                    self.report.fetches.push(fl);
                 }
                 for l in crate::report::WillChange::lines(&will.will_change) {
                     self.sink
@@ -1745,6 +1784,7 @@ async fn run_one<V: 'static>(
     };
     let mut engine = Engine::new(HostExec::new(&name, shells, sink.clone()));
     let res = engine.run_host(&pb, host).await;
+    engine.executor.cleanup_stage().await;
     let (rep, shells) = engine.executor.finish(res);
     shells.close().await;
     sink.event(json!({"ev":"host_status","host":name,"status":rep.status.label(),"detail":rep.status_detail()}));

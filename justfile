@@ -94,6 +94,17 @@ test-live-unit:
     bash ../tp_basic/scripts/lib/docker-guard.sh
     cargo test -p telepatch --test live -- --ignored --nocapture unit_
 
+# Live: the fetch value with .from(..) and .unpack(..).strip(1) on
+# ubuntu:24.04 and rockylinux/rockylinux:10 in plain containers with no init:
+# a python3 http.server on 127.0.0.1 inside the container serves a file and a
+# tar.gz; run 1 downloads, verifies, caches by sha256, places and unpacks;
+# the server is then stopped and run 2 must change nothing and call no
+# network; a wrong checksum blocks before apply. Needs docker and the network
+# (apt/dnf for python3, and curl where the image has none).
+test-live-fetch:
+    bash ../tp_basic/scripts/lib/docker-guard.sh
+    cargo test -p telepatch --test live -- --ignored --nocapture fetch_
+
 # Run a docker recipe of this justfile against the daemon of a fresh 1 GiB
 # tp-* VM, deleted afterwards (../tp_basic/scripts/docker-vm.sh). Every docker
 # recipe refuses to run outside it (exit 2). `just docker-vm test-live-os`

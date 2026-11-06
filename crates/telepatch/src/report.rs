@@ -171,6 +171,45 @@ impl WillCreate {
     }
 }
 
+/// How prepare found a download: in the cache, downloaded and verified,
+/// or downloaded with no checksum (staged for its op, never cached).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FetchState {
+    Cached,
+    Fetched,
+    Unverified,
+}
+
+impl FetchState {
+    /// The words of the prepare line.
+    pub fn words(self) -> &'static str {
+        match self {
+            FetchState::Cached => "cached",
+            FetchState::Fetched => "fetched, sha256 ok",
+            FetchState::Unverified => "fetched, not verified",
+        }
+    }
+}
+
+/// One download a window's file ops need, from the prepare of
+/// [`crate::ops::fetch`]. A failed one blocks the host instead and is not
+/// listed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FetchLine {
+    pub window: usize,
+    pub url: String,
+    /// `None` for an unverified fetch.
+    pub sha256: Option<String>,
+    pub state: FetchState,
+}
+
+impl FetchLine {
+    /// `fetch https://x/y.tgz: cached`.
+    pub fn line(&self) -> String {
+        format!("fetch {}: {}", self.url, self.state.words())
+    }
+}
+
 /// The `systemctl daemon-reload` run at the end of a window, after a
 /// unit changed (`h.unit`) with no `svc` op after it in the window (the
 /// flush; see [`crate::executor`]). Not an op: it is not counted in the
@@ -207,6 +246,8 @@ pub struct HostReport {
     pub will_install: Vec<WillInstall>,
     pub will_change: Vec<WillChange>,
     pub will_create: Vec<WillCreate>,
+    /// Every download the host's file ops needed, in window order.
+    pub fetches: Vec<FetchLine>,
     /// Every `sh!` in the ops the executor received, each site once. Printed
     /// as a warning; never changes the status.
     pub sh_sites: Vec<crate::trace::Site>,
@@ -224,6 +265,7 @@ impl HostReport {
             will_install: Vec::new(),
             will_change: Vec::new(),
             will_create: Vec::new(),
+            fetches: Vec::new(),
             sh_sites: Vec::new(),
             daemon_reloads: Vec::new(),
         }
@@ -317,6 +359,9 @@ impl Report {
             }
             for c in &h.will_create {
                 let _ = writeln!(out, "\n{}: {}", h.name, c.line());
+            }
+            for fl in &h.fetches {
+                let _ = writeln!(out, "\n{}: {}", h.name, fl.line());
             }
             for d in &h.daemon_reloads {
                 let _ = writeln!(out, "\n{}: {}", h.name, d.line());

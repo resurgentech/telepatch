@@ -11,6 +11,7 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 
 use crate::host::{Host, OpHandle, TraceError};
+use crate::ops::fetch::{Fetched, FileSrc};
 use crate::sh::quote;
 use crate::trace::OpSpec;
 
@@ -41,6 +42,8 @@ pub struct FileSpec {
     /// Check the candidate with this command (`%s` = its path) before it
     /// replaces the target; content and line edits only.
     pub validate: Option<String>,
+    /// A download to place or unpack (`.from`, `.unpack`).
+    pub src: Option<FileSrc>,
 }
 
 impl FileSpec {
@@ -53,6 +56,7 @@ impl FileSpec {
             mode: None,
             owner: None,
             validate: None,
+            src: None,
         }
     }
 
@@ -90,6 +94,11 @@ impl FileSpec {
             FileKind::Dir => o.push_str(
                 "if [ -d \"$tp_p\" ]; then :\nelif [ -e \"$tp_p\" ] || [ -L \"$tp_p\" ]; then\n  echo \"telepatch: $tp_p exists and is not a directory\" >&2; rc=1\nelse\n  (umask 022; mkdir -p -- \"$tp_p\")\n  rc=$?\n  if [ \"$rc\" -eq 0 ]; then changed=1; fi\nfi\n",
             ),
+            FileKind::File if self.src.is_some() => {
+                if let Some(src) = &self.src {
+                    crate::ops::fetch::render(self, src, &mut o);
+                }
+            }
             FileKind::File => match &self.validate {
                 Some(v) if self.content.is_some() || !self.lines.is_empty() => {
                     self.render_validated(&mut o, v)
@@ -252,15 +261,148 @@ impl FileHandle {
         self.clone()
     }
 
+    /// The path, for trace errors.
+    fn path(&self) -> String {
+        self.0
+            .with_node(|op| match &op.spec {
+                OpSpec::File(s) => s.path.clone(),
+                _ => String::new(),
+            })
+            .unwrap_or_default()
+    }
+
+    /// The builder already on this op that cannot go with `later`, as an
+    /// author writes it. A fetched source (`.from`, `.unpack`) is exclusive
+    /// with content, lines, `.dir()`, `.absent()` and `.validate()`, and
+    /// the two sources with each other.
+    fn clash(&self, later: &str) -> Option<&'static str> {
+        let source = later == ".from()" || later == ".unpack()";
+        self.0
+            .with_node(|op| {
+                let OpSpec::File(s) = &op.spec else {
+                    return None;
+                };
+                if let Some(src) = &s.src {
+                    return Some(src.builder());
+                }
+                if !source {
+                    return None;
+                }
+                if s.content.is_some() {
+                    Some(".content()")
+                } else if let Some(l) = s.lines.first() {
+                    Some(match l {
+                        LineOp::Line(_) => ".line()",
+                        LineOp::LineRe { .. } => ".line_re()",
+                    })
+                } else if s.kind == FileKind::Dir {
+                    Some(".dir()")
+                } else if s.kind == FileKind::Absent {
+                    Some(".absent()")
+                } else if s.validate.is_some() {
+                    Some(".validate()")
+                } else {
+                    None
+                }
+            })
+            .flatten()
+    }
+
+    /// Record the clash of `later` with an earlier builder; true when there
+    /// is one (the later call then changes nothing).
+    #[track_caller]
+    fn exclusive(&self, later: &str) -> bool {
+        match self.clash(later) {
+            Some(earlier) => {
+                self.0.record_error(TraceError::new(format!(
+                    "file {}: {earlier} and {later} are exclusive",
+                    self.path()
+                )));
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Take a download for `.from` / `.unpack`.
+    #[track_caller]
+    fn take(&self, later: &str, f: &Fetched, unpack: Option<u32>) -> Self {
+        if self.exclusive(later) {
+            return self.clone();
+        }
+        if let Some(p) = f.problem() {
+            self.0
+                .record_error(TraceError::new(format!("file {}: {p}", self.path())));
+            return self.clone();
+        }
+        let src = FileSrc {
+            fetched: f.clone(),
+            unpack,
+        };
+        self.spec(|s| s.src = Some(src))
+    }
+
+    /// Place the file a prepare-phase [`Fetched`] downloaded (`h.fetch(url)
+    /// .sha256(sum)`), at this path. Mode and owner as for content: an
+    /// existing file keeps them unless `.mode()` / `.owner()` say otherwise.
+    /// Takes `&Fetched` or `Fetched`. Exclusive with content, lines,
+    /// `.dir()`, `.absent()` and `.validate()`. Without a checksum on the
+    /// fetch the op is the policy error `Unverified`.
+    #[track_caller]
+    pub fn from(&self, fetched: impl std::borrow::Borrow<Fetched>) -> Self {
+        let f = crate::ops::fetch::fetched_of(fetched);
+        self.take(".from()", &f, None)
+    }
+
+    /// Unpack a downloaded archive (tar gz, xz, zst, or zip) into this
+    /// path, replacing the directory; `.strip(n)` drops leading path
+    /// components. `.mode()` and `.owner()` apply to the directory (the
+    /// owner recursively). A second run with the same checksum and strip
+    /// changes nothing. Takes `&Fetched` or `Fetched`.
+    #[track_caller]
+    pub fn unpack(&self, fetched: impl std::borrow::Borrow<Fetched>) -> Self {
+        let f = crate::ops::fetch::fetched_of(fetched);
+        self.take(".unpack()", &f, Some(0))
+    }
+
+    /// Drop `n` leading path components of an `.unpack(..)` (tar's
+    /// `--strip-components`; for a zip, the files below the `n`th directory
+    /// level). A trace error without `.unpack(..)`.
+    #[track_caller]
+    pub fn strip(&self, n: u32) -> Self {
+        let unpacking = self
+            .0
+            .with_node(|op| matches!(&op.spec, OpSpec::File(s) if s.src.as_ref().is_some_and(|x| x.unpack.is_some())))
+            .unwrap_or(false);
+        if !unpacking {
+            self.0.record_error(TraceError::new(format!(
+                "file {}: .strip({n}) needs .unpack(..)",
+                self.path()
+            )));
+            return self.clone();
+        }
+        self.spec(|s| {
+            if let Some(src) = &mut s.src {
+                src.unpack = Some(n);
+            }
+        })
+    }
+
     /// Ensure this exact line is present, appending if missing.
     #[track_caller]
     pub fn line(&self, line: &str) -> Self {
+        if self.exclusive(".line()") {
+            return self.clone();
+        }
         self.spec(|s| s.lines.push(LineOp::Line(line.to_string())))
     }
     /// Replace the last line matching `re` (an ERE, `grep -E`) with `line`,
     /// or append it when none matches.
     #[track_caller]
     pub fn line_re(&self, re: &str, line: &str) -> Self {
+        if self.exclusive(".line_re()") {
+            return self.clone();
+        }
         self.spec(|s| {
             s.lines.push(LineOp::LineRe {
                 re: re.to_string(),
@@ -271,16 +413,25 @@ impl FileHandle {
     /// Ensure a directory.
     #[track_caller]
     pub fn dir(&self) -> Self {
+        if self.exclusive(".dir()") {
+            return self.clone();
+        }
         self.spec(|s| s.kind = FileKind::Dir)
     }
     /// Ensure the path does not exist (removes directories recursively).
     #[track_caller]
     pub fn absent(&self) -> Self {
+        if self.exclusive(".absent()") {
+            return self.clone();
+        }
         self.spec(|s| s.kind = FileKind::Absent)
     }
     /// Ensure exactly these bytes.
     #[track_caller]
     pub fn content(&self, bytes: impl AsRef<[u8]>) -> Self {
+        if self.exclusive(".content()") {
+            return self.clone();
+        }
         let b = bytes.as_ref().to_vec();
         self.spec(|s| s.content = Some(b))
     }
@@ -291,6 +442,9 @@ impl FileHandle {
     /// target untouched.
     #[track_caller]
     pub fn validate(&self, cmd: &str) -> Self {
+        if self.exclusive(".validate()") {
+            return self.clone();
+        }
         if !cmd.contains("%s") {
             self.0.record_error(TraceError::new(format!(
                 "file validate command has no %s: {cmd}"
