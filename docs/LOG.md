@@ -968,3 +968,20 @@ are appended, never edited in; a hook refuses rewrites.
   engine line is not changed.
 - Commits: telepatch 0d9b14f (engine line, mixed with unrelated
   ui-prototype files; not rewritten), fb897bf (the live-test follow-up)
+
+## 2026-11-11 — T86d Every daemon-reload is reported; the guarded reload fires on the VM
+
+- Each daemon-reload telepatch runs is one stream line (`systemd
+  daemon-reload: <reason>`), one `daemon_reload` event (`reason`, `op`)
+  and one `HostReport` entry. A skipped one prints nothing and is not
+  counted in OK or CHANGED. Svc snapshots move on the trailer JSON and
+  the `__tp_drn` lines only. A newline in a string default survives the
+  vars re-emitter, so `probe_conf`'s default `probe=1\n` does not move
+  the conf op.
+- tp_basic: `services_vm.probe_conf`; 39 plans with a svc op gain the
+  `NeedDaemonReload` `__tp_drn` lines only. `just test-vm ubuntu2404
+  services_vm` PASS at 1 GiB (run 3 one `daemon_reload` event and
+  journal delta 1; run 4 the conf file and the guarded reload, MainPID
+  unchanged, zero daemon-reloads; run 5 CHANGED 0). `just docker-vm
+  test-services ubuntu2404` PASS, init-less, no reload line.
+- Commits: telepatch a916c60, tp_basic 3db6094
