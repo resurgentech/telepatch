@@ -955,3 +955,16 @@ are appended, never edited in; a hook refuses rewrites.
   normaliser goes; the 13 `dev_desktop` plans move on the one staging
   line; two `plan` processes print identical text.
 - Commits: telepatch ec68cac, tp_basic 5e9620e
+
+## 2026-11-11 — T86e wget everywhere a download happens, proven live
+
+- `Latest::github_release` uses the same curl-else-wget form as
+  `Latest::Text` (`wget -q -O - --`). A PATH farm with only a fake wget
+  resolves a github_release latest. Live `just docker-vm test-live-fetch`
+  8/8: the six T83a cases, plus wget-only on ubuntu:24.04 (GNU Wget
+  1.21.4) and rockylinux:10 (GNU Wget2 2.2.0). Rocky 10 has no
+  `wget2-wget`; the test installs EPEL `wget2` and wraps it with
+  `--no-local-db` so libwget does not leave `/tmp` lock files. The
+  engine line is not changed.
+- Commits: telepatch 0d9b14f (engine line, mixed with unrelated
+  ui-prototype files; not rewritten), fb897bf (the live-test follow-up)
