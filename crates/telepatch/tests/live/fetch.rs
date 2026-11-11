@@ -28,10 +28,15 @@
 //! [`fetch_after_the_op_that_installs_curl`]).
 //!
 //! And a host with `wget` and no `curl` from the start
-//! (`fetch_*_wget_only`, T86e): GNU wget on Ubuntu, wget2 (Rocky 10's
-//! `wget`) on Rocky; a `.from` with a sha256 and a binary release with
-//! `Latest::text` and `Sum::json` through that `wget` alone (see
-//! [`fetch_with_wget_only`]).
+//! (`fetch_*_wget_only`, T86e): GNU wget on Ubuntu; on Rocky, EPEL's
+//! `wget2` (the `wget2-wget` shim is not in Rocky 10 or EPEL 10, so the
+//! setup points `wget` at `wget2`). wget2's libwget leaves
+//! `/tmp/.wget-hsts_lck_<uid>` and `/tmp/.wget-hpkp_lck_<uid>` whenever
+//! it opens those databases, and it accepted `-q -O - --`, so the engine
+//! line stays that form. The Rocky `wget` is a wrapper that adds
+//! `--no-local-db` (GNU wget has no such flag and leaves no lock files).
+//! A `.from` with a sha256 and a binary release with `Latest::text` and
+//! `Sum::json` through that `wget` alone (see [`fetch_with_wget_only`]).
 
 use std::cell::RefCell;
 use std::process::{Command, Stdio};
@@ -714,21 +719,64 @@ fn fetch_rocky_after_the_op_that_installs_curl() {
     fetch_after_the_op_that_installs_curl("rockylinux/rockylinux:10");
 }
 
-/// A host with `wget` and no `curl` (T86e). `wget_pkg` is installed with
-/// `python3` while the image's own tools are still there; then every
-/// `curl` package is removed (keeping libcurl, which dnf needs), and
-/// `command -v curl` must fail. The `.from` and the binary release then
-/// run through `wget` in a single window (no split: wget was there from
-/// the start), and a second run changes nothing.
-fn fetch_with_wget_only(image: &str, wget_pkg: &str) {
+/// Rocky 10's own `wget` is GNU wget. EPEL 10 ships `wget2` as
+/// `/usr/bin/wget2` and does not ship `wget2-wget` (the Fedora shim that
+/// replaces `/usr/bin/wget`). The engine calls `wget`, so this points
+/// `wget` at `wget2` after removing curl and any GNU wget. libcurl stays.
+///
+/// wget2 2.2.0 accepts `wget -q -O - --` and still creates
+/// `/tmp/.wget-hsts_lck_<uid>` and `/tmp/.wget-hpkp_lck_<uid>` (libwget
+/// locks those databases under `$TMPDIR` or `/tmp` and does not unlink
+/// them). `--no-local-db` skips the databases. GNU wget has no such flag
+/// and does not leave the files, so the shared engine line is unchanged
+/// and only this wrapper adds the flag.
+const ROCKY_WGET2: &str = r#"
+set -e
+if ! rpm -q epel-release >/dev/null 2>&1; then
+  dnf install -y epel-release
+fi
+if ! dnf install -y wget2-wget; then
+  dnf install -y wget2
+fi
+for p in curl curl-minimal; do
+  if rpm -q "$p" >/dev/null 2>&1; then rpm -e --nodeps "$p"; fi
+done
+command -v wget2 >/dev/null 2>&1
+if rpm -q wget >/dev/null 2>&1; then
+  rpm -e --nodeps wget
+fi
+# replace, do not write through a symlink onto wget2 itself
+rm -f /usr/bin/wget
+w2=$(command -v wget2)
+printf '%s\n' '#!/bin/sh' "exec $(printf '%q' "$w2") --no-local-db \"\$@\"" > /usr/bin/wget
+chmod 755 /usr/bin/wget
+wget --version | head -n 1 | grep -qi wget2
+"#;
+
+/// A host with `wget` and no `curl` (T86e). `wget_pkg`, when set, is
+/// installed with `python3` while the image's own tools are still there;
+/// `after` is a shell setup that runs next (Rocky: EPEL `wget2`). Then
+/// every `curl` package is removed (keeping libcurl, which dnf needs),
+/// and `command -v curl` must fail. The `.from` and the binary release
+/// then run through `wget` in a single window (no split: wget was there
+/// from the start), and a second run changes nothing.
+fn fetch_with_wget_only(image: &str, wget_pkg: Option<&str>, after: Option<&str>) {
     let ctr = Container::start(image);
+    let mut install = vec!["python3".to_string()];
+    if let Some(pkg) = wget_pkg {
+        install.push(pkg.to_string());
+    }
     let v = V {
-        install: vec!["python3".into(), wget_pkg.into()],
+        install,
         plain_sum: String::new(),
         tgz_sum: String::new(),
     };
     let (r, out) = go(&ctr, "install", &v, pb_install);
     assert_eq!(r.exit_code(), 0, "install:\n{out}\n{}", r.render());
+    if let Some(script) = after {
+        let (rc, o) = exec(&ctr, script);
+        assert_eq!(rc, 0, "{image}: wget setup:\n{o}");
+    }
     // remove only the curl packages rpm / dpkg find; libcurl stays
     let (rc, o) = exec(
         &ctr,
@@ -892,11 +940,11 @@ fn pb_wget_only(h: Host<T>) -> PlaybookFuture {
 #[test]
 #[ignore = "needs docker"]
 fn fetch_ubuntu_wget_only() {
-    fetch_with_wget_only("ubuntu:24.04", "wget");
+    fetch_with_wget_only("ubuntu:24.04", Some("wget"), None);
 }
 
 #[test]
 #[ignore = "needs docker"]
 fn fetch_rocky_wget_only() {
-    fetch_with_wget_only("rockylinux/rockylinux:10", "wget2-wget");
+    fetch_with_wget_only("rockylinux/rockylinux:10", None, Some(ROCKY_WGET2));
 }

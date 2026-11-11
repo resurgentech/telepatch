@@ -693,10 +693,11 @@ printf '{{\n  "url": "u",\n  "tag_name": "v4.5.6",\n  "name": "x"\n}}\n'
         &pb,
         vec![HostSpec {
             name: "h1".into(),
-            target: Target::Local(LocalTransport::new().uid(0).env(
-                "PATH",
-                &format!("{}:{}", bin.display(), farm.display()),
-            )),
+            target: Target::Local(
+                LocalTransport::new()
+                    .uid(0)
+                    .env("PATH", &format!("{}:{}", bin.display(), farm.display())),
+            ),
             vars: G {
                 dir: out_dir.clone(),
             },
