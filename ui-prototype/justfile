@@ -1,0 +1,18 @@
+dx := ".tools/bin/dx"
+
+# Build the page and serve it with a shell behind it.
+run: build
+    cargo run --release -p server
+
+# The page: target/dx/web/release/web/public, which the server serves.
+build:
+    {{dx}} build --web --release -p web
+
+test:
+    cargo test
+
+# One time: the wasm32 target and the Dioxus CLI (kept in .tools/). The
+# CLI's version must equal the dioxus crate's in web/Cargo.toml.
+setup:
+    rustup target add wasm32-unknown-unknown
+    cargo install dioxus-cli --version 0.8.0-alpha.3 --locked --root .tools

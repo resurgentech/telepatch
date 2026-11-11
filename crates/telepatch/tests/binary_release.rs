@@ -632,6 +632,95 @@ fn wget_reads_latest_the_json_and_the_release_when_curl_is_absent() {
     e.assert_clean();
 }
 
+#[derive(Clone)]
+struct G {
+    dir: PathBuf,
+}
+
+fn pb_github(h: Host<G>) -> PlaybookFuture {
+    Box::pin(async move {
+        let d = h.vars.dir.display().to_string();
+        h.pkg(["tool"])
+            .installer_script(
+                telepatch::ops::pkg::InstallerScript::new()
+                    .bin(format!("{d}/tool"))
+                    .version(format!("{d}/tool --version"))
+                    .latest(Latest::github_release("acme/tool"))
+                    .install(format!(
+                        "printf '#!/bin/sh\\necho tool %s\\n' \"$TP_WANT\" > {d}/tool && chmod 755 {d}/tool"
+                    )),
+            )
+            .latest();
+        Ok(())
+    })
+}
+
+#[test]
+fn wget_resolves_a_github_release_latest_when_curl_is_absent() {
+    let d = tempfile::tempdir().unwrap();
+    let out_dir = d.path().join("out");
+    let bin = d.path().join("bin");
+    let farm = d.path().join("farm");
+    for p in [&out_dir, &bin, &farm] {
+        std::fs::create_dir_all(p).unwrap();
+    }
+    // a PATH of /usr/bin without curl and wget, then a fake wget that
+    // answers only the releases/latest url
+    for ent in std::fs::read_dir("/usr/bin").unwrap().flatten() {
+        let n = ent.file_name().to_string_lossy().to_string();
+        if n != "curl" && n != "wget" {
+            let _ = std::os::unix::fs::symlink(ent.path(), farm.join(&n));
+        }
+    }
+    let log = d.path().join("log");
+    exe(
+        &bin.join("wget"),
+        &format!(
+            r#"#!/bin/bash
+args="$*"
+echo "wget $args" >> {log}
+if [ "$args" != "-q -O - -- https://api.github.com/repos/acme/tool/releases/latest" ]; then
+  echo "wget: unexpected: $args" >&2; exit 8
+fi
+printf '{{\n  "url": "u",\n  "tag_name": "v4.5.6",\n  "name": "x"\n}}\n'
+"#,
+            log = log.display()
+        ),
+    );
+    let pb = Playbook::new("github", pb_github);
+    let out = Rc::new(RefCell::new(String::new()));
+    let r = run(
+        &pb,
+        vec![HostSpec {
+            name: "h1".into(),
+            target: Target::Local(LocalTransport::new().uid(0).env(
+                "PATH",
+                &format!("{}:{}", bin.display(), farm.display()),
+            )),
+            vars: G {
+                dir: out_dir.clone(),
+            },
+        }],
+        RunOpts {
+            log: None,
+            stdout: Stdout::Capture(out.clone()),
+        },
+    );
+    let out = out.borrow().clone();
+    assert!(!out.contains("could not resolve"), "{out}\n{}", r.render());
+    assert_eq!(status(&r), &HostStatus::Changed, "{out}\n{}", r.render());
+    // read in prepare and again in apply, each the same wget call
+    let calls = std::fs::read_to_string(&log).unwrap();
+    assert!(!calls.is_empty(), "wget was called");
+    for l in calls.lines() {
+        assert_eq!(
+            l,
+            "wget -q -O - -- https://api.github.com/repos/acme/tool/releases/latest"
+        );
+    }
+    assert_eq!(run_bin(&out_dir.join("tool"), "--version"), "tool 4.5.6");
+}
+
 #[test]
 fn a_single_binary_with_a_sidecar_and_no_version_follows_the_published_checksum() {
     let e = Env::new();

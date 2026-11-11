@@ -26,6 +26,12 @@
 //! a `pkg` op installing `curl`, then a `.from` and a binary release in the
 //! same window; the window splits after the pkg op (see
 //! [`fetch_after_the_op_that_installs_curl`]).
+//!
+//! And a host with `wget` and no `curl` from the start
+//! (`fetch_*_wget_only`, T86e): GNU wget on Ubuntu, wget2 (Rocky 10's
+//! `wget`) on Rocky; a `.from` with a sha256 and a binary release with
+//! `Latest::text` and `Sum::json` through that `wget` alone (see
+//! [`fetch_with_wget_only`]).
 
 use std::cell::RefCell;
 use std::process::{Command, Stdio};
@@ -706,4 +712,191 @@ fn fetch_ubuntu_after_the_op_that_installs_curl() {
 #[ignore = "needs docker"]
 fn fetch_rocky_after_the_op_that_installs_curl() {
     fetch_after_the_op_that_installs_curl("rockylinux/rockylinux:10");
+}
+
+/// A host with `wget` and no `curl` (T86e). `wget_pkg` is installed with
+/// `python3` while the image's own tools are still there; then every
+/// `curl` package is removed (keeping libcurl, which dnf needs), and
+/// `command -v curl` must fail. The `.from` and the binary release then
+/// run through `wget` in a single window (no split: wget was there from
+/// the start), and a second run changes nothing.
+fn fetch_with_wget_only(image: &str, wget_pkg: &str) {
+    let ctr = Container::start(image);
+    let v = V {
+        install: vec!["python3".into(), wget_pkg.into()],
+        plain_sum: String::new(),
+        tgz_sum: String::new(),
+    };
+    let (r, out) = go(&ctr, "install", &v, pb_install);
+    assert_eq!(r.exit_code(), 0, "install:\n{out}\n{}", r.render());
+    // remove only the curl packages rpm / dpkg find; libcurl stays
+    let (rc, o) = exec(
+        &ctr,
+        "if command -v dpkg >/dev/null 2>&1; then \
+           for p in curl; do if dpkg -s $p >/dev/null 2>&1; then dpkg --purge --force-depends $p || exit 1; fi; done; \
+         else \
+           for p in curl curl-minimal; do if rpm -q $p >/dev/null 2>&1; then rpm -e --nodeps $p || exit 1; fi; done; \
+         fi",
+    );
+    assert_eq!(rc, 0, "removing curl: {o}");
+    let (rc, _) = exec(&ctr, "command -v curl");
+    assert_ne!(rc, 0, "{image}: curl is gone");
+    let (rc, o) = exec(&ctr, "command -v wget");
+    assert_eq!(rc, 0, "{image}: wget is on the host: {o}");
+    let (_, ver) = exec(&ctr, "wget --version | head -n 1");
+    println!("{image}: {ver}");
+
+    let (_, machine) = exec(&ctr, "uname -m");
+    let arch = match machine.as_str() {
+        "x86_64" => "amd64",
+        "aarch64" => "arm64",
+        m => panic!("no default {{arch}} for {m}"),
+    }
+    .to_string();
+    let (rc, o) = exec(
+        &ctr,
+        "mkdir -p /srv/www && printf 'served by the test\\n' > /srv/www/plain.txt",
+    );
+    assert_eq!(rc, 0, "writing the served file: {o}");
+    let (_, plain) = exec(&ctr, "sha256sum /srv/www/plain.txt | cut -d' ' -f1");
+    let (t1, _) = publish(&ctr, &arch, "1.2.3", 1);
+    let o = Command::new("docker")
+        .args([
+            "exec",
+            "-d",
+            &ctr.name,
+            "sh",
+            "-c",
+            &format!(
+                "cd /srv/www && exec python3 -m http.server {PORT} --bind 127.0.0.1 > /srv/httpd.log 2>&1"
+            ),
+        ])
+        .stdin(Stdio::null())
+        .output()
+        .expect("docker exec -d");
+    assert!(o.status.success(), "starting the server");
+    // readiness without curl: python3's urllib
+    let (rc, o) = exec(
+        &ctr,
+        &format!(
+            "for i in $(seq 1 50); do python3 -c 'import urllib.request; urllib.request.urlopen(\"http://127.0.0.1:{PORT}/VERSION\")' 2>/dev/null && exit 0; sleep 0.2; done; exit 1"
+        ),
+    );
+    assert_eq!(rc, 0, "the server did not come up: {o}");
+    let (_, tmp_before) = exec(&ctr, "ls -A /tmp");
+
+    let run_once = || {
+        let pb = Playbook::new("wget_only", pb_wget_only);
+        let out = Rc::new(RefCell::new(String::new()));
+        let r = run(
+            &pb,
+            vec![HostSpec {
+                name: "c".into(),
+                target: Target::Docker(DockerTransport::new().container("c", &ctr.name)),
+                vars: T {
+                    plain_sum: plain.clone(),
+                },
+            }],
+            RunOpts {
+                log: None,
+                stdout: Stdout::Capture(out.clone()),
+            },
+        );
+        let text = out.borrow().clone();
+        println!("{text}\n{}", r.render());
+        (r, text)
+    };
+
+    // run 1: both through wget, in one window
+    let (r1, out1) = run_once();
+    assert_eq!(
+        r1.hosts[0].status,
+        HostStatus::Changed,
+        "run 1:\n{out1}\n{}",
+        r1.render()
+    );
+    assert!(!out1.contains("neither curl nor wget"), "{out1}");
+    assert!(!out1.contains("split after"), "no window split:\n{out1}");
+    for l in [
+        format!("== c [prepare] fetch http://127.0.0.1:{PORT}/plain.txt: fetched, sha256 ok =="),
+        "== c [prepare] pkg[binary_release] tool: not installed, 1.2.3 wanted; fetched, sha256 ok =="
+            .to_string(),
+    ] {
+        assert!(out1.contains(&l), "{l}\n{out1}");
+    }
+    assert!(
+        r1.hosts[0].fetches.iter().all(|f| f.window == 1),
+        "{}",
+        r1.render()
+    );
+    let (rc, _) = exec(&ctr, "command -v curl");
+    assert_ne!(rc, 0, "nothing brought curl back");
+    assert_eq!(
+        exec(&ctr, "cat /etc/tp-wget-only.txt").1,
+        "served by the test"
+    );
+    assert_eq!(exec(&ctr, "/opt/tool/bin/tool").1, "tool version 1.2.3");
+    let (_, cache) = exec(&ctr, "ls /var/cache/telepatch/sha256");
+    assert!(
+        cache.contains(&plain) && cache.contains(&t1),
+        "cached: {cache}"
+    );
+
+    // run 2: settled
+    let (r2, out2) = run_once();
+    assert_eq!(
+        r2.hosts[0].status,
+        HostStatus::Ok,
+        "run 2:\n{out2}\n{}",
+        r2.render()
+    );
+    for o in &r2.hosts[0].ops {
+        assert!(!o.changed, "run 2 changed {}: {}", o.id, o.desc);
+    }
+
+    let (_, stage) = exec(&ctr, "ls -A /var/tmp/telepatch 2>/dev/null");
+    assert_eq!(stage, "", "the staging dir is cleaned");
+    let (_, tmp_after) = exec(&ctr, "ls -A /tmp");
+    assert_eq!(tmp_after, tmp_before, "nothing left in /tmp");
+    assert!(!out1.contains("command not found"), "{out1}");
+    assert!(!out2.contains("command not found"), "{out2}");
+}
+
+fn pb_wget_only(h: Host<T>) -> PlaybookFuture {
+    Box::pin(async move {
+        let base = format!("http://127.0.0.1:{PORT}");
+        let plain = h
+            .fetch(format!("{base}/plain.txt"))
+            .sha256(&h.vars.plain_sum);
+        h.file("/etc/tp-wget-only.txt").from(&plain);
+        h.pkg(["tool"])
+            .binary_release(
+                BinaryRelease::new()
+                    .url(format!("{base}/tool-{{version}}.linux-{{arch}}.tar.gz"))
+                    .sha256(Sum::json(
+                        format!("{base}/releases.json"),
+                        "filename",
+                        "sha256",
+                    ))
+                    .unpack_to("/opt/tool")
+                    .strip(1)
+                    .bin("/opt/tool/bin/tool")
+                    .version("tool --version")
+                    .latest(Latest::text(format!("{base}/VERSION"))),
+            )
+            .latest();
+        Ok(())
+    })
+}
+
+#[test]
+#[ignore = "needs docker"]
+fn fetch_ubuntu_wget_only() {
+    fetch_with_wget_only("ubuntu:24.04", "wget");
+}
+
+#[test]
+#[ignore = "needs docker"]
+fn fetch_rocky_wget_only() {
+    fetch_with_wget_only("rockylinux/rockylinux:10", "wget2-wget");
 }

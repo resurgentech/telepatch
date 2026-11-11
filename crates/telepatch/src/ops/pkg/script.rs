@@ -54,13 +54,21 @@ pub(super) fn path_word(p: &str) -> String {
     quote(p)
 }
 
+/// Shell printing the body of the (already quoted) url on stdout: `curl`
+/// when the host has it, else `wget`.
+fn fetch_stdout(u: &str) -> String {
+    format!(
+        "if command -v curl >/dev/null 2>&1; then curl -fsSL -- {u}; else wget -q -O - -- {u}; fi"
+    )
+}
+
 /// Where the latest version comes from. Rendered into a host-side command.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Latest {
     /// A command run on the host that prints the version.
     Command(String),
     /// `owner/repo` on GitHub: the `tag_name` of its latest release, read
-    /// with `curl` on the host (a leading `v` dropped).
+    /// with `curl`, else `wget`, on the host (a leading `v` dropped).
     GithubRelease(String),
     /// A url whose body names the latest version (go.dev's
     /// `VERSION?m=text`: `go1.27.3` then a `time` line), read with `curl`,
@@ -87,18 +95,17 @@ impl Latest {
     pub fn render(&self) -> String {
         match self {
             Latest::Command(c) => c.clone(),
-            Latest::GithubRelease(repo) => format!(
-                "curl -fsSL {} | sed -n 's/.*\"tag_name\"[[:space:]]*:[[:space:]]*\"v\\{{0,1\\}}\\([^\"]*\\)\".*/\\1/p' | head -n1",
-                quote(&format!(
+            Latest::GithubRelease(repo) => {
+                let u = quote(&format!(
                     "https://api.github.com/repos/{repo}/releases/latest"
-                ))
-            ),
-            Latest::Text(url) => {
-                let u = quote(url);
+                ));
                 format!(
-                    "if command -v curl >/dev/null 2>&1; then curl -fsSL -- {u}; else wget -q -O - -- {u}; fi"
+                    "{} | {}",
+                    fetch_stdout(&u),
+                    "sed -n 's/.*\"tag_name\"[[:space:]]*:[[:space:]]*\"v\\{0,1\\}\\([^\"]*\\)\".*/\\1/p' | head -n1"
                 )
             }
+            Latest::Text(url) => fetch_stdout(&quote(url)),
         }
     }
 }
@@ -375,7 +382,7 @@ mod tests {
         let r = Latest::github_release("astral-sh/uv").render();
         assert!(
             r.starts_with(
-                "curl -fsSL 'https://api.github.com/repos/astral-sh/uv/releases/latest' | "
+                "if command -v curl >/dev/null 2>&1; then curl -fsSL -- 'https://api.github.com/repos/astral-sh/uv/releases/latest'; else wget -q -O - -- 'https://api.github.com/repos/astral-sh/uv/releases/latest'; fi | "
             ),
             "{r}"
         );

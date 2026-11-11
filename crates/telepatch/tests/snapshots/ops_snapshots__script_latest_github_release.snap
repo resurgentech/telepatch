@@ -28,7 +28,7 @@ uv self version --short
   fi
 }
 tp_latest=$( (
-curl -fsSL 'https://api.github.com/repos/astral-sh/uv/releases/latest' | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"v\{0,1\}\([^"]*\)".*/\1/p' | head -n1
+if command -v curl >/dev/null 2>&1; then curl -fsSL -- 'https://api.github.com/repos/astral-sh/uv/releases/latest'; else wget -q -O - -- 'https://api.github.com/repos/astral-sh/uv/releases/latest'; fi | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"v\{0,1\}\([^"]*\)".*/\1/p' | head -n1
 ) 2>/dev/null | tp_tok)
 tp_want_v=$tp_latest
 if [ -z "$tp_want_v" ]; then echo "telepatch: script "'uv'": could not resolve the latest version" >&2; rc=1; fi

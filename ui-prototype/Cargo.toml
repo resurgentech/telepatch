@@ -1,0 +1,7 @@
+# Standalone: its own workspace, nothing shared with the telepatch crates.
+[workspace]
+resolver = "3"
+members = ["server", "web"]
+
+[profile.release]
+opt-level = "s"

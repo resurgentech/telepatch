@@ -1,0 +1,17 @@
+[package]
+name = "server"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+axum = { version = "0.8", features = ["ws"] }
+pty-process = { version = "0.5", features = ["async"] }
+pulldown-cmark = { version = "0.13", default-features = false, features = ["html"] }
+serde = { version = "1", features = ["derive"] }
+tokio = { version = "1", features = ["rt", "macros", "net", "io-util", "process"] }
+tower-http = { version = "0.7", features = ["fs"] }
+
+[dev-dependencies]
+tokio-tungstenite = "0.30"
+futures-util = "0.3"
