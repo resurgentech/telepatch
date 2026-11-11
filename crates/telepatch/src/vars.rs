@@ -263,7 +263,15 @@ impl Emitter {
                 line,
             },
         ));
-        let v = e.value.to_string().replace('\n', " ");
+        // A string that displays as a multiline TOML value (`probe=1\n`
+        // becomes a `"""` string) must stay one line without the newline
+        // becoming a space. Other values keep the one-line flattening.
+        let rendered = e.value.to_string();
+        let v = if rendered.contains('\n') {
+            one_line_value(&e.value)
+        } else {
+            rendered
+        };
         self.line(&format!("{} = {v}", quote(key)));
     }
 }
@@ -311,6 +319,35 @@ fn merge(shape: &Shape, file: &Doc, defs: &Doc) -> (String, Vec<(usize, Origin)>
         }
     }
     (em.out, em.origins)
+}
+
+/// A TOML value on one line. A string is a basic string, so a newline in
+/// the value is the escape `\n` and round-trips. Anything else keeps the
+/// old flattening (a newline in the display becomes a space).
+fn one_line_value(v: &toml::Value) -> String {
+    match v {
+        toml::Value::String(s) => {
+            let mut o = String::from("\"");
+            for c in s.chars() {
+                match c {
+                    '\\' | '"' => {
+                        o.push('\\');
+                        o.push(c);
+                    }
+                    '\u{0008}' => o.push_str("\\b"),
+                    '\t' => o.push_str("\\t"),
+                    '\n' => o.push_str("\\n"),
+                    '\u{000c}' => o.push_str("\\f"),
+                    '\r' => o.push_str("\\r"),
+                    c if c.is_control() => o.push_str(&format!("\\u{:04X}", u32::from(c))),
+                    c => o.push(c),
+                }
+            }
+            o.push('"');
+            o
+        }
+        other => other.to_string().replace('\n', " "),
+    }
 }
 
 fn quote(k: &str) -> String {

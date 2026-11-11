@@ -1,5 +1,6 @@
 ---
 source: crates/telepatch/tests/svc.rs
+assertion_line: 396
 expression: "render_host(\"h\", &h.os, &h.snapshot())"
 ---
 host h (os: Debian/Debian 12)
@@ -25,6 +26,7 @@ role (none)
       |     if [ -d "$tp_run" ]; then
       |       if ! systemctl is-active --quiet -- "$tp_u"; then
       |         if [ "$(systemctl show -p NeedDaemonReload --value -- "$tp_u" 2>/dev/null)" = yes ]; then
+      |           __tp_drn="${__tp_drn:+$__tp_drn,}need"
       |           systemctl daemon-reload
       |           rc=$?
       |         fi
@@ -67,6 +69,7 @@ role (none)
       |     if [ -d "$tp_run" ]; then
       |       if ! systemctl is-active --quiet -- "$tp_u"; then
       |         if [ "$(systemctl show -p NeedDaemonReload --value -- "$tp_u" 2>/dev/null)" = yes ]; then
+      |           __tp_drn="${__tp_drn:+$__tp_drn,}need"
       |           systemctl daemon-reload
       |           rc=$?
       |         fi

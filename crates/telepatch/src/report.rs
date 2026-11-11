@@ -239,23 +239,27 @@ impl WindowSplit {
     }
 }
 
-/// The `systemctl daemon-reload` run at the end of a window, after a
-/// unit changed (`h.unit`) with no `svc` op after it in the window (the
-/// flush; see [`crate::executor`]). Not an op: it is not counted in the
-/// table. A failed one fails the host ([`HostStatus::Failed`]).
+/// One `systemctl daemon-reload` telepatch ran: the flush at the end of a
+/// window, the reload a changed unit asks for before the next `svc` op, or
+/// the one systemd's `NeedDaemonReload` asks for. Not an op: it is not
+/// counted in the table. A failed flush fails the host
+/// ([`HostStatus::Failed`]). A skipped one (no running systemd) is absent.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DaemonReload {
     pub window: usize,
     pub rc: i32,
+    /// Why it ran: `end of window`, `before #N svc <unit> (unit <names>
+    /// changed)`, or `before #N <desc> (systemd NeedDaemonReload)`.
+    pub reason: String,
 }
 
 impl DaemonReload {
-    /// `window 1: systemd daemon-reload (a unit changed; no svc op after
-    /// it)`, with `: FAILED rc=N` when it failed.
+    /// `window 1: systemd daemon-reload: end of window`, with
+    /// `: FAILED rc=N` when it failed.
     pub fn line(&self) -> String {
         let mut l = format!(
-            "window {}: systemd daemon-reload (a unit changed; no svc op after it)",
-            self.window
+            "window {}: systemd daemon-reload: {}",
+            self.window, self.reason
         );
         if self.rc != 0 {
             let _ = write!(l, ": FAILED rc={}", self.rc);
@@ -280,7 +284,7 @@ pub struct HostReport {
     /// Every `sh!` in the ops the executor received, each site once. Printed
     /// as a warning; never changes the status.
     pub sh_sites: Vec<crate::trace::Site>,
-    /// Each end-of-window `daemon-reload` that ran, in order.
+    /// Each `daemon-reload` that ran, in order. Not counted in OK or CHANGED.
     pub daemon_reloads: Vec<DaemonReload>,
     /// Each window prepare split for a missing downloader, in order.
     pub splits: Vec<WindowSplit>,

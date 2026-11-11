@@ -100,6 +100,17 @@ fn a_top_level_key_shared_by_two_sections_reaches_both() {
     assert_eq!(r.docker, Docker::default());
 }
 
+/// A newline inside a string survives the defaults merge. The re-emitter
+/// used to flatten every value onto one line by turning newlines into
+/// spaces, which turned `probe=1\n` into ` probe=1 `.
+#[test]
+fn a_newline_in_a_string_default_round_trips() {
+    let r = v("", "[docker]\nchannel = \"probe=1\\n\"\n");
+    assert_eq!(r.docker.channel, "probe=1\n");
+    let r = v("[docker]\nchannel = \"probe=2\\n\"\n", "");
+    assert_eq!(r.docker.channel, "probe=2\n");
+}
+
 #[test]
 fn layers_win_per_field_not_per_section() {
     let r = v(

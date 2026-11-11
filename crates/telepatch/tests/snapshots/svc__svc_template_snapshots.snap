@@ -1,5 +1,6 @@
 ---
 source: crates/telepatch/tests/svc.rs
+assertion_line: 381
 expression: "format!(\"{}\\n{}\\n{}\", wrapped(&h, a), wrapped(&h, b), wrapped(&h, c))"
 ---
 (
@@ -12,7 +13,7 @@ __tp_emit() {
   __tp_i=
   for __tp_x in "${installed[@]}"; do __tp_i="$__tp_i${__tp_i:+,}\"$(__tp_esc "$__tp_x")\""; done
   case "${tp_started-}" in 1) __tp_st=true;; *) __tp_st=false;; esac
-  printf '\n__tp_t0n 0 {"rc":%s,"changed":%s,"skipped":%s,"was_enabled":%s,"was_active":%s,"was_masked":%s,"started":%s}\n' "$rc" "$__tp_c" "$__tp_s" "${tp_was_e:-null}" "${tp_was_a:-null}" "${tp_was_m:-null}" "$__tp_st"
+  printf '\n__tp_t0n 0 {"rc":%s,"changed":%s,"skipped":%s,"was_enabled":%s,"was_active":%s,"was_masked":%s,"started":%s,"reloads":"%s"}\n' "$rc" "$__tp_c" "$__tp_s" "${tp_was_e:-null}" "${tp_was_a:-null}" "${tp_was_m:-null}" "$__tp_st" "$(__tp_esc "${__tp_drn-}")"
 }
 trap '__tp_emit $?' EXIT
 rc=0; changed=0; skipped=0; installed=()
@@ -45,6 +46,7 @@ else
     if [ -d "$tp_run" ]; then
       if ! systemctl is-active --quiet -- "$tp_u"; then
         if [ "$(systemctl show -p NeedDaemonReload --value -- "$tp_u" 2>/dev/null)" = yes ]; then
+          __tp_drn="${__tp_drn:+$__tp_drn,}need"
           systemctl daemon-reload
           rc=$?
         fi
@@ -73,7 +75,7 @@ __tp_emit() {
   __tp_i=
   for __tp_x in "${installed[@]}"; do __tp_i="$__tp_i${__tp_i:+,}\"$(__tp_esc "$__tp_x")\""; done
   case "${tp_started-}" in 1) __tp_st=true;; *) __tp_st=false;; esac
-  printf '\n__tp_t0n 1 {"rc":%s,"changed":%s,"skipped":%s,"was_enabled":%s,"was_active":%s,"was_masked":%s,"started":%s}\n' "$rc" "$__tp_c" "$__tp_s" "${tp_was_e:-null}" "${tp_was_a:-null}" "${tp_was_m:-null}" "$__tp_st"
+  printf '\n__tp_t0n 1 {"rc":%s,"changed":%s,"skipped":%s,"was_enabled":%s,"was_active":%s,"was_masked":%s,"started":%s,"reloads":"%s"}\n' "$rc" "$__tp_c" "$__tp_s" "${tp_was_e:-null}" "${tp_was_a:-null}" "${tp_was_m:-null}" "$__tp_st" "$(__tp_esc "${__tp_drn-}")"
 }
 trap '__tp_emit $?' EXIT
 rc=0; changed=0; skipped=0; installed=()
@@ -116,7 +118,7 @@ __tp_emit() {
   __tp_i=
   for __tp_x in "${installed[@]}"; do __tp_i="$__tp_i${__tp_i:+,}\"$(__tp_esc "$__tp_x")\""; done
   case "${tp_started-}" in 1) __tp_st=true;; *) __tp_st=false;; esac
-  printf '\n__tp_t0n 2 {"rc":%s,"changed":%s,"skipped":%s,"was_enabled":%s,"was_active":%s,"was_masked":%s,"started":%s}\n' "$rc" "$__tp_c" "$__tp_s" "${tp_was_e:-null}" "${tp_was_a:-null}" "${tp_was_m:-null}" "$__tp_st"
+  printf '\n__tp_t0n 2 {"rc":%s,"changed":%s,"skipped":%s,"was_enabled":%s,"was_active":%s,"was_masked":%s,"started":%s,"reloads":"%s"}\n' "$rc" "$__tp_c" "$__tp_s" "${tp_was_e:-null}" "${tp_was_a:-null}" "${tp_was_m:-null}" "$__tp_st" "$(__tp_esc "${__tp_drn-}")"
 }
 trap '__tp_emit $?' EXIT
 rc=0; changed=0; skipped=0; installed=()
@@ -141,6 +143,7 @@ else
     if [ -d "$tp_run" ]; then
       if ! systemctl is-active --quiet -- "$tp_u"; then
         if [ "$(systemctl show -p NeedDaemonReload --value -- "$tp_u" 2>/dev/null)" = yes ]; then
+          __tp_drn="${__tp_drn:+$__tp_drn,}need"
           systemctl daemon-reload
           rc=$?
         fi

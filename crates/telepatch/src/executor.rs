@@ -98,13 +98,15 @@
 //! ran after it in the window (none follows, or its guard skipped it), the
 //! executor ends the window with the flush: one more op on the root shell,
 //! in the halt gate, that runs `systemctl daemon-reload` when the flag is
-//! set and systemd runs, then clears the flag. It is streamed as `== host
-//! [role] systemd daemon-reload, end of window N ==`, kept in the report
-//! ([`crate::report::DaemonReload`], a line `window N: systemd
-//! daemon-reload (..)`) and announced by prepare (`systemd daemon-reload:
-//! at the end of the window, after unit x.service`, when prepare finds such
-//! a unit will change on a booted host). A failed flush fails the host like
-//! a failed op: its rc, systemctl's message as the tail, the unit's role.
+//! set and systemd runs, then clears the flag. A reload that ran, wherever
+//! it ran, is one stream line (`   systemd daemon-reload: <reason>`), one
+//! `daemon_reload` event (`reason`, `op`) and one
+//! [`crate::report::DaemonReload`]. It is not an op, so it is not counted
+//! in OK or CHANGED. A skipped one prints nothing. Prepare still announces
+//! a flush it can see (`systemd daemon-reload: at the end of the window,
+//! after unit x.service`). A failed flush fails the host like a failed op:
+//! its rc, systemctl's message as the tail, the unit's role, and the stream
+//! keeps `-> FAILED`.
 //! A unit changed in one window with its `svc` op in a later one is
 //! reloaded by the first window's flush. No unit changed, or no running
 //! systemd, no reload. `svc` ops before any unit op in their window get the
@@ -867,36 +869,45 @@ fn roles_of(w: &WindowOp) -> Vec<String> {
     v
 }
 
-/// A trailer's `(rc, changed, skipped, installed, started)`; `installed`
-/// for a `pkg` result only, `started` true for a `svc` start that ran.
-type Parsed = (i32, bool, bool, Option<Vec<String>>, bool);
+/// A trailer's `(rc, changed, skipped, installed, started, reloads)`;
+/// `installed` for a `pkg` result only, `started` true for a `svc` start
+/// that ran, `reloads` the svc trailer's daemon-reload tokens (empty
+/// otherwise).
+type Parsed = (i32, bool, bool, Option<Vec<String>>, bool, String);
 
 fn parse_result(kind: OpKind, t: &Trailer) -> Result<Parsed, String> {
     use crate::trailer::{
         FileResult, GroupResult, PkgResult, RepoResult, ShellResult, SvcResult, UserResult,
     };
     let r = match kind {
-        OpKind::Pkg => t
-            .typed::<PkgResult>()
-            .map(|r| (r.rc, r.changed, false, Some(r.installed), false)),
+        OpKind::Pkg => t.typed::<PkgResult>().map(|r| {
+            (
+                r.rc,
+                r.changed,
+                false,
+                Some(r.installed),
+                false,
+                String::new(),
+            )
+        }),
         OpKind::File => t
             .typed::<FileResult>()
-            .map(|r| (r.rc, r.changed, false, None, false)),
+            .map(|r| (r.rc, r.changed, false, None, false, String::new())),
         OpKind::Group => t
             .typed::<GroupResult>()
-            .map(|r| (r.rc, r.changed, false, None, false)),
+            .map(|r| (r.rc, r.changed, false, None, false, String::new())),
         OpKind::User => t
             .typed::<UserResult>()
-            .map(|r| (r.rc, r.changed, false, None, false)),
+            .map(|r| (r.rc, r.changed, false, None, false, String::new())),
         OpKind::Repo => t
             .typed::<RepoResult>()
-            .map(|r| (r.rc, r.changed, false, None, false)),
+            .map(|r| (r.rc, r.changed, false, None, false, String::new())),
         OpKind::Svc => t
             .typed::<SvcResult>()
-            .map(|r| (r.rc, r.changed, r.skipped, None, r.started)),
+            .map(|r| (r.rc, r.changed, r.skipped, None, r.started, r.reloads)),
         OpKind::Sh => t
             .typed::<ShellResult>()
-            .map(|r| (r.rc, r.changed, r.skipped, None, false)),
+            .map(|r| (r.rc, r.changed, r.skipped, None, false, String::new())),
     };
     r.map_err(|e| format!("unreadable result {:?}: {e}", t.json))
 }
@@ -1072,28 +1083,19 @@ impl HostExec {
             },
             Err(e) => (-1, e),
         };
-        self.sink
-            .line(&format!("== {} [{roles}] {desc} ==", self.name));
-        for l in output.lines() {
-            self.sink.line(&format!("{} | {l}", self.name));
-        }
-        self.sink.line(
-            if rc == 0 {
-                "-> changed".to_string()
-            } else {
-                format!("-> FAILED rc={rc}")
+        let reason = "end of window";
+        if rc == 0 {
+            // One line, not a fake op: `-> changed` would count as work.
+            self.record_daemon_reload(window.number, rc, reason, None);
+        } else {
+            self.sink
+                .line(&format!("== {} [{roles}] {desc} ==", self.name));
+            for l in output.lines() {
+                self.sink.line(&format!("{} | {l}", self.name));
             }
-            .as_str(),
-        );
-        self.sink
-            .event(json!({"ev":"daemon_reload","host":self.name,
-            "window":window.number,"rc":rc}));
-        self.report
-            .daemon_reloads
-            .push(crate::report::DaemonReload {
-                window: window.number,
-                rc,
-            });
+            self.sink.line(&format!("-> FAILED rc={rc}"));
+            self.record_daemon_reload(window.number, rc, reason, None);
+        }
         if rc != 0 {
             self.halted = true;
             if self.verdict.is_none() {
@@ -1173,6 +1175,88 @@ impl HostExec {
             ));
             live.partial.clear();
         }
+    }
+
+    /// One daemon-reload: the stream line, the event, the report entry.
+    /// Not an op, so it is not counted in OK or CHANGED. `op` is the svc
+    /// op it ran inside, or none for the end-of-window flush.
+    fn record_daemon_reload(&mut self, window: usize, rc: i32, reason: &str, op: Option<usize>) {
+        self.sink
+            .line(&format!("   systemd daemon-reload: {reason}"));
+        self.sink.event(json!({
+            "ev": "daemon_reload",
+            "host": self.name,
+            "window": window,
+            "rc": rc,
+            "reason": reason,
+            "op": op,
+        }));
+        self.report
+            .daemon_reloads
+            .push(crate::report::DaemonReload {
+                window,
+                rc,
+                reason: reason.to_string(),
+            });
+    }
+
+    /// Report each token in the svc trailer's `reloads` (`unit`, `need`).
+    /// The line is printed before `-> result`. A failed reload is the last
+    /// token: the script stops on it, so earlier tokens in the same op
+    /// succeeded.
+    fn note_reloads(&mut self, window: &Window, w: &WindowOp, desc: &str, reloads: &str, rc: i32) {
+        let tokens: Vec<&str> = reloads.split(',').filter(|t| !t.is_empty()).collect();
+        if tokens.is_empty() {
+            return;
+        }
+        let units = self.changed_units_since_svc(window, w.id.0);
+        let n = tokens.len();
+        for (i, tok) in tokens.iter().enumerate() {
+            let this_rc = if rc != 0 && i + 1 == n { rc } else { 0 };
+            let reason = match *tok {
+                "unit" => format!("before #{} {desc} (unit {units} changed)", w.id.0),
+                "need" => format!("before #{} {desc} (systemd NeedDaemonReload)", w.id.0),
+                other => format!("before #{} {desc} ({other})", w.id.0),
+            };
+            self.record_daemon_reload(window.number, this_rc, &reason, Some(w.id.0));
+        }
+    }
+
+    /// Unit files changed since the previous svc op that actually ran
+    /// (a skipped svc does not clear the window flag).
+    fn changed_units_since_svc(&self, window: &Window, before: usize) -> String {
+        let mut names = Vec::new();
+        for op in &window.ops {
+            if op.id.0 == before {
+                break;
+            }
+            match &op.node.spec {
+                OpSpec::Svc(_) => {
+                    let ran = self.report.ops.iter().any(|o| {
+                        o.id == op.id.0
+                            && matches!(
+                                o.outcome,
+                                Outcome::Changed | Outcome::Unchanged | Outcome::AllowedFail
+                            )
+                    });
+                    if ran {
+                        names.clear();
+                    }
+                }
+                OpSpec::Unit(u) => {
+                    let changed = self
+                        .report
+                        .ops
+                        .iter()
+                        .any(|o| o.id == op.id.0 && o.outcome == Outcome::Changed);
+                    if changed {
+                        names.push(u.rel());
+                    }
+                }
+                _ => {}
+            }
+        }
+        names.join(", ")
     }
 
     /// Record `w`'s end. `result` is `None` for never-ran.
@@ -1718,36 +1802,46 @@ impl Executor for HostExec {
                             continue;
                         }
                         match parse_result(w.node.spec.op_kind(), &trailer) {
-                            Ok((0, _, _, _, _)) if crate::trailer::is_guard_skip(&trailer) => {
-                                self.finish_op(w, &descs[i], Outcome::Skipped, 0, false, "");
-                            }
-                            Ok((0, changed, skipped, installed, started)) => {
-                                let o = if changed {
-                                    Outcome::Changed
-                                } else {
-                                    Outcome::Unchanged
-                                };
-                                let note = if skipped { "skipped" } else { "" };
-                                self.finish_op(w, &descs[i], o, 0, changed, note);
-                                if installed.is_some() {
-                                    self.remember(w, o, changed, installed.as_deref());
+                            Ok((rc, changed, skipped, installed, started, reloads)) => {
+                                let skip = rc == 0 && crate::trailer::is_guard_skip(&trailer);
+                                if !skip {
+                                    self.note_reloads(window, w, &descs[i], &reloads, rc);
                                 }
-                                if started {
-                                    for m in &w.members {
-                                        if let Some(k) = self.known.get_mut(&m.id) {
-                                            k.started = true;
+                                if skip {
+                                    self.finish_op(w, &descs[i], Outcome::Skipped, 0, false, "");
+                                } else if rc == 0 {
+                                    let o = if changed {
+                                        Outcome::Changed
+                                    } else {
+                                        Outcome::Unchanged
+                                    };
+                                    let note = if skipped { "skipped" } else { "" };
+                                    self.finish_op(w, &descs[i], o, 0, changed, note);
+                                    if installed.is_some() {
+                                        self.remember(w, o, changed, installed.as_deref());
+                                    }
+                                    if started {
+                                        for m in &w.members {
+                                            if let Some(k) = self.known.get_mut(&m.id) {
+                                                k.started = true;
+                                            }
                                         }
                                     }
+                                } else if w.node.allow_fail {
+                                    self.finish_op(
+                                        w,
+                                        &descs[i],
+                                        Outcome::AllowedFail,
+                                        rc,
+                                        false,
+                                        "",
+                                    );
+                                } else {
+                                    failed_seen = true;
+                                    let tail = last_lines(&live[i].tail, TAIL_LINES);
+                                    self.finish_op(w, &descs[i], Outcome::Failed, rc, false, "");
+                                    self.fail(w, &descs[i], rc, tail);
                                 }
-                            }
-                            Ok((rc, _, _, _, _)) if w.node.allow_fail => {
-                                self.finish_op(w, &descs[i], Outcome::AllowedFail, rc, false, "");
-                            }
-                            Ok((rc, _, _, _, _)) => {
-                                failed_seen = true;
-                                let tail = last_lines(&live[i].tail, TAIL_LINES);
-                                self.finish_op(w, &descs[i], Outcome::Failed, rc, false, "");
-                                self.fail(w, &descs[i], rc, tail);
                             }
                             Err(msg) => {
                                 failed_seen = true;

@@ -126,6 +126,12 @@ pub struct SvcResult {
     /// ([`crate::executor`]).
     #[serde(default)]
     pub started: bool,
+    /// Daemon-reloads this op actually ran, comma-joined: `unit` (a changed
+    /// unit's reload, `__tp_dr`) and `need` (systemd `NeedDaemonReload`).
+    /// Empty when none ran, including a guard skip and a host with no
+    /// running systemd. The executor reports one entry per token.
+    #[serde(default)]
+    pub reloads: String,
 }
 
 impl OpResult for PkgResult {
@@ -289,7 +295,7 @@ fn wrap_with(kind: OpKind, body: &str, id: usize, nonce: &str, record: bool) -> 
         OpKind::Group | OpKind::User => r#"{"rc":%s,"changed":%s,"created":%s}"#,
         OpKind::Sh => r#"{"rc":%s,"changed":%s,"skipped":%s}"#,
         OpKind::Svc => {
-            r#"{"rc":%s,"changed":%s,"skipped":%s,"was_enabled":%s,"was_active":%s,"was_masked":%s,"started":%s}"#
+            r#"{"rc":%s,"changed":%s,"skipped":%s,"was_enabled":%s,"was_active":%s,"was_masked":%s,"started":%s,"reloads":"%s"}"#
         }
     };
     let args = match kind {
@@ -298,7 +304,7 @@ fn wrap_with(kind: OpKind, body: &str, id: usize, nonce: &str, record: bool) -> 
         OpKind::Group | OpKind::User => r#""$rc" "$__tp_c" "$__tp_k""#,
         OpKind::Sh => r#""$rc" "$__tp_c" "$__tp_s""#,
         OpKind::Svc => {
-            r#""$rc" "$__tp_c" "$__tp_s" "${tp_was_e:-null}" "${tp_was_a:-null}" "${tp_was_m:-null}" "$__tp_st""#
+            r#""$rc" "$__tp_c" "$__tp_s" "${tp_was_e:-null}" "${tp_was_a:-null}" "${tp_was_m:-null}" "$__tp_st" "$(__tp_esc "${__tp_drn-}")""#
         }
     };
     let mut o = String::from("(\n");

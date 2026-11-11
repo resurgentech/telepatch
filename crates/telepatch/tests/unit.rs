@@ -671,6 +671,12 @@ fn executor_not_booted_writes_and_enables_with_no_reload() {
         "{calls:#?}"
     );
     assert!(unit_dir(d.path()).join("a.service").exists());
+    assert!(
+        r1.hosts[0].daemon_reloads.is_empty(),
+        "not booted: nothing reported\n{}",
+        r1.render()
+    );
+    assert!(!out1.contains("systemd daemon-reload:"), "{out1}");
 }
 
 fn pb_unit_with_restart(body: &'static str) -> Playbook<()> {
@@ -888,15 +894,17 @@ fn executor_a_removed_unit_with_no_svc_op_after_it_reloads_once_after_the_remova
         ),
         "{out1}"
     );
-    let flush = out1.find(FLUSH).expect(&out1);
+    let flush = out1
+        .find("   systemd daemon-reload: end of window")
+        .expect(&out1);
     let unit_op = out1.find("unit a.service absent ==").expect(&out1);
     assert!(unit_op < flush, "{out1}");
     let rendered = r1.render();
     assert!(
-        rendered
-            .contains("h1: window 1: systemd daemon-reload (a unit changed; no svc op after it)"),
+        rendered.contains("h1: window 1: systemd daemon-reload: end of window"),
         "{rendered}"
     );
+    assert_eq!(r1.hosts[0].daemon_reloads.len(), 1, "{rendered}");
 
     // run 2: nothing changes, nothing reloads
     let (r2, out2) = go(&pb, d.path(), &bin, true);
@@ -932,7 +940,9 @@ fn executor_a_unit_changed_in_one_window_reloads_at_its_end_not_in_the_next() {
     assert_eq!(r1.exit_code(), 0, "{}\n{out1}", r1.render());
     let calls = systemctl_calls(d.path());
     assert_eq!(reloads(&calls), 1, "{calls:#?}");
-    let flush = out1.find(FLUSH).expect(&out1);
+    let flush = out1
+        .find("   systemd daemon-reload: end of window")
+        .expect(&out1);
     let svc_op = out1.find("svc a ==").expect(&out1);
     assert!(flush < svc_op, "the reload ends window 1: {out1}");
     assert!(
@@ -946,12 +956,76 @@ fn executor_a_unit_changed_in_one_window_reloads_at_its_end_not_in_the_next() {
 fn executor_two_units_then_a_svc_op_reload_once_before_it_and_do_not_flush() {
     let d = tempfile::tempdir().unwrap();
     let bin = stubs(d.path());
-    let (r1, out1) = go(&pb_two_units(), d.path(), &bin, true);
+    let logp = d.path().join("events.jsonl");
+    let out = Rc::new(RefCell::new(String::new()));
+    let pb = pb_two_units();
+    let r1 = run(
+        &pb,
+        vec![HostSpec {
+            name: "h1".into(),
+            target: Target::Local(
+                LocalTransport::new()
+                    .uid(0)
+                    .env("PATH", &with_path(&bin))
+                    .env(
+                        "TP_SVC_RUNDIR",
+                        &rundir(d.path(), true).display().to_string(),
+                    )
+                    .env("TP_UNIT_DIR", &unit_dir(d.path()).display().to_string()),
+            ),
+            vars: (),
+        }],
+        RunOpts {
+            log: Some(logp.clone()),
+            stdout: Stdout::Capture(out.clone()),
+        },
+    );
+    let out1 = out.borrow().clone();
+    let events = std::fs::read_to_string(&logp).unwrap_or_default();
     assert_eq!(r1.exit_code(), 0, "{}\n{out1}", r1.render());
     assert_eq!(reloads(&systemctl_calls(d.path())), 1);
     assert!(!out1.contains(FLUSH), "{out1}");
     assert!(!out1.contains("[prepare] systemd daemon-reload"), "{out1}");
-    assert!(!r1.render().contains("daemon-reload"), "{}", r1.render());
+    // The reload ran inside the svc op. It is one report entry and one
+    // stream line, and it is not an op, so CHANGED stays the ops' count.
+    assert_eq!(
+        r1.hosts[0].daemon_reloads.len(),
+        1,
+        "carried reload is one report entry\n{}\n{out1}",
+        r1.render()
+    );
+    let reason = "before #2 svc a (unit a.service, b.service changed)";
+    assert_eq!(r1.hosts[0].daemon_reloads[0].reason, reason);
+    assert_eq!(r1.hosts[0].daemon_reloads[0].rc, 0);
+    assert_eq!(r1.hosts[0].daemon_reloads[0].window, 1);
+    let line = format!("   systemd daemon-reload: {reason}");
+    assert!(out1.contains(&line), "{out1}");
+    let svc = out1.find("== h1 [(no role)] #2 svc a ==").expect(&out1);
+    let reported = out1.find(&line).expect(&out1);
+    let result = out1[svc..].find("-> changed").expect(&out1);
+    assert!(reported > svc && reported < svc + result, "{out1}");
+    assert!(
+        events.contains("\"ev\":\"daemon_reload\"")
+            && events.contains(&format!("\"reason\":\"{reason}\""))
+            && events.contains("\"op\":2"),
+        "one daemon_reload event\n{events}"
+    );
+    let changed_ops = r1.hosts[0]
+        .ops
+        .iter()
+        .filter(|o| o.outcome == Outcome::Changed)
+        .count();
+    let row = r1
+        .table()
+        .lines()
+        .find(|l| l.starts_with("h1"))
+        .unwrap()
+        .to_string();
+    assert_eq!(
+        row.split_whitespace().nth(3),
+        Some(changed_ops.to_string()).as_deref(),
+        "CHANGED counts ops, not the reload: {row}"
+    );
 }
 
 #[test]

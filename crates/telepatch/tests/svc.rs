@@ -299,7 +299,9 @@ fn daemon_reload_runs_before_start_when_systemd_says_so() {
     let h = host();
     let id = h.svc("docker").started().id();
     let (_, res) = run_script(&wrapped(&h, id), d.path(), &bin, true);
-    assert_eq!(res, started(r(0, true, false)));
+    let mut want = started(r(0, true, false));
+    want.reloads = "need".into();
+    assert_eq!(res, want);
     let l = log(d.path());
     let reload = l.find("daemon-reload").expect(&l);
     let start = l.find("start -- docker").expect(&l);
@@ -1038,7 +1040,9 @@ fn restart_runs_daemon_reload_first_when_systemd_says_so() {
     f.content("x");
     let id = h.svc("docker").restart().when(f.changed()).id();
     let (_, res) = run_script(&wrapped(&h, id), d.path(), &bin, true);
-    assert_eq!(res, r(0, true, false));
+    let mut want = r(0, true, false);
+    want.reloads = "need".into();
+    assert_eq!(res, want);
     let l = log(d.path());
     let dr = l.find("systemctl daemon-reload\n").expect(&l);
     let rs = l.find("systemctl restart -- docker\n").expect(&l);

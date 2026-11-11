@@ -113,6 +113,7 @@ const CAPTURE: &str = concat!(
 /// (`__tp_dr`, set in the parent shell; see [`crate::executor`]).
 const RELOAD: &str = concat!(
     "  if [ \"${__tp_dr-0}\" = 1 ] && [ -d \"$tp_run\" ]; then\n",
+    "    __tp_drn=\"${__tp_drn:+$__tp_drn,}unit\"\n",
     "    systemctl daemon-reload || exit $?\n",
     "  fi\n",
 );
@@ -223,6 +224,7 @@ impl SvcSpec {
             s.push_str(concat!(
                 "  if [ -d \"$tp_run\" ]; then\n",
                 "    if [ \"$(systemctl show -p NeedDaemonReload --value -- \"$tp_u\" 2>/dev/null)\" = yes ]; then\n",
+                "      __tp_drn=\"${__tp_drn:+$__tp_drn,}need\"\n",
                 "      systemctl daemon-reload\n",
                 "      rc=$?\n",
                 "    fi\n",
@@ -307,6 +309,7 @@ impl SvcSpec {
                 "    if [ -d \"$tp_run\" ]; then\n",
                 "      if ! systemctl is-active --quiet -- \"$tp_u\"; then\n",
                 "        if [ \"$(systemctl show -p NeedDaemonReload --value -- \"$tp_u\" 2>/dev/null)\" = yes ]; then\n",
+                "          __tp_drn=\"${__tp_drn:+$__tp_drn,}need\"\n",
                 "          systemctl daemon-reload\n",
                 "          rc=$?\n",
                 "        fi\n",
