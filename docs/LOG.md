@@ -1158,3 +1158,19 @@ are appended, never edited in; a hook refuses rewrites.
   that host in prepare with `msg` before the window's ops run.
 - `cargo test --workspace` and `just lint` green. No VM.
 - Commits: telepatch aa9b0ee
+
+## 2026-11-11 — T97 Author-defined resources and `cmd!`
+
+- `h.resource(T)` for a `Resource` (`KIND`, `key`, `probe`, `plan`,
+  `apply`, optional `inverse`). `cmd!` quotes like `sh!` and produces a
+  `Script`, not an op. `Probe::stdout().missing_is_none()`, `Probed`,
+  `Change::{None, will}`, `Script::stdin`. `Key::custom`. A resource op
+  keeps `Eq`/`Debug` by kind, key and rendered scripts and never merges.
+  No inverse is recorded as irreversible. `plan_against` runs `plan` on
+  recorded probe output. The decided `Terminfo` resource compiles an
+  entry with `tic`.
+- `just docker-vm test-live-resource` on `tp-docker-20261112-080408`: 1
+  passed, 0 failed, 12.07s (ubuntu:24.04; run 2 unchanged). Peak memory
+  296 MiB of 961, swap 0. VM deleted. Not an OOM. Gate E green
+  (`cargo test --workspace`, `just lint`).
+- Commits: telepatch c8830be
