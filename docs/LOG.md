@@ -1258,3 +1258,29 @@ are appended, never edited in; a hook refuses rewrites.
   only by the three packages. No VM created.
 - Gate green: self-test, `check`, `just test-oracle-selftest`.
 - Commits: tp_basic 46a06fe
+
+## 2026-11-12 — T97i vm.sh drives vmtool on the VM host
+
+- With `TP_VM_HOST` remote (default veritech04.labtwo), `scripts/lib/vm.sh`
+  works as follows:
+  - It runs `./vmtool` in `~/tp-vmtool` over ssh, one `bash -c`
+    argument, so zsh cannot split it. Create carries `--pool tp`.
+  - The tcp/22 wait is probed from the host.
+  - The guest is reached from here with a per-run key and `ProxyJump`.
+    An ssh on the host, with vmtool's key in place, installs the run
+    key's `.pub`.
+  - `VM_SSH_OPTS` is the one option set for `sshv` and the
+    docker-socket forward.
+  - `vm_record` and `vm_delete` refuse any name but `tp-[a-z0-9-]+`.
+    Delete verifies both `vmtool list` and `.machines/<name>` on the
+    host.
+- `docker-vm.sh` runs `vm-host.sh check` first and names the host in its
+  end line. A failed final list is a FAIL, never "no tp-* VM".
+- `test-vm.sh` and `test-vm-oracle.sh` refuse a remote host until T97j.
+  Local argv is unchanged.
+- Live: `tp-docker-20261112-113216` ran on veritech04 and showed its
+  label. Peak memory was 216 MiB of 961, with no swap used. The VM was
+  deleted and verified gone. veritech04's other VMs and this
+  workstation's VM list are unchanged.
+- Gate green.
+- Commits: tp_basic 2dd2fd0
