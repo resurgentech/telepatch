@@ -1148,3 +1148,13 @@ are appended, never edited in; a hook refuses rewrites.
   memory 320 MiB of 961, swap 0. VM deleted. Not an OOM. Gate E green
   (`cargo test --workspace`, `just lint`).
 - Commits: telepatch f74daad
+
+## 2026-11-11 — T96 Typed facts and assertions
+
+- `h.user_info(u)` (home, shell, exists), `h.stat(p)` (mode, owner,
+  size, exists), `h.pkg_installed(n)` (`Some(version)` or `None`) and
+  `h.check(cmd)` (rc, stdout) are facts. Every fact polled at one point
+  is one `read_facts` round trip per host. `h.assert(cond, msg)` blocks
+  that host in prepare with `msg` before the window's ops run.
+- `cargo test --workspace` and `just lint` green. No VM.
+- Commits: telepatch aa9b0ee
