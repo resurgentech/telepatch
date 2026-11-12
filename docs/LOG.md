@@ -1211,3 +1211,17 @@ are appended, never edited in; a hook refuses rewrites.
 - Gate E green (`cargo test --workspace`, `just lint`, tp_basic
   `cargo test`). No VM.
 - Commits: telepatch 47d4c45, tp_basic 3e79742
+
+## 2026-11-12 — T97d Port the edge playbook
+
+- Playbook `edge` runs `edge` then `edge_extra` and nothing else. One
+  `pkg` installs curl, ca-certificates and the family pair
+  (`w3m`/`www-browser`, `s-nail`/`mailx`, `bash`/`sh`). Then Docker's apt
+  repo (debian or ubuntu) or dnf `.repo` (fedora or rhel) and
+  `docker-ce-cli`. Amazon and Arch get no repo. The `edge\n` marker,
+  `edge-jq` fetched by sha256, and one `pkg[rustup]` stable that carries
+  `rust-src` from `edge_extra`. 13 new `edge__*` snapshots, and
+  `plans_are_byte_identical` over every playbook. Close-out checked the
+  port against the T97b table and Ansible tasks: no mismatch. Gate B
+  green. No VM.
+- Commits: tp_basic 04d1a5e
