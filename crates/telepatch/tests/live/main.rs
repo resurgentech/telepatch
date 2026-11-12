@@ -7,6 +7,7 @@
 //! `just test-live-resource`, `just test-live-ssh`.
 
 mod container;
+mod endpoint;
 mod fetch;
 mod git;
 mod group;
@@ -23,6 +24,7 @@ mod user;
 use std::path::Path;
 
 use container::Container;
+use endpoint::Endpoint;
 use telepatch::facts::os::Os;
 use telepatch::trace::Principal;
 use telepatch::transport::docker::DockerTransport;
@@ -202,12 +204,142 @@ fn docker_vm_check_passes_on_the_vm_label() {
 
 #[test]
 fn sshd_publishes_on_the_vm_address() {
+    use endpoint::Endpoint;
+    // a remote VM host: the forwarded end is loopback on both sides
+    let e = Endpoint::parse(Some("127.0.0.1"), Some("127.0.0.1"), Some("42201-42208")).unwrap();
+    assert_eq!(e.publish_arg(42203, 22), "127.0.0.1:42203:22");
+    assert_eq!(e.dial(42203), "127.0.0.1:42203");
+    assert_eq!(e.ports().collect::<Vec<_>>().len(), 8);
+    // TP_VM_HOST=local: the VM's own address at both ends
+    let e = Endpoint::parse(
+        Some("192.168.122.17"),
+        Some("192.168.122.17"),
+        Some("42201-42208"),
+    )
+    .unwrap();
+    assert_eq!(e.publish_arg(42201, 8200), "192.168.122.17:42201:8200");
+    assert_eq!(e.dial(42201), "192.168.122.17:42201");
+    // each variable missing, empty, and the message names it
+    for (p, a, r, name) in [
+        (
+            None,
+            Some("127.0.0.1"),
+            Some("42201-42208"),
+            "TP_DOCKER_VM_PUBLISH",
+        ),
+        (
+            Some("127.0.0.1"),
+            None,
+            Some("42201-42208"),
+            "TP_DOCKER_VM_ADDR",
+        ),
+        (
+            Some("127.0.0.1"),
+            Some("127.0.0.1"),
+            None,
+            "TP_DOCKER_VM_PORTS",
+        ),
+        (
+            Some(""),
+            Some("127.0.0.1"),
+            Some("42201-42208"),
+            "TP_DOCKER_VM_PUBLISH",
+        ),
+    ] {
+        let e = Endpoint::parse(p, a, r).unwrap_err();
+        assert!(e.contains(name), "{e}");
+        assert!(e.contains(container::DOCKER_VM_MSG), "{e}");
+    }
+    // a bad range
+    for bad in [
+        "1023-1030",
+        "42201-65536",
+        "42208-42201",
+        "42201",
+        "a-b",
+        "42201-42208-1",
+        "",
+    ] {
+        let e = Endpoint::parse(Some("127.0.0.1"), Some("127.0.0.1"), Some(bad)).unwrap_err();
+        assert!(e.contains("TP_DOCKER_VM_PORTS"), "{bad}: {e}");
+    }
+    // a non-IPv4 address (or the unspecified one) in either variable
+    for bad in ["example.com", "::1", "0.0.0.0", "1.2.3"] {
+        let e = Endpoint::parse(Some(bad), Some("127.0.0.1"), Some("42201-42208")).unwrap_err();
+        assert!(e.contains("TP_DOCKER_VM_PUBLISH"), "{bad}: {e}");
+        let e = Endpoint::parse(Some("127.0.0.1"), Some(bad), Some("42201-42208")).unwrap_err();
+        assert!(e.contains("TP_DOCKER_VM_ADDR"), "{bad}: {e}");
+    }
+}
+
+#[test]
+fn port_allocation_skips_taken_ports_and_fails_naming_the_range() {
+    use endpoint::{Tried, alloc_port, is_port_taken};
+    let e = Endpoint::parse(Some("127.0.0.1"), Some("127.0.0.1"), Some("42201-42204")).unwrap();
+    // taken ports move on to the next one; the first free port wins
+    let mut asked = vec![];
+    let (p, v) = alloc_port(&e, 0, |p| {
+        asked.push(p);
+        if p < 42203 {
+            Tried::Taken
+        } else {
+            Tried::Ok(u32::from(p) * 2)
+        }
+    })
+    .unwrap();
     assert_eq!(
-        sshd::publish_arg(Some("192.168.122.17")).unwrap(),
-        "192.168.122.17::22"
+        (p, v, asked),
+        (42203, 42203u32 * 2, vec![42201, 42202, 42203])
     );
-    let e = sshd::publish_arg(None).unwrap_err();
-    assert!(e.contains("TP_DOCKER_VM_IP is not set"), "{e}");
-    assert!(sshd::publish_arg(Some("127.0.0.1")).is_err());
-    assert!(sshd::publish_arg(Some("example.com")).is_err());
+    // the search starts at `start` and wraps round the range
+    let mut asked = vec![];
+    let _ = alloc_port(&e, 3, |p| {
+        asked.push(p);
+        if asked.len() < 3 {
+            Tried::Taken
+        } else {
+            Tried::Ok(())
+        }
+    })
+    .unwrap();
+    assert_eq!(asked, vec![42204, 42201, 42202]);
+    // every port taken: the error names the range
+    let err = alloc_port(&e, 0, |_| Tried::<()>::Taken).unwrap_err();
+    assert!(err.contains("42201-42204"), "{err}");
+    // any other failure stops at once, with its text
+    let mut n = 0;
+    let err = alloc_port(&e, 0, |_| {
+        n += 1;
+        Tried::<()>::Failed("no such image".into())
+    })
+    .unwrap_err();
+    assert_eq!(n, 1);
+    assert!(err.contains("no such image"), "{err}");
+    // two containers alive at once: the second one's port is taken, so it moves on
+    let mut live = std::collections::HashSet::new();
+    let a = alloc_port(&e, 0, |p| {
+        if live.insert(p) {
+            Tried::Ok(())
+        } else {
+            Tried::Taken
+        }
+    })
+    .unwrap();
+    let b = alloc_port(&e, 0, |p| {
+        if live.insert(p) {
+            Tried::Ok(())
+        } else {
+            Tried::Taken
+        }
+    })
+    .unwrap();
+    assert_ne!(a.0, b.0);
+    // docker's wording for a taken host port
+    assert!(is_port_taken(
+        "Bind for 127.0.0.1:42201 failed: port is already allocated"
+    ));
+    assert!(is_port_taken(
+        "listen tcp4 127.0.0.1:42201: bind: address already in use"
+    ));
+    assert!(!is_port_taken("Unable to find image 'x' locally"));
 }

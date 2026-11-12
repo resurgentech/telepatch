@@ -1,6 +1,7 @@
 //! Live SSH: an `ubuntu:24.04` container running sshd, in the daemon of the
-//! tp-* VM `just docker-vm` made, with port 22 published on the VM's address
-//! (`TP_DOCKER_VM_IP`; this machine reaches it over libvirt's NAT network),
+//! tp-* VM `just docker-vm` made, with port 22 published on a port of
+//! `TP_DOCKER_VM_PORTS` (see `endpoint.rs`: `TP_DOCKER_VM_PUBLISH` in the VM,
+//! `TP_DOCKER_VM_ADDR` here, an ssh forward between them on a remote host),
 //! and a throwaway key generated into a temp dir here. User `tp` has NOPASSWD
 //! sudo, user `nosudo` has none; both accept the key. Run with
 //! `just test-live-ssh` (needs docker and the network for apt).
@@ -9,6 +10,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
+use crate::endpoint::{Endpoint, Tried, alloc_next, is_port_taken};
 use telepatch::trace::Principal;
 use telepatch::transport::ssh::SshTransport;
 use telepatch::transport::{Limit, Transport, read_os};
@@ -53,25 +55,9 @@ async fn serial() -> tokio::sync::MutexGuard<'static, ()> {
     SERIAL.lock().await
 }
 
-/// The `-p` argument that publishes the container's port 22 on the docker
-/// VM's address `ip` (`TP_DOCKER_VM_IP`), so the controller here can reach it.
-/// A loopback address would be the VM's own and unreachable from here.
-pub fn publish_arg(ip: Option<&str>) -> Result<String, String> {
-    let ip = ip.filter(|s| !s.is_empty()).ok_or_else(|| {
-        format!(
-            "{} (TP_DOCKER_VM_IP is not set)",
-            crate::container::DOCKER_VM_MSG
-        )
-    })?;
-    match ip.parse::<std::net::Ipv4Addr>() {
-        Ok(a) if !a.is_loopback() && !a.is_unspecified() => Ok(format!("{a}::22")),
-        _ => Err(format!("TP_DOCKER_VM_IP={ip} is not the VM's IPv4 address")),
-    }
-}
-
 pub struct Sshd {
     pub name: String,
-    /// The docker VM's address the port is published on.
+    /// The address this machine dials (`TP_DOCKER_VM_ADDR`).
     pub host: String,
     pub port: u16,
     pub key: PathBuf,
@@ -88,9 +74,7 @@ impl Sshd {
     /// Like [`Sshd::start`], with extra sshd arguments (`-o MaxSessions=1`).
     pub fn start_with(sshd_args: &str) -> Sshd {
         crate::container::require_docker_vm();
-        let publish = publish_arg(std::env::var("TP_DOCKER_VM_IP").ok().as_deref())
-            .unwrap_or_else(|e| panic!("{e}"));
-        let host = publish.trim_end_matches("::22").to_string();
+        let ep = Endpoint::from_env().unwrap_or_else(|e| panic!("{e}"));
         let keys = tempfile::tempdir().unwrap();
         let key = keys.path().join("id_tp");
         let wrong_key = keys.path().join("id_wrong");
@@ -102,25 +86,38 @@ impl Sshd {
             std::process::id(),
             CONTAINERS.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
         );
-        let out = Command::new("docker")
-            .args(["run", "-d", "--rm", "--name", &name, "-p", &publish])
-            .arg("-e")
-            .arg(format!("TP_PUBKEY={}", pubkey.trim()))
-            .arg("-e")
-            .arg(format!("TP_SSHD_ARGS={sshd_args}"))
-            .args(["ubuntu:24.04", "bash", "-c", SETUP])
-            .stdin(Stdio::null())
-            .output()
-            .expect("running docker");
-        assert!(
-            out.status.success(),
-            "docker run: {}",
-            String::from_utf8_lossy(&out.stderr)
-        );
-        let mut d = Sshd {
+        let (port, ()) = alloc_next(&ep, |port| {
+            let out = Command::new("docker")
+                .args(["run", "-d", "--rm", "--name", &name, "-p"])
+                .arg(ep.publish_arg(port, 22))
+                .arg("-e")
+                .arg(format!("TP_PUBKEY={}", pubkey.trim()))
+                .arg("-e")
+                .arg(format!("TP_SSHD_ARGS={sshd_args}"))
+                .args(["ubuntu:24.04", "bash", "-c", SETUP])
+                .stdin(Stdio::null())
+                .output()
+                .expect("running docker");
+            if out.status.success() {
+                return Tried::Ok(());
+            }
+            let err = String::from_utf8_lossy(&out.stderr).into_owned();
+            if is_port_taken(&err) {
+                // a failed start can leave the created container behind
+                let _ = Command::new("docker")
+                    .args(["rm", "-f", &name])
+                    .stdin(Stdio::null())
+                    .output();
+                Tried::Taken
+            } else {
+                Tried::Failed(format!("docker run: {err}"))
+            }
+        })
+        .unwrap_or_else(|e| panic!("{e}"));
+        let d = Sshd {
             name,
-            host,
-            port: 0,
+            host: ep.addr(),
+            port,
             key,
             wrong_key,
             _keys: keys,
@@ -143,17 +140,6 @@ impl Sshd {
             );
             std::thread::sleep(Duration::from_millis(500));
         }
-        let out = Command::new("docker")
-            .args(["port", &d.name, "22/tcp"])
-            .output()
-            .expect("docker port");
-        let text = String::from_utf8_lossy(&out.stdout);
-        d.port = text
-            .lines()
-            .next()
-            .and_then(|l| l.rsplit_once(':'))
-            .and_then(|(_, p)| p.trim().parse().ok())
-            .unwrap_or_else(|| panic!("docker port: {text:?}"));
         d
     }
 
