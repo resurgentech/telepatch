@@ -1084,3 +1084,22 @@ are appended, never edited in; a hook refuses rewrites.
   The server started without a capability. Gate E and B green before
   the VM.
 - Commits: telepatch de0293a, tp_basic 0e0284b
+
+## 2026-11-11 — T92 Package removal
+
+- `.absent()` removes only names the manager reports installed.
+  `.purge()` is apt-only (`apt-get purge`, then `dpkg --purge` if the
+  name is still `installed` or `config-files`); any other manager is a
+  trace error. An absent op posts `Absent`, does not merge with an
+  install, and keeps trace order against one. Prepare says `pkg: will
+  remove cmake`. The names removed are the inverse, on
+  `HostReport.removed`.
+- A purge that leaves dpkg status `not-installed` is done. Ubuntu keeps
+  that stanza, and `dpkg-query -W` still exits 0. The live check accepts
+  `not-installed` or a missing record, and still requires the conffiles
+  and the binary to be gone.
+- `just docker-vm test-live-pkg` on `tp-docker-20261112-060014`: 12
+  passed, 0 failed, 115.52s. VM deleted. Not an OOM. Two earlier VMs
+  failed the old `dpkg-query -W` exit check and were deleted. Gate E
+  green (`cargo test --workspace`, `just lint`).
+- Commits: telepatch 1875375
