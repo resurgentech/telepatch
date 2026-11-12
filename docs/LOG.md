@@ -1396,3 +1396,28 @@ are appended, never edited in; a hook refuses rewrites.
 - 14 tests in `tests/check.rs`, 2 in `tests/cli.rs`. No VM (T104).
 - Gate E green; no plan snapshot moved in either repo.
 - Commits: telepatch 294f3ac, tp_basic d021e3d (Cargo.lock)
+
+## 2026-11-12 — T99 inventory and `--limit`
+
+- New `telepatch::inventory` reads `inventory.toml`: `[vars]`,
+  `[groups.*]` with `hosts`/`vars`, and `[hosts."dest"]` with
+  `groups`/`vars`. Errors name the file and line.
+- Precedence: host, groups (in file order; a later group beats an
+  earlier one), inventory `[vars]`, `--vars`, playbook defaults,
+  `Default`. Within each, a role section beats a top-level key.
+- `run --inventory f [--limit a,b]`: group or host names; an unknown
+  name is a usage error. `--host` is kept, and it is exclusive with
+  `--inventory`. `h.in_group(..)`. `HostSpec.groups` (66 literals
+  moved).
+- tp_basic's secret-literal gate reads `inventory*` with the inventory
+  loader.
+- Live on veritech04 (`just docker-vm test-live-inventory`, VM
+  `tp-docker-20261112-213806`): two sshd containers on 42201 and 42202,
+  each reached by its own forward, with a throwaway known-hosts file.
+  - The group var reached one host only. Run 2 `ok`. `--limit gpu`
+    touched one host.
+  - Peak 351 MiB of 961. The VM was deleted and verified gone.
+  - The taken-port retry did not trigger live.
+- Gate green. One retry of the commit gate after a flaky,
+  untouched `shell_pool::shell_death_fails_in_flight_ops`.
+- Commits: telepatch c949f93, tp_basic bece6a2
