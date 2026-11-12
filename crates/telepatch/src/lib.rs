@@ -12,6 +12,7 @@ pub mod executor;
 pub mod facts;
 pub mod host;
 pub mod key;
+pub mod local;
 pub mod ops;
 pub mod optimize;
 pub mod plan;
@@ -31,6 +32,7 @@ pub mod vars;
 
 pub use host::{Host, OpHandle, Scope, TraceError};
 pub use key::{Key, Value};
+pub use local::{local, local_dir, local_file};
 pub use policy::{Allowance, Policy};
 pub use role::{Playbook, PlaybookFuture, RoleGuard};
 pub use secret::{Secret, SecretBackend, SecretError, SecretRef, SecretValue};

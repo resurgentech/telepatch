@@ -168,6 +168,12 @@ fn trips(op: &OpNode) -> Vec<(Policy, String)> {
                     format!("file {}: fetch {} has no sha256", f.path, src.fetched.url),
                 ));
             }
+            if let Some(url) = f.local.as_ref().and_then(|p| p.unverified_url()) {
+                out.push((
+                    Policy::Unverified,
+                    format!("file {}: fetch {url} has no sha256", f.path),
+                ));
+            }
         }
         OpSpec::Pkg(p) => {
             if let Some(f) = &p.file

@@ -44,7 +44,6 @@
 //! changes.
 
 use std::borrow::Borrow;
-use std::sync::OnceLock;
 
 use crate::engine::Window;
 use crate::host::Host;
@@ -61,6 +60,9 @@ pub struct Fetched {
     /// Lower-cased when it is a valid sum; kept as written when it is not
     /// (the file op that takes it reports the error).
     pub sha256: Option<String>,
+    /// Download on the controller and stream the bytes, instead of fetching
+    /// on the host. For an air-gapped host.
+    pub via_controller: bool,
 }
 
 impl Fetched {
@@ -73,6 +75,14 @@ impl Fetched {
         } else {
             s.to_string()
         });
+        self
+    }
+
+    /// The controller downloads this and streams it to the host. The host
+    /// does not need a route to `url`, nor `curl` or `wget`.
+    #[track_caller]
+    pub fn via_controller(mut self) -> Fetched {
+        self.via_controller = true;
         self
     }
 
@@ -129,29 +139,39 @@ impl<V> Host<V> {
         Fetched {
             url: url.as_ref().to_string(),
             sha256: None,
+            via_controller: false,
         }
     }
 }
 
-/// The staging directory name of this process: one per run, so two runs on
-/// one host never share one. `<unix nanos in hex>-<pid>`. It never appears
-/// in a rendered script: the executor sets `$__tp_run` to it in each shell
-/// it opens ([`shell_init`]) and the scripts name that variable.
-fn run_id() -> &'static str {
-    static ID: OnceLock<String> = OnceLock::new();
-    ID.get_or_init(|| {
-        let n = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0);
-        format!("{n:x}-{}", std::process::id())
+/// The staging directory name of this run: one per thread, so two `run`s
+/// in one process (the test binary) never share a directory on one
+/// machine. `<unix nanos in hex>-<pid>`. It never appears in a rendered
+/// script: the executor sets `$__tp_run` to it in each shell it opens
+/// ([`shell_init`]) and the scripts name that variable. A `run` drives
+/// every host on the thread that called it, so those hosts share one id;
+/// they do not share a filesystem unless they are the same machine.
+fn run_id() -> String {
+    thread_local! {
+        static ID: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+    }
+    ID.with(|id| {
+        id.borrow_mut()
+            .get_or_insert_with(|| {
+                let n = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_nanos())
+                    .unwrap_or(0);
+                format!("{n:x}-{}", std::process::id())
+            })
+            .clone()
     })
 }
 
 /// The script the executor sends once to each shell it opens (root and
 /// login): `__tp_run`, this process's staging subdirectory name.
 pub(crate) fn shell_init() -> String {
-    format!("__tp_run={}\n", quote(run_id()))
+    format!("__tp_run={}\n", quote(&run_id()))
 }
 
 /// The `rm` that ends a host's run: the staging directory `$__tp_run`
@@ -192,13 +212,17 @@ pub struct Item {
 /// installed from a fetched file.
 fn op_fetch(spec: &OpSpec) -> Option<(&str, &Option<String>, bool)> {
     match spec {
-        OpSpec::File(f) => f.src.as_ref().map(|s| {
-            (
-                s.fetched.url.as_str(),
-                &s.fetched.sha256,
-                s.unpack.is_some(),
-            )
-        }),
+        OpSpec::File(f) => f
+            .src
+            .as_ref()
+            .filter(|s| !s.fetched.via_controller)
+            .map(|s| {
+                (
+                    s.fetched.url.as_str(),
+                    &s.fetched.sha256,
+                    s.unpack.is_some(),
+                )
+            }),
         OpSpec::Pkg(p) => p.file.as_ref().map(|f| (f.url.as_str(), &f.sha256, false)),
         _ => None,
     }
@@ -507,7 +531,8 @@ mod tests {
         assert_eq!(
             Fetched {
                 url: "u".into(),
-                sha256: None
+                sha256: None,
+                via_controller: false,
             }
             .sha256(&up)
             .sha256,
@@ -516,6 +541,7 @@ mod tests {
         let f = Fetched {
             url: "u".into(),
             sha256: None,
+            via_controller: false,
         }
         .sha256("zz");
         assert_eq!(f.sha256.as_deref(), Some("zz"));

@@ -1398,6 +1398,63 @@ impl HostExec {
         self.shells.shell(who)
     }
 
+    /// Stream controller files whose sha256 differs, one chunk per shell
+    /// script. A matching file is not sent.
+    async fn stream_copies(&mut self, copies: &[crate::local::CopyItem]) -> Result<(), String> {
+        for item in copies {
+            for f in &item.files {
+                if f.same || f.is_dir {
+                    continue;
+                }
+                self.stream_file(&item.who, &item.dest_word, &f.rel, &f.abs)
+                    .await?;
+                self.fetch_staged = true;
+            }
+        }
+        Ok(())
+    }
+
+    async fn stream_file(
+        &mut self,
+        who: &Principal,
+        dest_word: &str,
+        rel: &str,
+        src: &std::path::Path,
+    ) -> Result<(), String> {
+        let mut file =
+            std::fs::File::open(src).map_err(|e| format!("local {}: {e}", src.display()))?;
+        let mut buf = vec![0u8; crate::local::CHUNK];
+        let mut truncate = true;
+        loop {
+            let n = std::io::Read::read(&mut file, &mut buf)
+                .map_err(|e| format!("local {}: {e}", src.display()))?;
+            if n == 0 {
+                if truncate {
+                    let script = crate::local::chunk_script(dest_word, rel, &[], true);
+                    self.probe_as(who, script).await?;
+                }
+                break;
+            }
+            let script = crate::local::chunk_script(dest_word, rel, &buf[..n], truncate);
+            truncate = false;
+            self.probe_as(who, script).await?;
+        }
+        Ok(())
+    }
+
+    async fn probe_as(&mut self, who: &Principal, script: String) -> Result<(), String> {
+        self.seq += 1;
+        let id = self.seq;
+        let sh = self
+            .shell_for(who)
+            .ok_or_else(|| format!("no shell open for {who:?}"))?;
+        let (rc, out) = prepare::probe(sh, id, &script).await?;
+        if rc != 0 {
+            return Err(format!("copy to the host failed (rc {rc}) {out}"));
+        }
+        Ok(())
+    }
+
     /// Remove the run's staging directory on the host (what a fetch with no
     /// checksum left there). Best effort: a failure is not the run's.
     async fn cleanup_stage(&mut self) {
@@ -1553,6 +1610,10 @@ impl Executor for HostExec {
                 .line(&format!("== {} [prepare] {w} ==", self.name));
         }
         resolved?;
+        if let Err(why) = prepare::fill_local(&mut window) {
+            self.block(why.clone());
+            return Err(why);
+        }
         let window = &window;
         let kind = match window.kind {
             WindowKind::NonMutating => "non-mutating",
@@ -1634,6 +1695,14 @@ impl Executor for HostExec {
                     self.sink.event(json!({"ev":"will_remove","host":self.name,
                         "names":w.names}));
                     self.report.will_remove.push(w);
+                }
+                for n in &will.local_notes {
+                    self.sink
+                        .line(&format!("== {} [prepare] {n} ==", self.name));
+                }
+                if let Err(why) = self.stream_copies(&will.copies).await {
+                    self.block(why.clone());
+                    return Err(why);
                 }
                 for fl in will.fetches {
                     self.sink

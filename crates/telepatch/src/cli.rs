@@ -250,6 +250,15 @@ fn dispatch<V: DeserializeOwned + Default + 'static>(
                     vars,
                 });
             }
+            crate::local::set_anchor(vars.as_deref().and_then(|p| {
+                p.parent().map(|d| {
+                    if d.as_os_str().is_empty() {
+                        std::path::PathBuf::from(".")
+                    } else {
+                        d.to_path_buf()
+                    }
+                })
+            }));
             let report = run(pb, hosts, RunOpts { log, stdout });
             (format!("\n{}", report.render()), report.exit_code())
         }

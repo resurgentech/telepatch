@@ -374,6 +374,10 @@ pub struct Prepared {
     pub will_change: Vec<WillChange>,
     pub will_create: Vec<WillCreate>,
     pub fetches: Vec<FetchLine>,
+    /// Controller copies, with `same` set from the host checksum probe.
+    pub copies: Vec<crate::local::CopyItem>,
+    /// Prepare lines for copies whose sha256 differs.
+    pub local_notes: Vec<String>,
 }
 
 /// Why prepare blocks a host. `why` is the reason the run prints.
@@ -558,6 +562,52 @@ pub fn resolve_secrets(window: &mut Window) -> Result<(), String> {
     crate::secret::resolve_ops(&mut window.ops)
 }
 
+/// Read controller files and commands named by `window`. A miss is the
+/// error string. Nothing is sent to the host.
+pub fn fill_local(window: &mut Window) -> Result<(), String> {
+    for op in &mut window.ops {
+        if let OpSpec::File(f) = &mut op.node.spec {
+            crate::ops::file::fill_local(f)?;
+        }
+    }
+    Ok(())
+}
+
+fn controller_copies(window: &Window) -> Vec<crate::local::CopyItem> {
+    let mut out = Vec::new();
+    for op in &window.ops {
+        let OpSpec::File(f) = &op.node.spec else {
+            continue;
+        };
+        let Some(place) = &f.local else {
+            continue;
+        };
+        if !place.prepared {
+            continue;
+        }
+        out.push(crate::local::CopyItem {
+            who: op.node.run_as.principal.clone(),
+            dest_word: f.path_word(),
+            display: f.path.clone(),
+            written: place.written.clone(),
+            is_dir: place.is_dir(),
+            files: place
+                .files
+                .iter()
+                .map(|s| crate::local::CopyFile {
+                    rel: s.rel.clone(),
+                    abs: s.abs.clone(),
+                    sha256: s.sha256.clone(),
+                    len: s.len,
+                    is_dir: s.is_dir,
+                    same: false,
+                })
+                .collect(),
+        });
+    }
+    out
+}
+
 pub async fn prepare_window<S: ShellSet>(
     shells: &mut S,
     window: &Window,
@@ -597,6 +647,50 @@ pub async fn prepare_window<S: ShellSet>(
     for u in &users {
         shells.open_user(u).await?;
     }
+
+    // Controller copies: compare sha256 before any download writes the host.
+    let mut copies = controller_copies(window);
+    if copies.iter().any(|c| c.files.iter().any(|f| !f.is_dir)) {
+        let mut flat: Vec<(usize, usize)> = Vec::new();
+        let mut words: Vec<(String, String)> = Vec::new();
+        for (ci, c) in copies.iter().enumerate() {
+            for (fi, f) in c.files.iter().enumerate() {
+                if f.is_dir {
+                    continue;
+                }
+                flat.push((ci, fi));
+                words.push((c.dest_word.clone(), f.rel.clone()));
+            }
+        }
+        // One probe per principal keeps `~` expansion in that user's shell.
+        // The rows above may mix principals; send them on each file's shell
+        // by grouping. A single script per principal, then stitch.
+        let mut sums = vec![None; words.len()];
+        let mut by_who: Vec<(crate::trace::Principal, Vec<usize>)> = Vec::new();
+        for (i, (ci, _)) in flat.iter().enumerate() {
+            let who = copies[*ci].who.clone();
+            match by_who.iter_mut().find(|(w, _)| w == &who) {
+                Some((_, idxs)) => idxs.push(i),
+                None => by_who.push((who, vec![i])),
+            }
+        }
+        for (who, idxs) in &by_who {
+            let group: Vec<(String, String)> = idxs.iter().map(|i| words[*i].clone()).collect();
+            let id = next();
+            let sh = shell_of(shells, who)?;
+            let (_, out) = probe(sh, id, &crate::local::sum_script(&group)).await?;
+            let parsed = crate::local::parse_sums(group.len(), &out)?;
+            for (slot, sum) in idxs.iter().zip(parsed) {
+                sums[*slot] = Some(sum);
+            }
+        }
+        for (slot, (ci, fi)) in flat.iter().enumerate() {
+            let host = sums[slot].take().unwrap_or(None);
+            let file = &mut copies[*ci].files[*fi];
+            file.same = host.as_deref() == Some(file.sha256.as_str());
+        }
+    }
+    let local_notes: Vec<String> = copies.iter().filter_map(|c| c.note()).collect();
 
     // Downloads, one script for the window, on the root shell; before any
     // probe is sent, since a failure here blocks the host.
@@ -786,6 +880,8 @@ pub async fn prepare_window<S: ShellSet>(
 
     let mut will = Prepared {
         fetches,
+        copies,
+        local_notes,
         ..Prepared::default()
     };
     for ((m, _names), id) in groups.iter().zip(pkg_ids) {

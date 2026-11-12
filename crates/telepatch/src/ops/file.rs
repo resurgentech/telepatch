@@ -11,6 +11,7 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 
 use crate::host::{Host, OpHandle, TraceError};
+use crate::local::{self, LineText, LocalPlace};
 use crate::ops::content::{self, Content, ScriptBody};
 use crate::ops::fetch::{Fetched, FileSrc};
 use crate::sh::quote;
@@ -26,9 +27,9 @@ pub enum FileKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LineOp {
     /// Ensure this exact line is present (append if missing).
-    Line(String),
+    Line(LineText),
     /// Replace the last line matching the ERE with the line, else append.
-    LineRe { re: String, line: String },
+    LineRe { re: String, line: LineText },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -45,6 +46,10 @@ pub struct FileSpec {
     pub validate: Option<String>,
     /// A download to place or unpack (`.from`, `.unpack`).
     pub src: Option<FileSrc>,
+    /// A controller file, directory, or `.via_controller()` download.
+    /// Streamed by the executor; the script checks the sha256 and does
+    /// not carry the bytes.
+    pub local: Option<LocalPlace>,
 }
 
 impl FileSpec {
@@ -58,12 +63,13 @@ impl FileSpec {
             owner: None,
             validate: None,
             src: None,
+            local: None,
         }
     }
 
     /// The path as a shell word: quoted, except a leading `~`/`~user` which
     /// must expand on the host.
-    fn path_word(&self) -> String {
+    pub(crate) fn path_word(&self) -> String {
         let p = &self.path;
         if let Some(rest) = p.strip_prefix('~') {
             let (user, tail) = match rest.find('/') {
@@ -110,6 +116,7 @@ impl FileSpec {
             FileKind::Dir => o.push_str(
                 "if [ -d \"$tp_p\" ]; then :\nelif [ -e \"$tp_p\" ] || [ -L \"$tp_p\" ]; then\n  echo \"telepatch: $tp_p exists and is not a directory\" >&2; rc=1\nelse\n  (umask 022; mkdir -p -- \"$tp_p\")\n  rc=$?\n  if [ \"$rc\" -eq 0 ]; then changed=1; fi\nfi\n",
             ),
+            FileKind::File if self.local.is_some() => self.render_controller(&mut o),
             FileKind::File if self.src.is_some() => {
                 if let Some(src) = &self.src {
                     crate::ops::fetch::render(self, src, &mut o);
@@ -239,7 +246,11 @@ impl FileSpec {
         for l in &self.lines {
             let (re, line) = match l {
                 LineOp::Line(l) => (None, l),
-                LineOp::LineRe { re, line } => (Some(re), line),
+                LineOp::LineRe { re, line } => (Some(re.as_str()), line),
+            };
+            let Some(line) = line.literal() else {
+                o.push_str("echo 'telepatch: local value was not prepared' >&2; rc=1\n");
+                continue;
             };
             if line.contains('\n') || re.is_some_and(|r| r.contains('\n')) {
                 o.push_str("echo 'telepatch: file line must be a single line' >&2; rc=2\n");
@@ -260,6 +271,110 @@ impl FileSpec {
             }
         }
     }
+
+    /// Place bytes the copy channel staged. The script never contains them.
+    fn render_controller(&self, o: &mut String) {
+        let Some(place) = &self.local else {
+            return;
+        };
+        if !place.prepared {
+            o.push_str("echo 'telepatch: controller file was not prepared' >&2; rc=1\n");
+            return;
+        }
+        o.push_str(&local::stage_vars(&self.path_word()));
+        if place.is_dir() {
+            o.push_str(
+                "if [ -e \"$tp_p\" ] && [ ! -d \"$tp_p\" ]; then echo \"telepatch: $tp_p exists and is not a directory\" >&2; rc=1; fi\n",
+            );
+            o.push_str(
+                "if [ \"$rc\" -eq 0 ] && [ ! -d \"$tp_p\" ]; then mkdir -p -- \"$tp_p\" && changed=1 || rc=$?; fi\n",
+            );
+        } else {
+            o.push_str(
+                "if [ -d \"$tp_p\" ]; then echo \"telepatch: $tp_p is a directory\" >&2; rc=1; fi\n",
+            );
+        }
+        for f in &place.files {
+            if f.is_dir {
+                let dest = local::host_path(&f.rel);
+                o.push_str(&format!(
+                    "if [ \"$rc\" -eq 0 ] && [ ! -d {dest} ]; then mkdir -p -- {dest} && changed=1 || rc=$?; fi\n"
+                ));
+                continue;
+            }
+            let dest = local::host_path(&f.rel);
+            let stage = if f.rel.is_empty() && !place.is_dir() {
+                "\"$tp_base\"".to_string()
+            } else {
+                format!("\"$tp_base\"/{}", quote(&f.rel))
+            };
+            let sum = quote(&f.sha256);
+            o.push_str(&format!(
+                "if [ \"$rc\" -eq 0 ]; then\n  tp_dest={dest}\n  tp_stage={stage}\n  tp_sum={sum}\n  if [ -f \"$tp_stage\" ]; then\n    tp_got=$(sha256sum \"$tp_stage\" | cut -d' ' -f1)\n    if [ \"$tp_got\" != \"$tp_sum\" ]; then echo \"telepatch: streamed $tp_dest sha256 is $tp_got\" >&2; rc=1\n    else\n      mkdir -p -- \"$(dirname -- \"$tp_dest\")\" || rc=$?\n      if [ \"$rc\" -eq 0 ]; then mv -f -- \"$tp_stage\" \"$tp_dest\" && changed=1 || rc=$?; fi\n    fi\n  elif [ -f \"$tp_dest\" ]; then\n    tp_got=$(sha256sum \"$tp_dest\" | cut -d' ' -f1)\n    if [ \"$tp_got\" != \"$tp_sum\" ]; then echo \"telepatch: $tp_dest was not streamed\" >&2; rc=1; fi\n  else\n    echo \"telepatch: $tp_dest was not streamed\" >&2; rc=1\n  fi\nfi\n"
+            ));
+        }
+    }
+}
+
+#[cfg(test)]
+mod render_tests {
+    use super::*;
+    use crate::local::{LocalPlace, Staged};
+
+    #[test]
+    fn controller_tree_script_names_each_relative_path() {
+        let mut spec = FileSpec::new("/host/certs");
+        spec.local = Some(LocalPlace {
+            kind: crate::local::LocalKind::Dir,
+            written: "certs".into(),
+            prepared: true,
+            files: vec![
+                Staged {
+                    rel: "a.txt".into(),
+                    abs: "/src/a.txt".into(),
+                    sha256: "ab".repeat(32),
+                    len: 6,
+                    is_dir: false,
+                },
+                Staged {
+                    rel: "sub/b.txt".into(),
+                    abs: "/src/sub/b.txt".into(),
+                    sha256: "cd".repeat(32),
+                    len: 7,
+                    is_dir: false,
+                },
+            ],
+        });
+        let script = spec.render();
+        assert!(
+            !script.contains("base64"),
+            "the op script must not carry bytes:\n{script}"
+        );
+        assert!(script.contains("sub/b.txt"), "{script}");
+        assert!(script.contains("a.txt"), "{script}");
+        assert!(script.len() < 4000, "op script grew to {}", script.len());
+    }
+}
+
+/// Read controller files and commands this spec names. A miss is the
+/// error string; nothing on the host has changed.
+pub(crate) fn fill_local(spec: &mut FileSpec) -> Result<(), String> {
+    for line in &mut spec.lines {
+        match line {
+            LineOp::Line(t) => {
+                let s = local::resolve_line(t)?;
+                *t = LineText::Literal(s);
+            }
+            LineOp::LineRe { line, .. } => {
+                let s = local::resolve_line(line)?;
+                *line = LineText::Literal(s);
+            }
+        }
+    }
+    if let Some(place) = &mut spec.local {
+        local::prepare_place(place)?;
+    }
+    Ok(())
 }
 
 /// Handle for a `file` op; builder methods edit the node in place.
@@ -309,6 +424,9 @@ impl FileHandle {
                 };
                 if let Some(src) = &s.src {
                     return Some(src.builder());
+                }
+                if s.local.is_some() {
+                    return Some(".from()");
                 }
                 if !source {
                     return None;
@@ -374,9 +492,27 @@ impl FileHandle {
     /// `.dir()`, `.absent()` and `.validate()`. Without a checksum on the
     /// fetch the op is the policy error `Unverified`.
     #[track_caller]
-    pub fn from(&self, fetched: impl std::borrow::Borrow<Fetched>) -> Self {
-        let f = crate::ops::fetch::fetched_of(fetched);
-        self.take(".from()", &f, None)
+    pub fn from(&self, src: impl Into<crate::local::FromArg>) -> Self {
+        match src.into() {
+            crate::local::FromArg::Fetch(f) if f.via_controller => {
+                if let Some(p) = f.problem() {
+                    self.0
+                        .record_error(TraceError::new(format!("file {}: {p}", self.path())));
+                    return self.clone();
+                }
+                self.place_local(LocalPlace::fetch(f.url, f.sha256))
+            }
+            crate::local::FromArg::Fetch(f) => self.take(".from()", &f, None),
+            crate::local::FromArg::File(f) => self.place_local(LocalPlace::file(f.path)),
+            crate::local::FromArg::Dir(d) => self.place_local(LocalPlace::dir(d.path)),
+        }
+    }
+
+    fn place_local(&self, place: LocalPlace) -> Self {
+        if self.exclusive(".from()") {
+            return self.clone();
+        }
+        self.spec(|s| s.local = Some(place))
     }
 
     /// Unpack a downloaded archive (tar gz, xz, zst, or zip) into this
@@ -387,6 +523,13 @@ impl FileHandle {
     #[track_caller]
     pub fn unpack(&self, fetched: impl std::borrow::Borrow<Fetched>) -> Self {
         let f = crate::ops::fetch::fetched_of(fetched);
+        if f.via_controller {
+            self.0.record_error(TraceError::new(format!(
+                "file {}: .via_controller() is placed with .from(), not .unpack()",
+                self.path()
+            )));
+            return self.clone();
+        }
         self.take(".unpack()", &f, Some(0))
     }
 
@@ -415,11 +558,12 @@ impl FileHandle {
 
     /// Ensure this exact line is present, appending if missing.
     #[track_caller]
-    pub fn line(&self, line: &str) -> Self {
+    pub fn line(&self, line: impl Into<LineText>) -> Self {
         if self.exclusive(".line()") {
             return self.clone();
         }
-        self.spec(|s| s.lines.push(LineOp::Line(line.to_string())))
+        let line = line.into();
+        self.spec(|s| s.lines.push(LineOp::Line(line)))
     }
     /// Replace the last line matching `re` (an ERE, `grep -E`) with `line`,
     /// or append it when none matches.
@@ -431,7 +575,7 @@ impl FileHandle {
         self.spec(|s| {
             s.lines.push(LineOp::LineRe {
                 re: re.to_string(),
-                line: line.to_string(),
+                line: LineText::Literal(line.to_string()),
             })
         })
     }
