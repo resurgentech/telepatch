@@ -1103,3 +1103,18 @@ are appended, never edited in; a hook refuses rewrites.
   failed the old `dpkg-query -W` exit check and were deleted. Gate E
   green (`cargo test --workspace`, `just lint`).
 - Commits: telepatch 1875375
+
+## 2026-11-11 — T93 Package from a fetched file
+
+- `h.pkg([name]).from(deb).pin(v)` installs one package through apt or
+  dnf when the manager does not already report that name and version.
+  The file is the prepare-phase checksum cache, installed as `./x.deb`
+  or `./x.rpm` from the staging directory. The symlink is removed in
+  the op. Any other manager is a trace error. No pin, or more than one
+  name, fails the trace. No checksum is `Unverified`.
+- `just docker-vm test-live-fetch` on `tp-docker-20261112-061654`: 9
+  passed, 0 failed, 75.32s, including `fetch_ubuntu_pkg_from_a_deb`
+  (a deb built with `dpkg-deb`, run 2 unchanged, nothing left in
+  `/tmp`). VM deleted. Not an OOM. Gate E green (`cargo test
+  --workspace`, `just lint`).
+- Commits: telepatch 7593e84
