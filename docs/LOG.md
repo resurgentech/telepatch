@@ -1284,3 +1284,25 @@ are appended, never edited in; a hook refuses rewrites.
   workstation's VM list are unchanged.
 - Gate green.
 - Commits: tp_basic 2dd2fd0
+
+## 2026-11-12 — T97e ubuntu2404 edge gate
+
+- `just test-edge` runs the local half, then one ubuntu2404 cell via
+  `just docker-vm` on veritech04.labtwo. The local half is telepatch
+  `cargo test --workspace`, `cargo test --test plans`, the self-test and
+  `just musl`.
+- The cell: Ansible's `edge` from a throwaway venv, and `tp-basic run
+  edge --local` twice, both from `ubuntu:24.04` pulled in the VM.
+  - Captures identical, with no intended-differences file.
+  - Marker bytes are `edge\n` and `edge-jq` is checksummed on both
+    sides.
+  - Run 2 `CHANGED 0`.
+  - Cell 167 s; VM peak 698 MiB of 961, 184 MiB swap.
+  - VM `tp-docker-20261112-113710` deleted and verified gone.
+- The harness was resumed unchanged from the blocked run; the README now
+  documents where the VMs run.
+- The libz-dev / zlib1g-dev pair installed on both sides.
+- Observation for a follow-up: run 2's advisory prepare line still lists
+  `libz-dev` as "will install" (it does not apply T97c's Provides rule).
+- Gate green.
+- Commits: tp_basic 4fcf3cb
