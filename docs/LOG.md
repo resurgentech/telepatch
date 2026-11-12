@@ -1237,3 +1237,24 @@ are appended, never edited in; a hook refuses rewrites.
   Telepatch unchanged. Gate `just check-edge && cargo test && just
   test-oracle-selftest` green. No VM.
 - Commits: tp_basic 6ad1160
+
+## 2026-11-12 — T97h Prepare veritech04 as the tp-* VM host
+
+- New `scripts/vm-host.sh` in tp_basic. `check` is read-only, `setup`
+  is idempotent, and `--self-test` runs 51 stub cases with no network.
+  `scripts/lib/vm.sh` gains only the `TP_VM_HOST` / `TP_VM_HOST_DIR` /
+  `TP_VM_POOL` settings block.
+- Setup ran for real on veritech04.labtwo:
+  - One sudo, `apt-get install --no-install-recommends golang-1.24-go
+    libvirt-dev`, after a clean simulation (3 new packages, no upgrade,
+    no removal).
+  - vmtool 465d48e built there with go1.24.13.
+  - Pool `tp` at `/var/lib/libvirt/images/tp`.
+  - `ubuntu2404.qcow2` uploaded, sha256 72ecb307… verified.
+- The live run found two bugs, fixed test-first:
+  - qemu-img's JSON has a nested `virtual-size`.
+  - `virsh vol-download` to stdout adds a newline.
+- veritech04's VM list and networks are unchanged, and `dpkg -l` differs
+  only by the three packages. No VM created.
+- Gate green: self-test, `check`, `just test-oracle-selftest`.
+- Commits: tp_basic 46a06fe
