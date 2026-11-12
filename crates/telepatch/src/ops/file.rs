@@ -237,7 +237,7 @@ impl FileSpec {
         self.render_lines(o);
     }
 
-    fn render_lines(&self, o: &mut String) {
+    pub(crate) fn render_lines(&self, o: &mut String) {
         if !self.lines.is_empty() {
             o.push_str(
                 "tp_append() {\n  if [ -s \"$1\" ] && [ -n \"$(tail -c1 \"$1\")\" ]; then printf '\\n' >> \"$1\"; fi\n  printf '%s\\n' \"$2\" >> \"$1\"\n}\n",

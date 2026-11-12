@@ -1334,7 +1334,7 @@ let installed = h.pkg_installed("cuda-keyring").await;   <span class="c">// Some
 <section class="prose" id="d-check">
 <h3>Dry run with diffs</h3>
 <p><code>--check</code> runs trace and prepare in full and stops before apply. <code>--diff</code> shows what each file would become.</p>
-<p class="status">Status: <strong>designed</strong>: today <code>plan</code> renders without a host</p>
+<p class="status">Status: <strong>built</strong>: <code>--check</code>, <code>--diff</code>, the exit status, the <code>[coverage]</code> line (ops with an inverse), a stop at the first implicit barrier. <code>plan</code> still renders without a host</p>
 <pre><code>$ tp-basic run dev_desktop --host bot@ws1 --check --diff
 == ws1 [prepare] 4 will change, 41 ok, 0 blocked ==
  file /etc/sudoers.d/bot: will create (0440 root:root)

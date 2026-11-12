@@ -95,6 +95,40 @@ pub enum OpSpec {
 }
 
 impl OpSpec {
+    /// Does the op leave what an undo needs to reverse it: its result
+    /// carries the inverse data (T75, T92, T95, T97), or the trace holds
+    /// the inverse. `--check` counts these per role (`[coverage]`); the
+    /// undo log that would run them is a later goal.
+    ///
+    /// - `pkg` from the system manager or pip: the trailer's `installed`
+    ///   (remove those) or the names it removed (reinstall them);
+    ///   `build-dep` and the other sources report no such list.
+    /// - `group`: `created`. `svc`: `was_enabled`, `was_active`,
+    ///   `was_masked`. `git`: `created`, `was_rev`. `resource`: its
+    ///   `inverse` script, when it defined one.
+    /// - Not yet: `file`, `unit` and `repo` (the note's table captures the
+    ///   previous content; no template does yet), `user` (only the
+    ///   created case is captured, not the fields of an existing account)
+    ///   and `sh` (no `.undo`).
+    ///
+    /// Exhaustive on purpose: a new op kind must decide.
+    pub fn has_inverse(&self) -> bool {
+        use crate::ops::pkg::{PkgMode, Source};
+        match self {
+            OpSpec::Pkg(p) => {
+                p.mode == PkgMode::Install && matches!(p.source, Source::Distro(_) | Source::Pip)
+            }
+            OpSpec::Group(_) | OpSpec::Svc(_) | OpSpec::Git(_) => true,
+            OpSpec::Resource(r) => r.inverse.is_some(),
+            OpSpec::Raw { .. }
+            | OpSpec::Shell(_)
+            | OpSpec::File(_)
+            | OpSpec::User(_)
+            | OpSpec::Repo(_)
+            | OpSpec::Unit(_) => false,
+        }
+    }
+
     /// Short kind name used in plans.
     pub fn kind(&self) -> &'static str {
         match self {

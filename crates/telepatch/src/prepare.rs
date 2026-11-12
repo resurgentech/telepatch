@@ -31,6 +31,7 @@ use std::collections::BTreeSet;
 
 use crate::engine::Window;
 use crate::facts::os::Os;
+use crate::ops::file::FileSpec;
 use crate::ops::pkg::{Manager, PkgMode, PkgSpec, Source, Wanted};
 use crate::pool::{Shell, ShellError};
 use crate::report::{FetchLine, FetchState, WillChange, WillCreate, WillInstall, WillRemove};
@@ -635,6 +636,7 @@ pub async fn prepare_window<S: ShellSet>(
     os: &Os,
     users_ok: &mut BTreeSet<String>,
     seq: &mut usize,
+    earlier_windows: bool,
 ) -> Result<Prepared, Refused> {
     if !window.assertions.is_empty() {
         return Err(window.assertions.join("\n").into());
@@ -1073,7 +1075,7 @@ pub async fn prepare_window<S: ShellSet>(
         // Gather only: a failed probe reports nothing.
         let root = shell_of(shells, &Principal::Root)?;
         if let Ok((_, out)) = collect(root, id).await {
-            let earlier = unit_after_installers(window);
+            let earlier = earlier_windows || unit_after_installers(window);
             for (name, detail) in crate::ops::unit::findings(&unit_list, &out, earlier) {
                 will.will_create.push(WillCreate {
                     window: window.number,
@@ -1088,7 +1090,7 @@ pub async fn prepare_window<S: ShellSet>(
         // Gather only: a failed probe reports nothing.
         let root = shell_of(shells, &Principal::Root)?;
         if let Ok((_, out)) = collect(root, id).await {
-            let earlier = svc_after_installers(window);
+            let earlier = earlier_windows || svc_after_installers(window);
             for (name, detail) in crate::ops::svc::findings_after(&svc_list, &out, earlier) {
                 will.will_create.push(WillCreate {
                     window: window.number,
@@ -1100,6 +1102,336 @@ pub async fn prepare_window<S: ShellSet>(
         }
     }
     Ok(will)
+}
+
+// ---- check: what a dry run says about a file ----
+
+/// A file of this many bytes or more is compared by checksum only: its
+/// body is not fetched for a diff.
+const DIFF_BODY_CAP: u64 = 256 * 1024;
+
+/// What the host has at a file op's path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PathState {
+    /// The probe said nothing usable.
+    #[default]
+    Unknown,
+    Missing,
+    Dir,
+    File,
+}
+
+/// What [`file_probe_script`] found, parsed.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct FileProbe {
+    pub state: PathState,
+    pub mode: Option<u32>,
+    /// `[user, group, uid, gid]`.
+    pub owner: Option<[String; 4]>,
+    pub sha: Option<String>,
+    /// The current bytes, when a diff was wanted and the file is small.
+    pub body: Option<Vec<u8>>,
+    /// The `.telepatch-fetch` marker of an unpacked directory.
+    pub marker: Option<String>,
+    /// A line-edit op: the exit status of the edit on a copy, and the
+    /// copy's checksum and bytes.
+    pub new_rc: Option<i32>,
+    pub new_sha: Option<String>,
+    pub new_body: Option<Vec<u8>>,
+}
+
+/// The read-only script that tells what a file op would do. It never
+/// touches `f.path`: a line edit is tried on a temp copy.
+pub fn file_probe_script(f: &FileSpec, want_body: bool) -> String {
+    let mut s = format!("tp_p={}\n", f.path_word());
+    s.push_str(
+        r#"if [ -e "$tp_p" ]; then
+  if [ -d "$tp_p" ]; then echo "state dir"; else echo "state file"; fi
+  echo "mode $(stat -L -c %a "$tp_p" 2>/dev/null)"
+  echo "owner $(stat -L -c '%U %G %u %g' "$tp_p" 2>/dev/null)"
+  if [ -f "$tp_p" ]; then
+    echo "sha $(sha256sum < "$tp_p" 2>/dev/null | cut -d' ' -f1)"
+"#,
+    );
+    if want_body {
+        s.push_str(&format!(
+            "    if [ \"$(stat -L -c %s \"$tp_p\" 2>/dev/null || echo 0)\" -lt {DIFF_BODY_CAP} ]; then echo \"body $(base64 -w0 < \"$tp_p\")\"; fi\n"
+        ));
+    }
+    s.push_str("  fi\nelse\n  echo \"state missing\"\nfi\n");
+    if f.src.as_ref().is_some_and(|x| x.unpack.is_some()) {
+        s.push_str(
+            "if [ -d \"$tp_p\" ]; then echo \"marker $(head -n1 \"$tp_p/.telepatch-fetch\" 2>/dev/null)\"; fi\n",
+        );
+    }
+    if !f.lines.is_empty() {
+        s.push_str(
+            "tp_c=$(mktemp) || exit 1\nif [ -f \"$tp_p\" ]; then cat \"$tp_p\" > \"$tp_c\"; fi\n( rc=0; changed=0; tp_p=\"$tp_c\"\n",
+        );
+        f.render_lines(&mut s);
+        s.push_str(
+            "exit \"$rc\" ) >/dev/null 2>&1\necho \"new-rc $?\"\necho \"new-sha $(sha256sum < \"$tp_c\" | cut -d' ' -f1)\"\n",
+        );
+        if want_body {
+            s.push_str(&format!(
+                "if [ \"$(stat -c %s \"$tp_c\")\" -lt {DIFF_BODY_CAP} ]; then echo \"new-body $(base64 -w0 < \"$tp_c\")\"; fi\n"
+            ));
+        }
+        s.push_str("rm -f \"$tp_c\"\n");
+    }
+    s
+}
+
+/// Parse [`file_probe_script`]'s output.
+pub fn parse_file_probe(out: &str) -> FileProbe {
+    use base64::Engine as _;
+    let b64 = |v: &str| {
+        base64::engine::general_purpose::STANDARD
+            .decode(v.trim())
+            .ok()
+    };
+    let sum = |v: &str| Some(v.trim().to_string()).filter(|s| !s.is_empty());
+    let mut p = FileProbe::default();
+    for l in out.lines() {
+        let Some((k, v)) = l.split_once(' ') else {
+            continue;
+        };
+        match k {
+            "state" => {
+                p.state = match v.trim() {
+                    "missing" => PathState::Missing,
+                    "dir" => PathState::Dir,
+                    "file" => PathState::File,
+                    _ => PathState::Unknown,
+                }
+            }
+            "mode" => p.mode = u32::from_str_radix(v.trim(), 8).ok(),
+            "owner" => {
+                let f: Vec<String> = v.split_whitespace().map(str::to_string).collect();
+                if let Ok(a) = <[String; 4]>::try_from(f) {
+                    p.owner = Some(a);
+                }
+            }
+            "sha" => p.sha = sum(v),
+            "body" => p.body = b64(v),
+            "marker" => p.marker = Some(v.trim().to_string()),
+            "new-rc" => p.new_rc = v.trim().parse().ok(),
+            "new-sha" => p.new_sha = sum(v),
+            "new-body" => p.new_body = b64(v),
+            _ => {}
+        }
+    }
+    p
+}
+
+/// What a check found for one file op.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileFinding {
+    pub id: NodeId,
+    pub path: String,
+    /// The body is a secret: never diffed, never shown.
+    pub secret: bool,
+    /// `will create`, `will change`, `will change (mode 0644 -> 0600)`,
+    /// `will remove`; `None` when the file is as wanted.
+    pub detail: Option<String>,
+    /// A unified diff, when `--diff` asked and the file is not a secret.
+    pub diff: Option<String>,
+    /// The op would fail on this host: why. Blocks the host.
+    pub block: Option<String>,
+}
+
+impl FileFinding {
+    /// The name the prepare line gives the file (`/etc/x`, or `/etc/x
+    /// (secret)`).
+    pub fn name(&self) -> String {
+        if self.secret {
+            format!("{} (secret)", self.path)
+        } else {
+            self.path.clone()
+        }
+    }
+}
+
+fn sha256_hex(b: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(b)
+        .iter()
+        .map(|x| format!("{x:02x}"))
+        .collect()
+}
+
+/// The unified diff of `old` to `new`, hunks only (`@@ -1,3 +1,3 @@`,
+/// three lines of context); a note instead for bytes that are not text.
+pub fn unified_diff(old: &[u8], new: &[u8]) -> String {
+    let (Ok(a), Ok(b)) = (std::str::from_utf8(old), std::str::from_utf8(new)) else {
+        return "(binary content: no diff)\n".to_string();
+    };
+    similar::TextDiff::from_lines(a, b)
+        .unified_diff()
+        .context_radius(3)
+        .to_string()
+}
+
+/// Decide what a file op would do from what the host has. Pure.
+pub fn file_finding(id: NodeId, f: &FileSpec, probe: &FileProbe, diff: bool) -> FileFinding {
+    use crate::ops::file::FileKind;
+    let mut fnd = FileFinding {
+        id,
+        path: f.path.clone(),
+        secret: f.is_secret(),
+        detail: None,
+        diff: None,
+        block: None,
+    };
+    let unpack = f.src.as_ref().is_some_and(|s| s.unpack.is_some());
+    let missing = probe.state == PathState::Missing;
+    match (f.kind, probe.state) {
+        (_, PathState::Unknown) => return fnd,
+        (FileKind::Absent, PathState::Missing) => return fnd,
+        (FileKind::Absent, _) => {
+            fnd.detail = Some("will remove".to_string());
+            return fnd;
+        }
+        (FileKind::Dir, PathState::File) => {
+            fnd.block = Some(format!("{} exists and is not a directory", f.path));
+            return fnd;
+        }
+        (FileKind::File, PathState::File) if unpack => {
+            fnd.block = Some(format!("{} exists and is not a directory", f.path));
+            return fnd;
+        }
+        (FileKind::File, PathState::Dir) if !unpack => {
+            fnd.block = Some(format!("{} is a directory", f.path));
+            return fnd;
+        }
+        _ => {}
+    }
+    // Content: does the body differ, and what would it become.
+    let mut body_changed = false;
+    let mut new_bytes: Option<Vec<u8>> = None;
+    if f.kind == FileKind::File {
+        if let Some(src) = &f.src {
+            match (src.unpack, &src.fetched.sha256) {
+                (Some(strip), Some(sum)) => {
+                    let want = format!("{sum} strip={strip}");
+                    body_changed = probe.state == PathState::Dir
+                        && probe.marker.as_deref() != Some(want.as_str());
+                }
+                (None, Some(sum)) => {
+                    body_changed =
+                        probe.state == PathState::File && probe.sha.as_deref() != Some(sum);
+                }
+                _ => {}
+            }
+        } else if let Some(c) = &f.content {
+            if let Some(b) = c.host_bytes() {
+                body_changed =
+                    probe.state == PathState::File && probe.sha.as_deref() != Some(&sha256_hex(&b));
+                new_bytes = Some(b);
+            }
+        } else if !f.lines.is_empty() {
+            match probe.new_rc {
+                Some(0) => {
+                    body_changed = probe.state == PathState::File
+                        && probe.new_sha.is_some()
+                        && probe.new_sha != probe.sha;
+                    new_bytes = probe.new_body.clone();
+                }
+                Some(rc) => {
+                    fnd.detail = Some(format!("will fail (the line edit exits {rc})"));
+                    return fnd;
+                }
+                None => {}
+            }
+        }
+    }
+    // Mode and owner of what exists.
+    let mut parts: Vec<String> = Vec::new();
+    if body_changed {
+        parts.push("content".to_string());
+    }
+    if !missing {
+        if let (Some(m), Some(h)) = (f.mode, probe.mode)
+            && m != h
+        {
+            parts.push(format!("mode {h:04o} -> {m:04o}"));
+        }
+        if let (Some(ow), Some([u, g, uid, gid])) = (&f.owner, &probe.owner) {
+            let (wu, wg) = match ow.split_once(':') {
+                Some((a, b)) => (a, Some(b)),
+                None => (ow.as_str(), None),
+            };
+            let user_ok = wu.is_empty() || wu == u || wu == uid;
+            let group_ok = wg.is_none_or(|g2| g2.is_empty() || g2 == g || g2 == gid);
+            if !user_ok || !group_ok {
+                parts.push(format!("owner {u}:{g} -> {ow}"));
+            }
+        }
+    }
+    if missing {
+        let mut attrs: Vec<String> = Vec::new();
+        if let Some(m) = f.mode {
+            attrs.push(format!("{m:04o}"));
+        }
+        if let Some(o) = &f.owner {
+            attrs.push(o.clone());
+        }
+        fnd.detail = Some(if attrs.is_empty() {
+            "will create".to_string()
+        } else {
+            format!("will create ({})", attrs.join(" "))
+        });
+    } else if parts.is_empty() {
+        return fnd;
+    } else if parts == ["content"] {
+        fnd.detail = Some("will change".to_string());
+    } else {
+        fnd.detail = Some(format!("will change ({})", parts.join(", ")));
+    }
+    let content_op = f.src.is_none() && f.kind == FileKind::File;
+    if diff && !fnd.secret && content_op && (missing || body_changed) {
+        let old = if missing {
+            Some(Vec::new())
+        } else {
+            probe.body.clone()
+        };
+        fnd.diff = Some(match (old, new_bytes) {
+            (Some(o), Some(n)) => unified_diff(&o, &n),
+            _ => format!("(too large to diff: {DIFF_BODY_CAP} bytes or more)\n"),
+        });
+    }
+    fnd
+}
+
+/// Probe every file op of `window` and decide what it would do. Nothing on
+/// the host changes. Controller copies (`.from(local_file(..))`) are
+/// compared by [`prepare_window`]; ops with a guard are decided at run
+/// time and not probed. `Err` blocks the host.
+pub async fn check_files<S: ShellSet>(
+    shells: &mut S,
+    window: &Window,
+    diff: bool,
+    seq: &mut usize,
+) -> Result<Vec<FileFinding>, String> {
+    let mut out = Vec::new();
+    for op in &window.ops {
+        let OpSpec::File(f) = &op.node.spec else {
+            continue;
+        };
+        if f.local.is_some() || op.node.guard.is_some() {
+            continue;
+        }
+        *seq += 1;
+        let id = *seq;
+        let sh = shell_of(shells, &op.node.run_as.principal)?;
+        let (_, got) = probe(sh, id, &file_probe_script(f, diff && !f.is_secret())).await?;
+        let fnd = file_finding(op.id, f, &parse_file_probe(&got), diff);
+        if let Some(why) = &fnd.block {
+            return Err(format!("file {}: {why} (window {})", f.path, window.number));
+        }
+        out.push(fnd);
+    }
+    Ok(out)
 }
 
 #[cfg(test)]

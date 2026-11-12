@@ -14,7 +14,7 @@ use crate::facts::query::{Fact, FactQuery};
 use crate::host::{Host, TraceError};
 use crate::key::{Check, Stat, UserInfo, Value};
 use crate::resolver::{Answer, Resolver};
-use crate::trace::{Node, Source, Trace};
+use crate::trace::{Node, Site, Source, Trace};
 
 /// A pending fact read; resolves to `T`.
 #[must_use = "fact reads do nothing unless awaited"]
@@ -24,6 +24,9 @@ pub struct FactFuture<T> {
     query: FactQuery,
     ticket: Option<u64>,
     conv: fn(Value) -> T,
+    /// Where the role asked (`#[track_caller]`), for a `--check` that stops
+    /// at this read.
+    site: Site,
 }
 
 impl<T> Unpin for FactFuture<T> {}
@@ -47,7 +50,7 @@ impl<T> Future for FactFuture<T> {
                         (v, s)
                     }
                     Answer::Block => {
-                        this.ticket = Some(resolver.register(this.query.clone()));
+                        this.ticket = Some(resolver.register(this.query.clone(), this.site));
                         return Poll::Pending;
                     }
                 }
@@ -63,6 +66,7 @@ impl<T> Future for FactFuture<T> {
 }
 
 impl<V> Host<V> {
+    #[track_caller]
     fn fact<T>(&self, fact: Fact, conv: fn(Value) -> T) -> FactFuture<T> {
         FactFuture {
             trace: self.trace_cell().clone(),
@@ -73,20 +77,24 @@ impl<V> Host<V> {
             },
             ticket: None,
             conv,
+            site: Site::caller(),
         }
     }
 
     /// Does `path` exist? Reads `file:path`.
+    #[track_caller]
     pub fn exists(&self, path: &str) -> FactFuture<bool> {
         self.fact(Fact::exists(path), |v| v == Value::Exists(true))
     }
 
     /// Is `cmd` on `PATH` in this handle's environment?
+    #[track_caller]
     pub fn bin_exists(&self, cmd: &str) -> FactFuture<bool> {
         self.fact(Fact::bin_exists(cmd), |v| v == Value::Exists(true))
     }
 
     /// First line of `cmd --version`, or `None` when `cmd` is missing.
+    #[track_caller]
     pub fn bin_version(&self, cmd: &str) -> FactFuture<Option<String>> {
         self.fact(Fact::bin_version(cmd), |v| match v {
             Value::Text(s) => Some(s),
@@ -95,6 +103,7 @@ impl<V> Host<V> {
     }
 
     /// Home directory, login shell, and whether the account exists.
+    #[track_caller]
     pub fn user_info(&self, name: &str) -> FactFuture<UserInfo> {
         self.fact(Fact::user_info(name), |v| match v {
             Value::User(u) => u,
@@ -107,6 +116,7 @@ impl<V> Host<V> {
     }
 
     /// Mode, owner, size, and whether `path` exists.
+    #[track_caller]
     pub fn stat(&self, path: &str) -> FactFuture<Stat> {
         self.fact(Fact::stat(path), |v| match v {
             Value::Stat(s) => s,
@@ -136,6 +146,7 @@ impl<V> Host<V> {
 
     /// Run `cmd` with `bash -c` (no persistent shell changes). `rc` is its
     /// exit status; `stdout` is its standard output.
+    #[track_caller]
     pub fn check(&self, cmd: &str) -> FactFuture<Check> {
         self.fact(Fact::check(cmd), |v| match v {
             Value::Check(c) => c,

@@ -113,6 +113,20 @@
 //! scripts unchanged; there the per-op `NeedDaemonReload` check is all
 //! there is.
 //!
+//! # Check
+//!
+//! [`run_check`] runs the same trace, windows and prepare, and applies
+//! nothing: [`Executor::apply`] ends where the ops would be sent. On top
+//! of prepare it probes every file op (read-only: a line edit is tried on
+//! a temp copy) and prints `file <path>: will create|change|remove`, with
+//! a unified diff under `--diff` (none for a secret file). A window runs
+//! against the host as it is, so what an earlier window would change is
+//! not there: ops for a user an earlier window creates are not probed and
+//! a `svc` or `unit` probe says it is decided at run time. At an implicit
+//! barrier the engine stops ([`Executor::check_only`]). Each host ends with
+//! `[prepare] N will change, M ops, B blocked` and a `[coverage]` line per
+//! role.
+//!
 //! # Stream
 //!
 //! Each op prints `== host [role] #id desc ==`, its output lines prefixed
@@ -138,7 +152,9 @@ use crate::key::Value;
 use crate::ops::pkg::{PkgMode, Wanted};
 use crate::pool::{Event, Shell};
 use crate::prepare;
-use crate::report::{HostReport, HostStatus, OpRecord, Outcome, Report};
+use crate::report::{
+    CheckInfo, CheckStop, Coverage, FileDiff, HostReport, HostStatus, OpRecord, Outcome, Report,
+};
 use crate::role::Playbook;
 use crate::trace::{Guard, NodeId, OpNode, OpSpec, Principal};
 use crate::trailer::{OpKind, Trailer, wrap};
@@ -185,6 +201,13 @@ pub struct RunOpts {
     /// Write JSONL events here.
     pub log: Option<PathBuf>,
     pub stdout: Stdout,
+}
+
+/// `--check`: trace and prepare, apply nothing ([`run_check`]).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct CheckOpts {
+    /// `--diff`: a unified diff for every file that will change.
+    pub diff: bool,
 }
 
 impl Default for RunOpts {
@@ -364,6 +387,24 @@ pub struct HostExec {
     /// A window had a fetch, so the run's staging directory may exist on
     /// the host: it is removed when the host is done.
     fetch_staged: bool,
+    /// `--check`: what the run has found so far.
+    check: Option<CheckState>,
+}
+
+/// What a `--check` carries from window to window of one host.
+struct CheckState {
+    opts: CheckOpts,
+    info: CheckInfo,
+    /// Trace ops already counted (a window declined for its head comes
+    /// back as two).
+    counted: BTreeSet<NodeId>,
+    /// Users an earlier window's `user` op creates, and which window.
+    future_users: BTreeMap<String, usize>,
+    /// The first window that found a change: what later windows probe
+    /// does not have it yet.
+    first_change: Option<usize>,
+    /// A window was split for a missing downloader: its head installs one.
+    downloader_pending: bool,
 }
 
 /// What a guard can know about a reported op.
@@ -940,7 +981,15 @@ fn last_lines(bytes: &[u8], n: usize) -> String {
 }
 
 impl HostExec {
-    fn new(name: &str, shells: HostShells, sink: Rc<Sink>) -> HostExec {
+    fn new(name: &str, shells: HostShells, sink: Rc<Sink>, check: Option<CheckOpts>) -> HostExec {
+        let check = check.map(|opts| CheckState {
+            opts,
+            info: CheckInfo::default(),
+            counted: BTreeSet::new(),
+            future_users: BTreeMap::new(),
+            first_change: None,
+            downloader_pending: false,
+        });
         HostExec {
             name: name.to_string(),
             sink,
@@ -955,6 +1004,7 @@ impl HostExec {
             starts: Vec::new(),
             suppress: HashMap::new(),
             fetch_staged: false,
+            check,
         }
     }
 
@@ -1145,6 +1195,194 @@ impl HostExec {
         self.sink.event(json!({"ev":"window_split","host":self.name,
             "window":sp.window,"after":sp.after,"tool":sp.tool,"consumer":sp.consumer}));
         self.report.splits.push(sp);
+    }
+
+    /// One `== host [prepare] <text> ==` line.
+    fn say(&self, text: String) {
+        self.sink
+            .line(&format!("== {} [prepare] {text} ==", self.name));
+    }
+
+    /// A check counts each trace op once, for the summary and per role for
+    /// `[coverage]`.
+    fn check_count(&mut self, window: &Window) {
+        let Some(ck) = &mut self.check else {
+            return;
+        };
+        for w in &window.ops {
+            for m in &w.members {
+                if !ck.counted.insert(m.id) {
+                    continue;
+                }
+                ck.info.ops += 1;
+                let role = if m.role.is_empty() {
+                    "(no role)"
+                } else {
+                    m.role.as_str()
+                };
+                let i = match ck.info.coverage.iter().position(|c| c.role == role) {
+                    Some(i) => i,
+                    None => {
+                        ck.info.coverage.push(Coverage {
+                            role: role.to_string(),
+                            ops: 0,
+                            reversible: 0,
+                        });
+                        ck.info.coverage.len() - 1
+                    }
+                };
+                let c = &mut ck.info.coverage[i];
+                c.ops += 1;
+                if w.node.spec.has_inverse() {
+                    c.reversible += 1;
+                }
+            }
+        }
+    }
+
+    /// A check cannot open the shell of a user an earlier window creates:
+    /// that window's ops for the user are not probed, and the line says so.
+    fn check_filter(&mut self, window: &mut Window) {
+        let Some(ck) = &self.check else {
+            return;
+        };
+        let future = ck.future_users.clone();
+        let mut noted: Vec<String> = Vec::new();
+        window.ops.retain(|o| match &o.node.run_as.principal {
+            Principal::User(u) if future.contains_key(u) => {
+                if !noted.contains(u) {
+                    noted.push(u.clone());
+                }
+                false
+            }
+            _ => true,
+        });
+        for u in noted {
+            self.say(format!(
+                "window {}: ops as {u} not checked: the user does not exist yet (window {} creates it)",
+                window.number, future[&u]
+            ));
+        }
+    }
+
+    /// Has a `--check` found a change in a window before `number`?
+    fn check_earlier(&self, number: usize) -> bool {
+        self.check
+            .as_ref()
+            .is_some_and(|c| c.first_change.is_some_and(|w| w < number))
+    }
+
+    /// What prepare found for a window, for the check's summary, and the
+    /// users its `user` ops will create.
+    fn check_note_prepared(&mut self, window: &Window, will: &crate::prepare::Prepared) {
+        let Some(ck) = &mut self.check else {
+            return;
+        };
+        let n = will_pending(will);
+        ck.info.pending += n;
+        if n > 0 && ck.first_change.is_none() {
+            ck.first_change = Some(window.number);
+        }
+        for w in &window.ops {
+            let OpSpec::User(u) = &w.node.spec else {
+                continue;
+            };
+            let secret = format!("{} <secret>", u.name);
+            if will.will_create.iter().any(|c| {
+                c.kind == "user" && c.detail.is_none() && (c.name == u.name || c.name == secret)
+            }) {
+                ck.future_users
+                    .entry(u.name.clone())
+                    .or_insert(window.number);
+            }
+        }
+    }
+
+    /// The end of a window of a check: the file lines (and diffs), then
+    /// the `sh` ops prepare cannot decide and the guarded ops.
+    fn check_window_end(&mut self, window: &Window, files: Vec<prepare::FileFinding>) {
+        let name = self.name.clone();
+        let mut pending = 0;
+        for f in files {
+            let Some(detail) = f.detail.clone() else {
+                continue;
+            };
+            pending += 1;
+            let c = crate::report::WillCreate {
+                window: window.number,
+                kind: "file".to_string(),
+                name: f.name(),
+                detail: Some(detail),
+            };
+            self.say(c.line());
+            self.sink.event(json!({"ev":"will_create","host":name,
+                "window":c.window,"kind":c.kind,"name":c.name,"detail":c.detail}));
+            if let Some(d) = &f.diff {
+                for l in d.lines() {
+                    self.sink.line(&format!("{name} | {l}"));
+                }
+                self.sink.event(
+                    json!({"ev":"file_diff","host":name,"window":window.number,"path":f.path,"diff":d}),
+                );
+                self.report.diffs.push(FileDiff {
+                    window: window.number,
+                    path: f.path.clone(),
+                    diff: d.clone(),
+                });
+            }
+            self.report.will_create.push(c);
+        }
+        let mut unchecked = 0;
+        for w in &window.ops {
+            let svc_action = matches!(&w.node.spec, OpSpec::Svc(s) if s.action().is_some());
+            match (&w.node.guard, &w.node.spec) {
+                (Some(g), _) if !svc_action => {
+                    // Settled by what the check found before: nothing to say.
+                    if decide(g, &self.known).is_none() {
+                        let m = w.members.first();
+                        let subject = m.map_or_else(|| describe(&w.node), |m| subject(w, m));
+                        self.say(format!(
+                            "{subject}: runs only if {}",
+                            guard_phrase(g, &self.subjects)
+                        ));
+                    }
+                }
+                (None, OpSpec::Shell(s)) => {
+                    let always =
+                        s.unless.is_none() && s.creates.is_none() && s.changed_if.is_none();
+                    let d = describe(&w.node);
+                    let cmd = d.strip_prefix("sh ").unwrap_or(&d).to_string();
+                    let (verb, c) = if always {
+                        pending += 1;
+                        ("will run", "will run")
+                    } else {
+                        unchecked += 1;
+                        (
+                            "not checked",
+                            "not checked: its own test decides at run time",
+                        )
+                    };
+                    let line = crate::report::WillCreate {
+                        window: window.number,
+                        kind: "sh".to_string(),
+                        name: cmd,
+                        detail: Some(c.to_string()),
+                    };
+                    self.say(line.line());
+                    self.sink.event(json!({"ev":"will_create","host":name,
+                        "window":line.window,"kind":line.kind,"name":line.name,"detail":verb}));
+                    self.report.will_create.push(line);
+                }
+                _ => {}
+            }
+        }
+        if let Some(ck) = &mut self.check {
+            ck.info.pending += pending;
+            ck.info.unchecked += unchecked;
+            if pending > 0 && ck.first_change.is_none() {
+                ck.first_change = Some(window.number);
+            }
+        }
     }
 
     fn block(&mut self, why: String) {
@@ -1481,18 +1719,48 @@ impl HostExec {
 
     fn finish(mut self, res: Result<(), EngineError>) -> (HostReport, HostShells) {
         let mut rep = std::mem::replace(&mut self.report, HostReport::new(&self.name));
+        let stopped = match &res {
+            Err(EngineError::CheckStopped { site, reads }) => Some(CheckStop {
+                site: site.map(|s| s.to_string()),
+                reads: reads.iter().map(|k| k.to_string()).collect(),
+            }),
+            _ => None,
+        };
         if let Err(e) = res
             && self.verdict.is_none()
+            && stopped.is_none()
         {
             self.verdict = Some(HostStatus::Error(e.to_string()));
         }
-        rep.status = self.verdict.take().unwrap_or_else(|| {
-            if rep.ops.iter().any(|o| o.changed) {
-                HostStatus::Changed
-            } else {
-                HostStatus::Ok
-            }
+        let check = self.check.take().map(|mut ck| {
+            ck.info.stopped = stopped;
+            ck.info
         });
+        rep.status = self.verdict.take().unwrap_or_else(|| match &check {
+            Some(c) if c.pending > 0 || c.stopped.is_some() => HostStatus::Changed,
+            Some(_) => HostStatus::Ok,
+            None if rep.ops.iter().any(|o| o.changed) => HostStatus::Changed,
+            None => HostStatus::Ok,
+        });
+        if let Some(info) = check {
+            let name = self.name.clone();
+            self.say(info.summary(!rep.status.is_success()));
+            for c in &info.coverage {
+                self.sink
+                    .line(&format!("== {name} [coverage] {} ==", c.line()));
+            }
+            if let Some(stop) = &info.stopped {
+                self.say(format!(
+                    "a read of {} needs changes this check cannot apply: nothing after it was traced or checked",
+                    stop.reads.join(", ")
+                ));
+            }
+            self.sink.event(json!({"ev":"check","host":name,
+                "pending":info.pending,"ops":info.ops,"unchecked":info.unchecked,
+                "coverage":info.coverage.iter().map(|c| c.line()).collect::<Vec<_>>(),
+                "stopped":info.stopped.as_ref().map(CheckStop::line)}));
+            rep.check = Some(info);
+        }
         let failed: Vec<String> = match &rep.status {
             HostStatus::Failed { role, .. } => role.split(", ").map(str::to_string).collect(),
             _ => vec![],
@@ -1523,12 +1791,41 @@ fn splits_at(window: &Window, s: &Split, no_downloader: &[NodeId]) -> bool {
         })
 }
 
+/// How many findings of a window's prepare say something will change.
+/// Not counted: `no systemctl: skipped`, a restart that waits on a change
+/// already counted, and the daemon-reload that follows a unit.
+fn will_pending(w: &crate::prepare::Prepared) -> usize {
+    let creates = w
+        .will_create
+        .iter()
+        .filter(|c| match c.kind.as_str() {
+            "systemd" => false,
+            "svc" => {
+                let d = c.detail.as_deref().unwrap_or("");
+                d != "no systemctl: skipped" && !d.contains(" if ")
+            }
+            _ => true,
+        })
+        .count();
+    w.will_install.len()
+        + w.will_remove.len()
+        + w.will_change.len()
+        + w.local_notes.len()
+        + w.git_notes.len()
+        + w.resource_notes.len()
+        + creates
+}
+
 /// The skip trailer an op emits instead of running once the host halted.
 fn skip_script(op: &OpNode, id: usize, nonce: &str) -> String {
     wrap(op.spec.op_kind(), "rc=0\nskipped=1\n", id, nonce)
 }
 
 impl Executor for HostExec {
+    fn check_only(&self) -> bool {
+        self.check.is_some()
+    }
+
     async fn read_facts(
         &mut self,
         host: &HostInfo,
@@ -1620,6 +1917,8 @@ impl Executor for HostExec {
             self.block(why.clone());
             return Err(why);
         }
+        // A check counts every op once, then drops what it cannot probe.
+        self.check_count(&window);
         let kind = match window.kind {
             WindowKind::NonMutating => "non-mutating",
             WindowKind::ImplicitBarrier => "implicit barrier",
@@ -1643,19 +1942,47 @@ impl Executor for HostExec {
                 self.fetch_staged = true;
             }
             // Prepare: nothing is sent to be applied until all of it passes.
-            let prepared = prepare::prepare_window(
+            self.check_filter(&mut window);
+            let earlier = self.check_earlier(window.number);
+            let mut prepared = prepare::prepare_window(
                 &mut self.shells,
                 &window,
                 &host.os,
                 &mut self.users_ok,
                 &mut self.seq,
+                earlier,
             )
             .await;
             if let (Err(r), Some(s)) = (&prepared, &window.split)
                 && splits_at(&window, s, &r.no_downloader)
             {
                 self.split(&window, s);
+                if let Some(ck) = &mut self.check {
+                    ck.downloader_pending = true;
+                }
                 return Ok(Applied::Head(s.at + 1));
+            }
+            // A check does not install the downloader an earlier window
+            // would: the downloads that wait for it are not checked.
+            if let Err(r) = &prepared
+                && !r.no_downloader.is_empty()
+                && self.check.as_ref().is_some_and(|c| c.downloader_pending)
+            {
+                let held: Vec<NodeId> = r.no_downloader.clone();
+                window.ops.retain(|o| !held.contains(&o.id));
+                self.say(format!(
+                    "window {}: downloads not checked: neither curl nor wget is on the host and an earlier window installs one",
+                    window.number
+                ));
+                prepared = prepare::prepare_window(
+                    &mut self.shells,
+                    &window,
+                    &host.os,
+                    &mut self.users_ok,
+                    &mut self.seq,
+                    earlier,
+                )
+                .await;
             }
             if let Ok(will) = &prepared {
                 crate::resource::mark_skipped(&mut window, &will.resource_skip);
@@ -1679,13 +2006,48 @@ impl Executor for HostExec {
             }
             return Ok(Applied::All);
         };
+        // A check probes the files too, read-only, before the restarts are
+        // phrased: a file known to stay as it is settles a guard on it.
+        let mut file_found: Vec<prepare::FileFinding> = Vec::new();
+        if self.check.is_some() && prepared.is_ok() {
+            let diff = self.check.as_ref().is_some_and(|c| c.opts.diff);
+            match prepare::check_files(&mut self.shells, window, diff, &mut self.seq).await {
+                Ok(f) => file_found = f,
+                Err(why) => {
+                    self.block(why.clone());
+                    return Err(why);
+                }
+            }
+            for f in &file_found {
+                if let Some(w) = window.ops.iter().find(|o| o.id == f.id) {
+                    let (o, c) = if f.detail.is_some() {
+                        (Outcome::Changed, true)
+                    } else {
+                        (Outcome::Unchanged, false)
+                    };
+                    self.remember(w, o, c, None);
+                }
+            }
+        }
         let actions = self.and_not_starts(window);
         match prepared {
             Ok(mut will) => {
+                let earlier = self.check_earlier(window.number);
+                if earlier {
+                    for c in &mut will.will_create {
+                        if let Some(d) = &mut c.detail {
+                            *d = d.replace(
+                                "this window's earlier ops",
+                                "the earlier windows' changes",
+                            );
+                        }
+                    }
+                }
                 will.will_create.extend(actions);
                 if let Some(l) = self.flush_line(window, &will.will_create).await {
                     will.will_create.push(l);
                 }
+                self.check_note_prepared(window, &will);
                 for w in will.will_install {
                     self.sink.line(&format!(
                         "== {} [prepare] window {} will install ({}): {} ==",
@@ -1717,7 +2079,11 @@ impl Executor for HostExec {
                     self.sink
                         .line(&format!("== {} [prepare] {n} ==", self.name));
                 }
-                if let Err(why) = self.stream_copies(&will.copies).await {
+                // A check does not stream the controller's files; the lines
+                // above already say which differ.
+                if self.check.is_none()
+                    && let Err(why) = self.stream_copies(&will.copies).await
+                {
                     self.block(why.clone());
                     return Err(why);
                 }
@@ -1753,6 +2119,10 @@ impl Executor for HostExec {
                 self.block(r.why.clone());
                 return Err(r.why);
             }
+        }
+        if self.check.is_some() {
+            self.check_window_end(window, file_found);
+            return Ok(Applied::All);
         }
 
         // Consecutive ops on the same principal's shell form a run.
@@ -2057,11 +2427,13 @@ async fn run_one<V: 'static>(
     pb_run: fn(Host<V>) -> crate::role::PlaybookFuture,
     spec: HostSpec<V>,
     sink: Rc<Sink>,
+    check: Option<CheckOpts>,
 ) -> HostReport {
     let name = spec.name.clone();
     sink.event(json!({"ev":"host_open","host":name}));
     let blocked = |why: String| {
         let mut r = HostReport::new(&name);
+        r.check = check.map(|_| CheckInfo::default());
         r.status = HostStatus::Blocked(why);
         sink.event(
             json!({"ev":"host_status","host":name,"status":"blocked","detail":r.status_detail()}),
@@ -2099,7 +2471,7 @@ async fn run_one<V: 'static>(
         root: shell,
         users: BTreeMap::new(),
     };
-    let mut engine = Engine::new(HostExec::new(&name, shells, sink.clone()));
+    let mut engine = Engine::new(HostExec::new(&name, shells, sink.clone(), check));
     let res = engine.run_host(&pb, host).await;
     engine.executor.cleanup_stage().await;
     let (rep, shells) = engine.executor.finish(res);
@@ -2121,6 +2493,27 @@ impl HostReport {
 /// Run `playbook` on every host concurrently and return the report. Builds
 /// its own current-thread runtime, so call it from plain (non-async) code.
 pub fn run<V: 'static>(playbook: &Playbook<V>, hosts: Vec<HostSpec<V>>, opts: RunOpts) -> Report {
+    run_inner(playbook, hosts, opts, None)
+}
+
+/// [`run`] as a dry run: trace and prepare every host, apply nothing (see
+/// "Check" in the module doc). The report's [`Report::exit_code`] is 0
+/// nothing to change, 2 changes pending, 1 a host blocked.
+pub fn run_check<V: 'static>(
+    playbook: &Playbook<V>,
+    hosts: Vec<HostSpec<V>>,
+    opts: RunOpts,
+    check: CheckOpts,
+) -> Report {
+    run_inner(playbook, hosts, opts, Some(check))
+}
+
+fn run_inner<V: 'static>(
+    playbook: &Playbook<V>,
+    hosts: Vec<HostSpec<V>>,
+    opts: RunOpts,
+    check: Option<CheckOpts>,
+) -> Report {
     crate::secret::begin_run();
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -2146,7 +2539,7 @@ pub fn run<V: 'static>(playbook: &Playbook<V>, hosts: Vec<HostSpec<V>>, opts: Ru
     let reports = rt.block_on(local.run_until(async {
         let tasks: Vec<_> = hosts
             .into_iter()
-            .map(|h| tokio::task::spawn_local(run_one(pb_name, pb_run, h, sink.clone())))
+            .map(|h| tokio::task::spawn_local(run_one(pb_name, pb_run, h, sink.clone(), check)))
             .collect();
         let mut out = Vec::new();
         for (t, name) in tasks.into_iter().zip(&names) {

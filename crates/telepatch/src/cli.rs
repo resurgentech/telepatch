@@ -1,13 +1,19 @@
 //! The playbook runner: a playbook repo's own binary calls [`main`] with its
 //! playbooks. Subcommands: `list`, `plan <name> [--distro D] [--vars f]`,
 //! `run <name> (--local | --host <dest>...) [--ssh-key <path>]
-//! [--ssh-option K=V]... [--vars f] [--log f]`.
+//! [--ssh-option K=V]... [--vars f] [--log f] [--check [--diff]]`.
 //!
 //! `run` takes exactly one of `--local` (this machine) and `--host`
 //! (repeatable; each `<dest>` goes to `ssh` verbatim, `user@host` or
 //! `ssh://user@host:port`, and is the host's name in the report). Hosts
 //! run in parallel, each with the same vars. `--ssh-key` and `--ssh-option`
 //! apply to every `--host` and need at least one.
+//!
+//! `--check` traces and prepares every host and applies nothing
+//! ([`crate::executor::run_check`]); `--diff` (only with `--check`) adds a
+//! unified diff per file that would change, none for a secret file. The
+//! exit code is then 0 nothing to change, 2 changes pending, 1 a host
+//! blocked. A usage error also exits 2: it prints usage, not a check.
 //!
 //! Vars are TOML layered into the playbook repo's `V` per role section
 //! (see [`crate::vars`]); without `--vars` and the playbook's defaults, `V::default()`.
@@ -20,7 +26,7 @@ use std::rc::Rc;
 use clap::{ArgGroup, Parser, Subcommand};
 use serde::de::DeserializeOwned;
 
-use crate::executor::{HostSpec, RunOpts, Stdout, Target, run};
+use crate::executor::{CheckOpts, HostSpec, RunOpts, Stdout, Target, run, run_check};
 use crate::facts::os::Os;
 use crate::role::Playbook;
 use crate::secret::SecretBackend;
@@ -76,6 +82,12 @@ enum Cmd {
         /// Write JSONL events here.
         #[arg(long)]
         log: Option<PathBuf>,
+        /// Trace and prepare, apply nothing.
+        #[arg(long)]
+        check: bool,
+        /// With `--check`: a unified diff for every file that will change.
+        #[arg(long, requires = "check")]
+        diff: bool,
     },
 }
 
@@ -214,6 +226,8 @@ fn dispatch<V: DeserializeOwned + Default + 'static>(
             host: dests,
             ssh_key,
             ssh_option,
+            check,
+            diff,
             ..
         } => {
             let pb = match find(&name) {
@@ -259,7 +273,12 @@ fn dispatch<V: DeserializeOwned + Default + 'static>(
                     }
                 })
             }));
-            let report = run(pb, hosts, RunOpts { log, stdout });
+            let opts = RunOpts { log, stdout };
+            let report = if check {
+                run_check(pb, hosts, opts, CheckOpts { diff })
+            } else {
+                run(pb, hosts, opts)
+            };
             (format!("\n{}", report.render()), report.exit_code())
         }
     }

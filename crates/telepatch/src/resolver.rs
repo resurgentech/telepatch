@@ -19,6 +19,8 @@ pub enum Answer {
 pub struct Waiting {
     pub ticket: u64,
     pub query: FactQuery,
+    /// The role's call of the read, when known.
+    pub site: Option<crate::trace::Site>,
 }
 
 /// A read answered without a round trip, for the engine's observers.
@@ -98,10 +100,14 @@ impl Resolver {
     }
 
     /// Register a read that needs a round trip; returns its ticket.
-    pub(crate) fn register(&mut self, query: FactQuery) -> u64 {
+    pub(crate) fn register(&mut self, query: FactQuery, site: crate::trace::Site) -> u64 {
         let ticket = self.next_ticket;
         self.next_ticket += 1;
-        self.waiting.push(Waiting { ticket, query });
+        self.waiting.push(Waiting {
+            ticket,
+            query,
+            site: Some(site),
+        });
         ticket
     }
 
@@ -180,6 +186,7 @@ mod tests {
         let w = Waiting {
             ticket: 0,
             query: query.clone(),
+            site: None,
         };
         r.fulfil(&w, Value::Exists(false));
         assert!(matches!(
@@ -203,6 +210,7 @@ mod tests {
             &Waiting {
                 ticket: 0,
                 query: query.clone(),
+                site: None,
             },
             Value::Exists(true),
         );

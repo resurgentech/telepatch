@@ -310,6 +310,84 @@ impl DaemonReload {
     }
 }
 
+/// One role's `[coverage]`: its ops, and how many have an inverse
+/// ([`crate::trace::OpSpec::has_inverse`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Coverage {
+    /// The role as the report names it (nested roles joined with ` > `;
+    /// `(no role)` outside any).
+    pub role: String,
+    pub ops: usize,
+    pub reversible: usize,
+}
+
+impl Coverage {
+    /// `docker: 6 ops, 6 reversible`.
+    pub fn line(&self) -> String {
+        format!(
+            "{}: {} ops, {} reversible",
+            self.role, self.ops, self.reversible
+        )
+    }
+}
+
+/// A unified diff of one file a `--check --diff` found would change. Never
+/// made for a secret file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileDiff {
+    pub window: usize,
+    pub path: String,
+    pub diff: String,
+}
+
+/// Where a `--check` stopped tracing: at a fact read that needs the
+/// effect of a pending change (an implicit barrier), which a dry run
+/// cannot apply.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CheckStop {
+    /// `file:line` of the read, when known.
+    pub site: Option<String>,
+    /// The keys the read asked about (`file:/etc/x`).
+    pub reads: Vec<String>,
+}
+
+impl CheckStop {
+    /// `check stopped at src/roles/x.rs:12: this read needs the changes above`.
+    pub fn line(&self) -> String {
+        match &self.site {
+            Some(s) => format!("check stopped at {s}: this read needs the changes above"),
+            None => "check stopped: this read needs the changes above".to_string(),
+        }
+    }
+}
+
+/// What a `--check` found on one host.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct CheckInfo {
+    /// Trace ops seen (up to the stop, if any).
+    pub ops: usize,
+    /// Findings that say something will change: one per printed
+    /// `will ...` line, not per op.
+    pub pending: usize,
+    /// `sh` ops whose own test (`unless`, `creates`, `changed_if`) decides
+    /// at run time: not checked.
+    pub unchecked: usize,
+    pub coverage: Vec<Coverage>,
+    pub stopped: Option<CheckStop>,
+}
+
+impl CheckInfo {
+    /// `3 will change, 12 ops, 0 blocked`.
+    pub fn summary(&self, blocked: bool) -> String {
+        format!(
+            "{} will change, {} ops, {} blocked",
+            self.pending,
+            self.ops,
+            usize::from(blocked)
+        )
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HostReport {
     pub name: String,
@@ -338,6 +416,10 @@ pub struct HostReport {
     pub daemon_reloads: Vec<DaemonReload>,
     /// Each window prepare split for a missing downloader, in order.
     pub splits: Vec<WindowSplit>,
+    /// A unified diff per file that will change (`--check --diff`).
+    pub diffs: Vec<FileDiff>,
+    /// Set by a `--check` run.
+    pub check: Option<CheckInfo>,
 }
 
 impl HostReport {
@@ -358,6 +440,8 @@ impl HostReport {
             sh_sites: Vec::new(),
             daemon_reloads: Vec::new(),
             splits: Vec::new(),
+            diffs: Vec::new(),
+            check: None,
         }
     }
 
@@ -372,13 +456,46 @@ pub struct Report {
 }
 
 impl Report {
-    /// 0 iff every host is `ok` or `changed`.
+    /// 0 iff every host is `ok` or `changed`. For a `--check`: 1 when a
+    /// host is blocked (or failed to open or trace), else 2 when any host
+    /// has changes pending, else 0.
     pub fn exit_code(&self) -> i32 {
-        if self.hosts.iter().all(|h| h.status.is_success()) {
-            0
-        } else {
+        if !self.hosts.iter().all(|h| h.status.is_success()) {
             1
+        } else if self.is_check() && self.hosts.iter().any(|h| h.status == HostStatus::Changed) {
+            2
+        } else {
+            0
         }
+    }
+
+    /// Is this the report of a `--check`?
+    pub fn is_check(&self) -> bool {
+        self.hosts.iter().any(|h| h.check.is_some())
+    }
+
+    /// What a `--check` adds to the lines it streamed: per host what
+    /// blocked it, and where it stopped (the last line of that host).
+    fn render_check(&self) -> String {
+        let mut out = String::new();
+        for h in &self.hosts {
+            match &h.status {
+                HostStatus::Blocked(why) => {
+                    let _ = writeln!(out, "{}: blocked: {why}", h.name);
+                }
+                HostStatus::Error(why) => {
+                    let _ = writeln!(out, "{}: error: {why}", h.name);
+                }
+                HostStatus::Failed { role, op, rc, .. } => {
+                    let _ = writeln!(out, "{}: role {role} failed: {op} (rc {rc})", h.name);
+                }
+                _ => {}
+            }
+            if let Some(stop) = h.check.as_ref().and_then(|c| c.stopped.as_ref()) {
+                let _ = writeln!(out, "{}: {}", h.name, stop.line());
+            }
+        }
+        out
     }
 
     /// The per-host status table.
@@ -432,6 +549,9 @@ impl Report {
     /// host that did not succeed, what went wrong: the failed op's last output lines, skipped roles, the
     /// blocking reason.
     pub fn render(&self) -> String {
+        if self.is_check() {
+            return self.render_check();
+        }
         let mut out = self.table();
         for h in &self.hosts {
             for sp in &h.splits {

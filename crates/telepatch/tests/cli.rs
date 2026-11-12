@@ -631,3 +631,44 @@ fn no_snapshot_carries_a_run_id() {
         hits.join("\n")
     );
 }
+
+// ---- run --check ----
+
+#[test]
+fn check_applies_nothing_on_any_host_and_exits_2() {
+    let d = tempfile::tempdir().unwrap();
+    let v = host_vars(d.path());
+    let stub = Stub::new();
+    let (out, code) = go_ssh(
+        &stub,
+        &[
+            "run", "greet", "--host", "bot@one", "--host", "bot@two", "--vars", &v, "--check",
+            "--diff",
+        ],
+    );
+    assert_eq!(code, 2, "{out}");
+    for h in ["bot@one", "bot@two"] {
+        assert!(
+            out.contains(&format!("== {h} [prepare] file "))
+                && out.contains("greeting: will create"),
+            "{h}: {out}"
+        );
+        assert!(
+            out.contains(&format!("== {h} [coverage] greet: 2 ops, 0 reversible ==")),
+            "{h}: {out}"
+        );
+    }
+    assert!(!d.path().join("out/greeting").exists(), "{out}");
+    // The sh! is the one `greet` op prepare cannot make "no change".
+    assert!(out.contains("sh echo hi: will run"), "{out}");
+}
+
+#[test]
+fn diff_alone_is_a_usage_error_and_check_takes_no_target_changes() {
+    let (out, code) = go(&["run", "greet", "--local", "--diff"]);
+    assert_eq!(code, 2);
+    assert!(out.contains("--check"), "{out}");
+    let (out, code) = go(&["run", "greet", "--check"]);
+    assert_eq!(code, 2);
+    assert!(out.contains("--local") && out.contains("--host"), "{out}");
+}

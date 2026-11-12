@@ -8,6 +8,11 @@
 //! again. Explicit `barrier()` nodes never force execution; they only fence
 //! hoisting of non-mutating nodes (and are edges for the optimizer, T8).
 //!
+//! A check-only executor ([`Executor::check_only`]) applies nothing, so an
+//! implicit barrier cannot be crossed: the engine hands the window before
+//! it to the executor (prepare runs for it) and stops tracing with
+//! [`EngineError::CheckStopped`].
+//!
 //! A window whose op installs `curl` or `wget` before an op that downloads
 //! carries a [`Split`]. The executor may decline such a window for its head
 //! ([`Applied::Head`]) when prepare finds no downloader on the host; the
@@ -28,7 +33,7 @@ use crate::optimize::{Item, optimize};
 use crate::plan::node_roles;
 use crate::resolver::Resolved;
 use crate::role::Playbook;
-use crate::trace::{Node, NodeId, OpNode, OpSpec, Principal};
+use crate::trace::{Node, NodeId, OpNode, OpSpec, Principal, Site};
 
 /// The host an executor call is about.
 #[derive(Debug, Clone)]
@@ -239,6 +244,15 @@ pub enum EngineError {
     /// The playbook future is pending on something that is not a fact read.
     Stalled,
     Exec(String),
+    /// A check-only run ([`Executor::check_only`]) reached an implicit
+    /// barrier: a fact read that needs the effect of a pending change. The
+    /// window before it was prepared; nothing after it was traced.
+    CheckStopped {
+        /// The role's call of the read (else the last pending change it
+        /// waits for).
+        site: Option<Site>,
+        reads: Vec<Key>,
+    },
 }
 
 impl std::fmt::Display for EngineError {
@@ -249,6 +263,10 @@ impl std::fmt::Display for EngineError {
                 f.write_str("playbook is pending on something other than a fact")
             }
             EngineError::Exec(e) => write!(f, "executor error: {e}"),
+            EngineError::CheckStopped { site, .. } => match site {
+                Some(s) => write!(f, "check stopped at {s}: this read needs the changes above"),
+                None => f.write_str("check stopped: this read needs the changes above"),
+            },
         }
     }
 }
@@ -272,6 +290,13 @@ pub trait Executor {
     async fn apply(&mut self, host: &HostInfo, window: &Window) -> Result<Applied, String>;
 
     fn observe(&mut self, _host: &HostInfo, _obs: &Observation) {}
+
+    /// A dry run: [`Executor::apply`] only prepares and reports, it never
+    /// changes the host. The engine then stops at the first implicit
+    /// barrier instead of reading past changes that were not made.
+    fn check_only(&self) -> bool {
+        false
+    }
 }
 
 pub struct Engine<E: Executor> {
@@ -352,7 +377,8 @@ impl<E: Executor> Engine<E> {
                             queries.push(w.query.clone());
                         }
                     }
-                    self.block_round(&info, &host, &mut window, &queries, &mut carry)
+                    let site = waiting.iter().find_map(|w| w.site);
+                    self.block_round(&info, &host, &mut window, &queries, site, &mut carry)
                         .await?;
                     let values = self.executor.read_facts(&info, window, &queries).await;
                     for w in &waiting {
@@ -405,12 +431,15 @@ impl<E: Executor> Engine<E> {
     }
 
     /// Everything that must run before the round trip for `queries`.
+    /// `site` is the role's call of the first read, for a check that stops
+    /// here.
     async fn block_round<V>(
         &mut self,
         info: &HostInfo,
         host: &Host<V>,
         window: &mut usize,
         queries: &[FactQuery],
+        site: Option<Site>,
         carry: &mut Carry,
     ) -> Result<(), EngineError> {
         let hoist = non_mutating_ready(host);
@@ -460,6 +489,16 @@ impl<E: Executor> Engine<E> {
             );
             self.apply(info, host, window, WindowKind::ImplicitBarrier, ids, carry)
                 .await?;
+            if self.executor.check_only() {
+                // The read's own call; the last change it waits for when
+                // the read has none recorded.
+                let site = site.or_else(|| match host.trace_cell().borrow().nodes.get(last.0) {
+                    Some(Node::Op(op)) => op.site,
+                    _ => None,
+                });
+                let reads = queries.iter().map(|q| q.fact.effect_key()).collect();
+                return Err(EngineError::CheckStopped { site, reads });
+            }
         }
         Ok(())
     }
