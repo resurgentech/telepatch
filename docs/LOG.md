@@ -997,3 +997,22 @@ are appended, never edited in; a hook refuses rewrites.
   check does not see Provides. Four Ubuntu plan snapshots move on that
   name. The first live gate (`/tmp/t86f-idem.log`) was CHANGED 1 on it.
 - Commits: tp_basic 009c780
+
+## 2026-11-11 — T87 close Goal 7 on the evidence already in hand
+
+- No new proof run. The user stopped `just docker-vm test-acceptance`
+  (exit 143). VM `tp-docker-20261112-002818` was already deleted. The
+  partial log is neither a pass nor a fail: six of seven cells gated
+  identical (`/tmp/t87-accept.log`); `ubuntu2604 latest_kernel_build`
+  was killed before its gate, during the telepatch image. Every cell's
+  dist stamp is tp_basic `3db6094` dirty, not clean `009c780`.
+- Confirmed, not re-run: `/tmp/t87-plans` 104 plan pairs identical
+  (PLAN_FAIL=0; the 104 `.err` sidecars match too); `/tmp/t87-ws.log`
+  WS_EXIT:0 (`tests/note.rs` 7 passed). Each
+  `container/latest_kernel_build` plan has one `pkg[rustup]` op carrying
+  `rust-src`. T86e `/tmp/t86e-live3.log` 8/8; T86d `/tmp/t86d-vm.log`
+  and `/tmp/t86d-services.log` PASS; T86f `/tmp/t86f-idem2.log` CHANGED 0
+  (tp_basic `009c780`, LOG `f33c2de`). Status rows, the design-note pkg
+  status and PORT.md `Playbook::new` stay `cc84358`. Acceptance scripts
+  not deleted.
+- Commits: telepatch (this LOG commit); `cc84358` unchanged
