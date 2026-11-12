@@ -108,6 +108,20 @@ test-live-fetch:
     bash ../tp_basic/scripts/lib/docker-guard.sh
     cargo test -p telepatch --test live -- --ignored --nocapture fetch_
 
+# Live: OpenBao dev server in a plain debian:13 container on the docker VM.
+# Inherited BAO_* and VAULT_* are dropped here; the test sets its own.
+# Nothing reads .env. Needs docker (the VM's daemon) and the network.
+test-live-openbao:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    bash ../tp_basic/scripts/lib/docker-guard.sh
+    while IFS='=' read -r name _; do
+        case $name in
+            BAO_*|VAULT_*) unset "$name" ;;
+        esac
+    done < <(env)
+    cargo test -p telepatch-openbao --test live -- --ignored --nocapture live_
+
 # Run a docker recipe of this justfile against the daemon of a fresh 1 GiB
 # tp-* VM, deleted afterwards (../tp_basic/scripts/docker-vm.sh). Every docker
 # recipe refuses to run outside it (exit 2). `just docker-vm test-live-os`
