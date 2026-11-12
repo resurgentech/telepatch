@@ -1,0 +1,13 @@
+[package]
+name = "telepatch-openbao"
+description = "OpenBao secret backend for telepatch"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+telepatch = { workspace = true }
+ureq = { version = "3.5.1", default-features = false, features = ["rustls"] }
+serde_json = "1"
+zeroize = "1"

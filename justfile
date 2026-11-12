@@ -5,6 +5,9 @@ test:
 lint:
     cargo clippy --workspace --all-targets -- -D warnings
     cargo fmt --all --check
+    # The engine crate stays free of HTTP and TLS. ureq and rustls live in
+    # telepatch-openbao only.
+    ! cargo tree -p telepatch --prefix none -e normal,build | grep -E '^(ureq|rustls) '
 
 # tp check-understanding passes the good fixture and fails the bad one.
 skill-check:

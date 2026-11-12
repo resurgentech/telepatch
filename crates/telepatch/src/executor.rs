@@ -1544,7 +1544,12 @@ impl Executor for HostExec {
 
     async fn apply(&mut self, host: &HostInfo, window: &Window) -> Result<Applied, String> {
         let mut window = window.clone();
-        prepare::resolve_secrets(&mut window)?;
+        let resolved = prepare::resolve_secrets(&mut window);
+        for w in crate::secret::backend_warnings() {
+            self.sink
+                .line(&format!("== {} [prepare] {w} ==", self.name));
+        }
+        resolved?;
         let window = &window;
         let kind = match window.kind {
             WindowKind::NonMutating => "non-mutating",

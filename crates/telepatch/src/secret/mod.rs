@@ -118,7 +118,7 @@ pub(crate) fn with_render<R>(reveal: bool, capture: bool, f: impl FnOnce() -> R)
 struct Store {
     extra: Vec<Box<dyn SecretBackend>>,
     /// `(scheme, path, field)` -> the backend's result, without the var or role.
-    cache: HashMap<(String, String, String), Result<SecretValue, String>>,
+    cache: HashMap<(String, String, String), Result<SecretValue, SecretError>>,
 }
 
 /// Drop guard: pop one path segment.
@@ -278,16 +278,33 @@ impl fmt::Debug for SecretRef {
 }
 
 /// A backend error. The message names a path or a field, never a value.
+///
+/// `bare` errors are already the whole prepare line (a missing token, an
+/// expired token). Anything else is wrapped with the var and the role.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SecretError {
     message: String,
+    bare: bool,
 }
 
 impl SecretError {
     pub fn new(message: impl Into<String>) -> SecretError {
         SecretError {
             message: message.into(),
+            bare: false,
         }
+    }
+
+    /// A prepare line that is not tied to one var.
+    pub fn bare(message: impl Into<String>) -> SecretError {
+        SecretError {
+            message: message.into(),
+            bare: true,
+        }
+    }
+
+    pub fn is_bare(&self) -> bool {
+        self.bare
     }
 }
 
@@ -303,6 +320,11 @@ impl std::error::Error for SecretError {}
 pub trait SecretBackend {
     fn scheme(&self) -> &'static str;
     fn resolve(&self, refs: &[SecretRef]) -> Vec<Result<SecretValue, SecretError>>;
+
+    /// Lines prepare prints before any host change. Empty for the built-ins.
+    fn warnings(&self) -> Vec<String> {
+        Vec::new()
+    }
 }
 
 #[derive(Clone)]
@@ -648,7 +670,7 @@ pub(crate) fn resolve_ops(ops: &mut [WindowOp]) -> Result<(), String> {
         return Ok(());
     }
 
-    let mut raw: Vec<Option<Result<SecretValue, String>>> = vec![None; jobs.len()];
+    let mut raw: Vec<Option<Result<SecretValue, SecretError>>> = vec![None; jobs.len()];
     let mut missing: HashMap<String, Vec<usize>> = HashMap::new();
     for (n, job) in jobs.iter().enumerate() {
         let key = cache_key(&job.reference);
@@ -673,7 +695,7 @@ pub(crate) fn resolve_ops(ops: &mut [WindowOp]) -> Result<(), String> {
             ));
         }
         for (n, res) in idxs.into_iter().zip(got) {
-            let stored = res.map_err(|e| e.to_string());
+            let stored = res;
             let key = cache_key(&jobs[n].reference);
             STORE.with(|s| s.borrow_mut().cache.insert(key, stored.clone()));
             raw[n] = Some(stored);
@@ -682,12 +704,10 @@ pub(crate) fn resolve_ops(ops: &mut [WindowOp]) -> Result<(), String> {
 
     for (n, job) in jobs.iter().enumerate() {
         match raw[n].take().unwrap() {
-            Err(msg) => {
+            Err(err) => {
                 let var = var_label(&job.secret, &job.reference);
-                return Err(format!(
-                    "secret {var}: {msg} (role {})",
-                    role_label(&job.role)
-                ));
+                let role = role_label(&job.role);
+                return Err(format_backend_error(&var, role, &err));
             }
             Ok(value) => {
                 if matches!(job.where_, JobWhere::User) {
@@ -705,6 +725,19 @@ pub(crate) fn resolve_ops(ops: &mut [WindowOp]) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+fn format_backend_error(var: &str, role: &str, err: &SecretError) -> String {
+    if err.is_bare() {
+        err.to_string()
+    } else {
+        format!("secret {var}: {err} (role {role})")
+    }
+}
+
+/// Warning lines from the backends registered for this run.
+pub(crate) fn backend_warnings() -> Vec<String> {
+    STORE.with(|s| s.borrow().extra.iter().flat_map(|b| b.warnings()).collect())
 }
 
 fn template_secrets(spec: &OpSpec) -> Vec<Secret> {
@@ -759,6 +792,20 @@ mod tests {
     fn prompt_reads_one_line_without_the_newline() {
         let got = read_line("pw? ", &b"line\n"[..]).unwrap();
         assert_eq!(got, "line");
+    }
+
+    #[test]
+    fn bare_backend_error_is_the_whole_line() {
+        let bare = SecretError::bare("openbao: no token: set BAO_TOKEN or VAULT_TOKEN");
+        assert_eq!(
+            format_backend_error("pw", "admin_users", &bare),
+            "openbao: no token: set BAO_TOKEN or VAULT_TOKEN"
+        );
+        let wrapped = SecretError::new("no secret at kv/app");
+        assert_eq!(
+            format_backend_error("telegraf.influx_token", "telegraf", &wrapped),
+            "secret telegraf.influx_token: no secret at kv/app (role telegraf)"
+        );
     }
 
     #[test]

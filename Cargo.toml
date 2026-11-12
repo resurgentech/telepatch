@@ -1,6 +1,12 @@
 [workspace]
 resolver = "3"
-members = ["crates/telepatch", "crates/telepatch-macros", "crates/tp", "crates/tp/tests/emitted"]
+members = [
+    "crates/telepatch",
+    "crates/telepatch-macros",
+    "crates/telepatch-openbao",
+    "crates/tp",
+    "crates/tp/tests/emitted",
+]
 
 [workspace.package]
 version = "0.1.0"
@@ -11,3 +17,4 @@ repository = "https://github.com/resurgentech/telepatch"
 [workspace.dependencies]
 telepatch = { path = "crates/telepatch" }
 telepatch-macros = { path = "crates/telepatch-macros" }
+telepatch-openbao = { path = "crates/telepatch-openbao" }
