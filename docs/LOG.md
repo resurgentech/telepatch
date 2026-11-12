@@ -1184,3 +1184,16 @@ are appended, never edited in; a hook refuses rewrites.
   `dev_base`'s `PB_ORACLE` is 0; `test-vm.sh` does not read
   `build/test-container/`. Gate: `just test-oracle-selftest` green. No VM.
 - Commits: tp_basic 5715776
+
+## 2026-11-12 — T97b Ansible edge playbook, reviewed against the edge list
+
+- One play, `hosts: all`, roles `edge` then `edge_extra`. Debian installs
+  `www-browser`/`w3m` and Docker's apt repo then `docker-ce-cli`; Red Hat
+  except Amazon installs `mailx`/`s-nail` and Docker's fedora or rhel
+  `.repo` then `docker-ce-cli`; Amazon is the same pair and no repo; Arch
+  requests `sh`/`bash` and no repo. The marker file is `content: "edge\n"`.
+  The jq fetch carries `sha256:5942c9b0…` from the jq 1.7.1 `sha256sum.txt`
+  line for `jq-linux-amd64`. `rust-src` is only in `edge_extra`. Pin:
+  `ansible-core==2.22.0` (PyPI's newest stable that day). `just check-edge`
+  green, including `ansible-playbook --syntax-check`. No VM.
+- Commits: tp_basic 2b9416e
