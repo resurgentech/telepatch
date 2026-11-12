@@ -1306,3 +1306,22 @@ are appended, never edited in; a hook refuses rewrites.
   `libz-dev` as "will install" (it does not apply T97c's Provides rule).
 - Gate green.
 - Commits: tp_basic 4fcf3cb
+
+## 2026-11-12 — T97f manual edge matrix, proved on one dnf distro
+
+- `test-edge.sh cell` takes every `tests/plans.rs` distro with a stock
+  image, with a bootstrap per family (apt, dnf, dnf5, pacman). The local
+  half and `just test-edge` stay ubuntu2404 only.
+- New `scripts/test-edge-matrix.sh` and `just test-edge-matrix`: manual,
+  not a goal gate. One VM, the cells one after another, `SKIP omarchy`,
+  a failed cell does not stop the rest. It refuses when the VM host lists
+  a `tp-*` VM. The README says Jared starts it.
+- `rockylinux10` maps to `rockylinux/rockylinux:10`, because Docker's
+  library `rockylinux` has no `10` tag.
+- Live: `just docker-vm test-edge-cell rockylinux10` PASS on veritech04.
+  - Captures identical, marker and `edge-jq` ok on both sides.
+  - Run 2 `CHANGED 0`.
+  - Cell 139 s; VM peak 649 MiB of 961, 306 MiB swap.
+  - VM `tp-docker-20261112-202245` deleted and verified gone.
+- Gate green.
+- Commits: tp_basic 8cd9b69
