@@ -1174,3 +1174,13 @@ are appended, never edited in; a hook refuses rewrites.
   296 MiB of 961, swap 0. VM deleted. Not an OOM. Gate E green
   (`cargo test --workspace`, `just lint`).
 - Commits: telepatch c8830be
+
+## 2026-11-12 — T97a Retire the production acceptance runners
+
+- `just test-acceptance`, `just test-matrix` and `just test-container` are
+  gone, and so are `scripts/test-container.sh` and `scripts/test-matrix.sh`.
+  The three capture cases (equal, package missing, version-only) and
+  `selftest_intended` run from `scripts/lib/compare.sh --self-test`.
+  `dev_base`'s `PB_ORACLE` is 0; `test-vm.sh` does not read
+  `build/test-container/`. Gate: `just test-oracle-selftest` green. No VM.
+- Commits: tp_basic 5715776
