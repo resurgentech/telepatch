@@ -1133,3 +1133,18 @@ are appended, never edited in; a hook refuses rewrites.
   test copies a 20 MiB binary (interior NULs; run 2 does not rewrite).
   No VM.
 - Commits: telepatch d7083e7
+
+## 2026-11-11 — T95 `git` checkout
+
+- `h.git(url).depth(n).rev(r).latest().into(path)` clones a checkout,
+  including through `as_user`. Prepare probes `rev-parse HEAD` and the
+  origin URL. No `.rev` leaves a clean checkout of the same remote
+  alone. `.rev` checks out that commit. `.latest` fast-forwards the
+  branch. A different remote, a dirty tree, or a path that is not a
+  checkout blocks the host before the window changes it. The trailer
+  records `created` and `was_rev` for T98.
+- `just docker-vm test-live-git` on `tp-docker-20261112-071509`: 1
+  passed, 0 failed, 26.80s (a bare repo inside ubuntu:24.04). Peak
+  memory 320 MiB of 961, swap 0. VM deleted. Not an OOM. Gate E green
+  (`cargo test --workspace`, `just lint`).
+- Commits: telepatch f74daad
