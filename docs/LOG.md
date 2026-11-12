@@ -1038,3 +1038,19 @@ are appended, never edited in; a hook refuses rewrites.
   OOM. dev_desktop's idempotent pass is run 3; run 2 is the docker
   enable-then-start, CHANGED 1.
 - Commits: telepatch d39168c, tp_basic 09363d7
+
+## 2026-11-11 — T89 Templates with askama
+
+- `.content` holds bytes or an askama template and renders when the
+  script is built. Prepare resolves the secret references that render
+  formatted, one read per path, before any host change. Plan, Debug,
+  the log and the report omit a secret file's body and mark the path
+  `(secret)`. The host script is where a `Secret` prints its value. A
+  missing template field fails to compile (trybuild).
+- tp_basic `sudoers_dropin` is `templates/sudoers_dropin`. The rendered
+  bytes match the previous format string, including the seven spaces
+  and the final newline. Snapshots unchanged.
+- Gate E: `cargo test --workspace` and `just lint` green. Gate B:
+  tp_basic `cargo test`, `just check-conversion`, `just
+  test-oracle-selftest` green. No VM.
+- Commits: telepatch d87ffe9, tp_basic 0de5db5
