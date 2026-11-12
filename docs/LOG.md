@@ -1341,3 +1341,23 @@ are appended, never edited in; a hook refuses rewrites.
   dnf and pacman.
 - Gate E green. No VM.
 - Commits: telepatch 35d12ca
+
+## 2026-11-12 — T97l reach the docker VM's containers through ssh forwards
+
+- `docker-vm.sh` exports `TP_DOCKER_VM_PUBLISH`, `TP_DOCKER_VM_ADDR` and
+  `TP_DOCKER_VM_PORTS` (default 42201-42208, a bad override exits 2
+  before any VM). On a remote host both addresses are 127.0.0.1, and the
+  socket tunnel also carries one `-L 127.0.0.1:P:127.0.0.1:P` per port.
+  `TP_VM_HOST=local` keeps the VM's address, `TP_DOCKER_VM_IP` and
+  today's tunnel argv.
+- The live tests read the endpoint (`tests/live/endpoint.rs`, duplicated
+  in the openbao test). They publish `<PUBLISH>:P:<port>`, dial
+  `<ADDR>:P`, and move on when docker says a port is taken. `docker port`
+  is gone.
+- The first live run had no forwards (`export_endpoint` ran after the
+  tunnel argv was built). Fixed, and the self-test now checks the order.
+- Live on veritech04: `test-live-ssh` 5/5 (VM `tp-docker-20261112-204658`)
+  and `test-live-openbao` 1/1 (VM `tp-docker-20261112-205127`). Each VM
+  was deleted and verified gone.
+- Gate green.
+- Commits: tp_basic 73f4833, telepatch fc68029
