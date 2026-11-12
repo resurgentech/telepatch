@@ -1069,3 +1069,18 @@ are appended, never edited in; a hook refuses rewrites.
   `rustls`. Gate E green (`cargo test --workspace`, `just lint`,
   tp_basic `cargo test`).
 - Commits: telepatch 44e98e3
+
+## 2026-11-11 — T91 OpenBao live test and the playbook binary
+
+- `tp-basic` registers `telepatch_openbao::backend()`. The ignored test
+  starts a plain `debian:13` container with `/bao server -dev`, copies
+  the local `bao` binary in with `docker cp`, and adds no capability.
+  It writes one v2 and one v1 field on scratch mounts and the backend
+  reads both at `http://$TP_DOCKER_VM_IP:<port>`.
+- `just test-live-openbao` unsets inherited `BAO_*` and `VAULT_*`
+  first. Nothing reads `.env`. The throwaway token is not recorded.
+- `just docker-vm test-live-openbao` VM_EXIT 0. Pass line:
+  `PASS openbao v2 and v1`. VM `tp-docker-20261112-051239` deleted.
+  The server started without a capability. Gate E and B green before
+  the VM.
+- Commits: telepatch de0293a, tp_basic 0e0284b
