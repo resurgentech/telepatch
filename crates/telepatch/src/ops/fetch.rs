@@ -188,21 +188,39 @@ pub struct Item {
     pub unpack: bool,
 }
 
-/// The distinct `(url, sum)` the window's file ops fetch, first-seen order.
+/// A download this op needs: `(url, sum, unpack)`. File ops and a package
+/// installed from a fetched file.
+fn op_fetch(spec: &OpSpec) -> Option<(&str, &Option<String>, bool)> {
+    match spec {
+        OpSpec::File(f) => f.src.as_ref().map(|s| {
+            (
+                s.fetched.url.as_str(),
+                &s.fetched.sha256,
+                s.unpack.is_some(),
+            )
+        }),
+        OpSpec::Pkg(p) => p.file.as_ref().map(|f| (f.url.as_str(), &f.sha256, false)),
+        _ => None,
+    }
+}
+
+/// The distinct `(url, sum)` the window's file ops and package-file ops
+/// fetch, first-seen order.
 pub fn items(window: &Window) -> Vec<Item> {
     let mut out: Vec<Item> = Vec::new();
     for op in &window.ops {
-        let OpSpec::File(f) = &op.node.spec else {
+        let Some((url, sum, unpack)) = op_fetch(&op.node.spec) else {
             continue;
         };
-        let Some(src) = &f.src else { continue };
-        let (url, sum) = (&src.fetched.url, &src.fetched.sha256);
-        match out.iter_mut().find(|i| i.url == *url && i.sum == *sum) {
-            Some(i) => i.unpack |= src.unpack.is_some(),
+        match out
+            .iter_mut()
+            .find(|i| i.url == url && i.sum.as_ref() == sum.as_ref())
+        {
+            Some(i) => i.unpack |= unpack,
             None => out.push(Item {
-                url: url.clone(),
+                url: url.to_string(),
                 sum: sum.clone(),
-                unpack: src.unpack.is_some(),
+                unpack,
             }),
         }
     }
@@ -322,8 +340,7 @@ pub const NO_DOWNLOADER: &str = "neither curl nor wget is on the host";
 
 /// Does `op` (a window op) fetch `it`?
 pub fn uses(op: &crate::trace::OpNode, it: &Item) -> bool {
-    matches!(&op.spec, OpSpec::File(f) if f.src.as_ref().is_some_and(|s|
-        s.fetched.url == it.url && s.fetched.sha256 == it.sum))
+    op_fetch(&op.spec).is_some_and(|(url, sum, _)| url == it.url && sum == &it.sum)
 }
 
 /// Parse [`prepare_script`]'s output, one [`Found`] per item. An item with

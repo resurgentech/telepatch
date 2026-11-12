@@ -170,6 +170,16 @@ fn trips(op: &OpNode) -> Vec<(Policy, String)> {
             }
         }
         OpSpec::Pkg(p) => {
+            if let Some(f) = &p.file
+                && f.sha256.is_none()
+                && f.problem().is_none()
+            {
+                let name = p.names.first().map(String::as_str).unwrap_or("");
+                out.push((
+                    Policy::Unverified,
+                    format!("pkg {name}: fetch {} has no sha256", f.url),
+                ));
+            }
             if let Source::BinaryRelease(b) = &p.source
                 && b.sha256.is_none()
             {

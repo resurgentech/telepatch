@@ -107,6 +107,11 @@ pub struct PkgSpec {
     /// Apt only: `apt-get purge` instead of `remove` (config files too).
     /// Meaningful with [`Wanted::Absent`].
     pub purge: bool,
+    /// A local `.deb` or `.rpm` from a prepare-phase fetch. Apt and dnf
+    /// only, and only with [`.pin`](PkgHandle::pin): the manager installs
+    /// `./x.deb` or `./x.rpm` from the checksum cache when name and version
+    /// are not already that pin. `None` is a normal name install.
+    pub file: Option<crate::ops::fetch::Fetched>,
     /// Run `apt-get update` first (set by [`apply_apt_update`]). Ignored by
     /// other managers.
     pub update_cache: bool,
@@ -137,6 +142,7 @@ impl PkgSpec {
             wanted: Wanted::Present,
             mode: PkgMode::Install,
             purge: false,
+            file: None,
             update_cache: false,
             user: "root".to_string(),
             sourced: false,
@@ -301,6 +307,9 @@ impl PkgSpec {
     /// (the pin is for that name). Rustup ops merge per user and toolchain
     /// (see [`PkgSpec::merge_scope`]).
     pub fn mergeable(&self) -> bool {
+        if self.file.is_some() {
+            return false;
+        }
         match &self.source {
             Source::Script(_) | Source::BinaryRelease(_) => false,
             Source::Cargo { .. } | Source::Mise | Source::Distro(_) | Source::Rustup(_) => {
@@ -414,11 +423,13 @@ impl PkgSpec {
         }
         match (&self.source, self.mode) {
             (Source::Distro(Manager::Apt), PkgMode::BuildDep) => self.apt_build_dep(&mut o),
+            (Source::Distro(Manager::Apt), _) if self.file.is_some() => self.apt_file(&mut o),
             (Source::Distro(Manager::Apt), _) => match &self.wanted {
                 Wanted::Present => self.apt(&mut o),
                 Wanted::Absent => self.apt_absent(&mut o),
                 w => self.apt_versioned(&mut o, w),
             },
+            (Source::Distro(Manager::Dnf), _) if self.file.is_some() => self.rpm_file(&mut o),
             (Source::Distro(m @ (Manager::Dnf | Manager::Yum)), _) => {
                 let (mgr, groups) = match m {
                     Manager::Dnf => ("dnf", "dnf group list --installed"),
@@ -509,6 +520,37 @@ impl PkgSpec {
         );
     }
 
+    /// Install one pinned package from a fetched `.deb`. The version check
+    /// is dpkg's status and version. The file is the checksum cache (or the
+    /// unverified staging path); a symlink `./x.deb` in the staging
+    /// directory is what `apt-get install` sees, and it is removed before
+    /// the op returns. Nothing is written under `/tmp`.
+    fn apt_file(&self, o: &mut String) {
+        let Some(f) = &self.file else { return };
+        let name = self.names.first().map(String::as_str).unwrap_or("");
+        o.push_str("export DEBIAN_FRONTEND=noninteractive\n");
+        self.apt_update_block(o);
+        o.push_str(&format!("tp_name={}\n", quote(name)));
+        locate_file(o, f);
+        o.push_str(
+            "if [ \"$rc\" -eq 0 ] && [ ! -f \"$tp_f\" ]; then echo \"telepatch: fetched file $tp_f is missing (prepare did not fetch it)\" >&2; rc=1; fi\n",
+        );
+        o.push_str(
+            "tp_st=$(dpkg-query -W -f='${db:Status-Status}:${Version}' \"$tp_name\" 2>/dev/null || true)\n",
+        );
+        o.push_str("if [ \"$rc\" -eq 0 ] && [ \"$tp_st\" != \"installed:$tp_pin\" ]; then\n");
+        o.push_str(
+            "  tp_dir=\"$tp_sd/$__tp_run\"\n  mkdir -p -- \"$tp_dir\" || rc=$?\n  if [ \"$rc\" -eq 0 ]; then ln -sfn -- \"$tp_f\" \"$tp_dir/x.deb\" || rc=$?; fi\n",
+        );
+        o.push_str(
+            "  if [ \"$rc\" -eq 0 ]; then ( cd -- \"$tp_dir\" && apt-get -y --allow-downgrades -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold install ./x.deb ); rc=$?; fi\n",
+        );
+        o.push_str("  rm -f -- \"$tp_dir/x.deb\"\n");
+        o.push_str(
+            "  if [ \"$rc\" -eq 0 ]; then\n    tp_st=$(dpkg-query -W -f='${db:Status-Status}:${Version}' \"$tp_name\" 2>/dev/null || true)\n    if [ \"$tp_st\" = \"installed:$tp_pin\" ]; then changed=1; installed=(\"$tp_name\"); else echo \"telepatch: $tp_name is '$tp_st' after installing ./x.deb, wanted installed:$tp_pin\" >&2; rc=1; fi\n  fi\nfi\n",
+        );
+    }
+
     /// `.pin(v)` and `.latest()` on apt. Pinned: a name is missing when its
     /// dpkg version is not exactly the string the user wrote; `install
     /// name=v` (with `--allow-downgrades`) then moves it. Latest: a name
@@ -575,6 +617,47 @@ fn rpm_like(o: &mut String, mgr: &str, group_list: &str) {
     o.push_str(&format!(
         "for tp_n in \"${{tp_want[@]}}\"; do\n  case \"$tp_n\" in\n    @*) {group_list} 2>/dev/null | grep -qF -- \"${{tp_n#@}}\" || tp_missing+=(\"$tp_n\");;\n    *) rpm -q --whatprovides \"$tp_n\" >/dev/null 2>&1 || tp_missing+=(\"$tp_n\");;\n  esac\ndone\nif [ \"${{#tp_missing[@]}}\" -gt 0 ]; then\n  {mgr} install -y \"${{tp_missing[@]}}\"\n  rc=$?\n  if [ \"$rc\" -eq 0 ]; then changed=1; installed=(\"${{tp_missing[@]}}\"); fi\nfi\n"
     ));
+}
+
+/// Where the fetched package file is, as `tp_f`: the checksum cache, or
+/// the unverified staging path when the fetch has no sum.
+fn locate_file(o: &mut String, f: &crate::ops::fetch::Fetched) {
+    o.push_str(crate::ops::fetch::LOCATE);
+    match &f.sha256 {
+        Some(s) => o.push_str(&format!("tp_s={}\ntp_f=\"$tp_cd/$tp_s\"\n", quote(s))),
+        None => o.push_str(&format!(
+            "tp_f=\"$tp_sd\"/\"$__tp_run\"/\"u-$(printf %s {} | sha256sum | cut -c1-32)\"\n",
+            quote(&f.url)
+        )),
+    }
+}
+
+/// Install one pinned package from a fetched `.rpm` (`dnf install -y ./x.rpm`).
+/// The version check is `rpm -q` in the forms a pin may be written.
+impl PkgSpec {
+    fn rpm_file(&self, o: &mut String) {
+        let Some(f) = &self.file else { return };
+        let name = self.names.first().map(String::as_str).unwrap_or("");
+        o.push_str(&format!("tp_name={}\n", quote(name)));
+        locate_file(o, f);
+        o.push_str(
+            "if [ \"$rc\" -eq 0 ] && [ ! -f \"$tp_f\" ]; then echo \"telepatch: fetched file $tp_f is missing (prepare did not fetch it)\" >&2; rc=1; fi\n",
+        );
+        o.push_str(&format!(
+            "tp_have() {{ rpm -q --qf '{RPM_FORMS}' \"$1\" 2>/dev/null | grep -qxF -- \"$tp_pin\"; }}\n"
+        ));
+        o.push_str("if [ \"$rc\" -eq 0 ] && ! tp_have \"$tp_name\"; then\n");
+        o.push_str(
+            "  tp_dir=\"$tp_sd/$__tp_run\"\n  mkdir -p -- \"$tp_dir\" || rc=$?\n  if [ \"$rc\" -eq 0 ]; then ln -sfn -- \"$tp_f\" \"$tp_dir/x.rpm\" || rc=$?; fi\n",
+        );
+        o.push_str(
+            "  if [ \"$rc\" -eq 0 ]; then ( cd -- \"$tp_dir\" && dnf install -y ./x.rpm ); rc=$?; fi\n",
+        );
+        o.push_str("  rm -f -- \"$tp_dir/x.rpm\"\n");
+        o.push_str(
+            "  if [ \"$rc\" -eq 0 ]; then\n    if tp_have \"$tp_name\"; then changed=1; installed=(\"$tp_name\"); else echo \"telepatch: $tp_name is not $tp_pin after installing ./x.rpm\" >&2; rc=1; fi\n  fi\nfi\n",
+        );
+    }
 }
 
 /// dnf and yum: remove only packages `rpm -q` says are installed, by name.
@@ -786,6 +869,10 @@ impl PkgHandle {
                 ));
                 return;
             }
+            if s.file.is_some() {
+                errs.push("from() is only available on apt and dnf hosts".to_string());
+                s.file = None;
+            }
             s.sourced = true;
             s.source = source;
             s.wanted = Wanted::Present;
@@ -983,6 +1070,43 @@ impl PkgHandle {
         self.want(Wanted::Pinned(v.into()))
     }
 
+    /// Install this one package from a fetched `.deb` (apt) or `.rpm`
+    /// (dnf): `apt-get install ./x.deb` or `dnf install -y ./x.rpm`, from
+    /// the prepare-phase cache, when the manager does not already report
+    /// the name at [`.pin`](Self::pin)'s version. Any other manager is a
+    /// trace error. Takes `&Fetched` or `Fetched`. Without `.pin(v)` the
+    /// trace fails. A fetch with no checksum is the policy error
+    /// `Unverified`.
+    #[track_caller]
+    pub fn from(&self, fetched: impl std::borrow::Borrow<crate::ops::fetch::Fetched>) -> Self {
+        let f = crate::ops::fetch::fetched_of(fetched);
+        let mut err: Option<String> = None;
+        self.spec(|s| {
+            let name = s.names.first().cloned().unwrap_or_default();
+            if !matches!(s.source, Source::Distro(Manager::Apt | Manager::Dnf)) {
+                err = Some("from() is only available on apt and dnf hosts".to_string());
+                return;
+            }
+            if let Some(p) = f.problem() {
+                err = Some(format!("pkg {name}: {p}"));
+                return;
+            }
+            if s.mode == PkgMode::BuildDep {
+                err = Some("pkg: .from() does not apply to build-dep".to_string());
+                return;
+            }
+            if s.names.iter().any(|n| n.starts_with('@')) {
+                err = Some("pkg: a @group cannot be installed from a file".to_string());
+                return;
+            }
+            s.file = Some(f.clone());
+        });
+        if let Some(e) = err {
+            self.0.record_error(TraceError::new(e));
+        }
+        self.clone()
+    }
+
     /// Edit a rustup op's options, then add the postconditions of what was
     /// added. On any other source: a trace error naming `method`.
     #[track_caller]
@@ -1148,6 +1272,34 @@ where
     S: AsRef<str>,
 {
     names.into_iter().map(|s| s.as_ref().to_string()).collect()
+}
+
+/// Trace errors that are only visible once the builders have all run:
+/// `.from()` without `.pin()`, or with more than one name.
+pub(crate) fn file_errors(trace: &crate::trace::Trace) -> Vec<TraceError> {
+    let mut out = Vec::new();
+    for (i, n) in trace.nodes.iter().enumerate() {
+        let crate::trace::Node::Op(op) = n else {
+            continue;
+        };
+        let OpSpec::Pkg(p) = &op.spec else {
+            continue;
+        };
+        if p.file.is_none() {
+            continue;
+        }
+        let msg = if p.names.len() != 1 {
+            "pkg: .from() takes exactly one package name"
+        } else if !matches!(p.wanted, Wanted::Pinned(_)) {
+            "pkg: .from() needs .pin(version)"
+        } else {
+            continue;
+        };
+        let mut e = TraceError::new(msg);
+        e.site = None;
+        out.push(trace.locate(crate::trace::NodeId(i), e));
+    }
+    out
 }
 
 fn check_names(v: &[String]) -> Result<(), TraceError> {
@@ -1364,6 +1516,97 @@ mod tests {
         assert_eq!(
             errors(&h),
             ["absent() is only available on the distro manager"]
+        );
+    }
+
+    fn keyring(h: &Host<()>) -> crate::ops::fetch::Fetched {
+        h.fetch("http://127.0.0.1:8765/keyring.deb")
+            .sha256("ab".repeat(32))
+    }
+
+    /// `h.pkg([name]).from(deb).pin(v)` installs that file through apt or
+    /// dnf when the manager's name and version are not already the pin.
+    /// The file is the checksum cache, named `./x.deb` or `./x.rpm` for
+    /// the install, and the script never writes under `/tmp`.
+    #[test]
+    fn from_a_fetched_file_checks_name_and_version() {
+        let h = host();
+        let deb = keyring(&h);
+        h.pkg(["cuda-keyring"]).from(&deb).pin("1.2.3");
+        assert!(errors(&h).is_empty(), "{:?}", errors(&h));
+        let p = spec_of(&h, 0);
+        assert_eq!(p.wanted, Wanted::Pinned("1.2.3".into()));
+        assert_eq!(
+            p.file.as_ref().map(|f| f.url.as_str()),
+            Some(deb.url.as_str())
+        );
+        let r = p.render();
+        assert!(r.contains("db:Status-Status"), "{r}");
+        assert!(r.contains("${Version}"), "{r}");
+        assert!(r.contains("installed:$tp_pin"), "{r}");
+        assert!(r.contains("apt-get"), "{r}");
+        assert!(r.contains("install ./x.deb"), "{r}");
+        assert!(r.contains("/var/cache/telepatch/sha256"), "{r}");
+        assert!(!r.replace("/var/tmp", "").contains("/tmp"), "{r}");
+        assert!(!p.mergeable(), "a file install does not merge");
+        let Node::Op(op) = &h.snapshot().nodes[0] else {
+            panic!("not an op");
+        };
+        assert!(crate::engine::needs_download(op));
+        let window = crate::engine::Window {
+            number: 1,
+            kind: crate::engine::WindowKind::Final,
+            ops: vec![crate::engine::WindowOp {
+                id: crate::trace::NodeId(0),
+                node: op.clone(),
+                members: Vec::new(),
+            }],
+            split: None,
+        };
+        let got = crate::ops::fetch::items(&window);
+        let sum = "ab".repeat(32);
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].url, deb.url);
+        assert_eq!(got[0].sum.as_deref(), Some(sum.as_str()));
+        assert!(!got[0].unpack);
+        assert!(crate::ops::fetch::uses(op, &got[0]));
+
+        let os = Os::parse("ID=fedora\nVERSION_ID=41\n").unwrap();
+        let f = Host::new("f", os, Rc::new(()));
+        let rpm = f
+            .fetch("http://127.0.0.1:8765/keyring.rpm")
+            .sha256("cd".repeat(32));
+        f.pkg(["cuda-keyring"]).from(&rpm).pin("1.2.3-1");
+        assert!(errors(&f).is_empty(), "{:?}", errors(&f));
+        let r = spec_of(&f, 0).render();
+        assert!(r.contains("dnf install -y ./x.rpm"), "{r}");
+        assert!(r.contains("rpm -q"), "{r}");
+        assert!(r.contains("/var/cache/telepatch/sha256"), "{r}");
+        assert!(!r.replace("/var/tmp", "").contains("/tmp"), "{r}");
+
+        let h = host();
+        h.pkg(["cuda-keyring"]).from(keyring(&h));
+        assert!(
+            errors(&h).iter().any(|e| e.contains(".pin(")),
+            "{:?}",
+            errors(&h)
+        );
+
+        let os = Os::parse("ID=arch\nBUILD_ID=rolling\n").unwrap();
+        let a = Host::new("a", os, Rc::new(()));
+        a.pkg(["cuda-keyring"]).from(keyring(&a)).pin("1.2.3");
+        assert!(
+            errors(&a).iter().any(|e| e.contains("apt and dnf")),
+            "{:?}",
+            errors(&a)
+        );
+
+        let h = host();
+        h.pkg(["cuda-keyring"]).yum().from(keyring(&h)).pin("1.2.3");
+        assert!(
+            errors(&h).iter().any(|e| e.contains("apt and dnf")),
+            "{:?}",
+            errors(&h)
         );
     }
 

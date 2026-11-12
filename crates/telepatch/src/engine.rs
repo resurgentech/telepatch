@@ -134,7 +134,9 @@ pub enum Applied {
 pub fn needs_download(op: &OpNode) -> bool {
     match &op.spec {
         OpSpec::File(f) => f.src.is_some(),
-        OpSpec::Pkg(p) => matches!(p.source, crate::ops::pkg::Source::BinaryRelease(_)),
+        OpSpec::Pkg(p) => {
+            p.file.is_some() || matches!(p.source, crate::ops::pkg::Source::BinaryRelease(_))
+        }
         _ => false,
     }
 }

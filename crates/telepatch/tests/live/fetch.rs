@@ -937,6 +937,154 @@ fn pb_wget_only(h: Host<T>) -> PlaybookFuture {
     })
 }
 
+/// A `.deb` built in the container with `dpkg-deb`, served on 127.0.0.1,
+/// installed by `h.pkg([name]).from(deb).pin(v)`. Run 1 installs it through
+/// apt; run 2, with the server down, changes nothing and leaves the cache.
+/// Nothing of the install is left in `/tmp` or the staging directory.
+#[derive(Clone)]
+struct DebVars {
+    sum: String,
+}
+
+fn pb_deb(h: Host<DebVars>) -> PlaybookFuture {
+    Box::pin(async move {
+        let deb = h
+            .fetch(format!(
+                "http://127.0.0.1:{PORT}/telepatch-keyring_1.2.3_all.deb"
+            ))
+            .sha256(&h.vars.sum);
+        h.pkg(["telepatch-keyring"]).from(&deb).pin("1.2.3");
+        Ok(())
+    })
+}
+
+fn go_deb(ctr: &Container, name: &'static str, v: &DebVars) -> (Report, String) {
+    let pb = Playbook::new(name, pb_deb);
+    let out = Rc::new(RefCell::new(String::new()));
+    let r = run(
+        &pb,
+        vec![HostSpec {
+            name: "c".into(),
+            target: Target::Docker(DockerTransport::new().container("c", &ctr.name)),
+            vars: v.clone(),
+        }],
+        RunOpts {
+            log: None,
+            stdout: Stdout::Capture(out.clone()),
+        },
+    );
+    let text = out.borrow().clone();
+    println!("{text}\n{}", r.render());
+    (r, text)
+}
+
+#[test]
+#[ignore = "needs docker and network"]
+fn fetch_ubuntu_pkg_from_a_deb() {
+    let ctr = Container::start("ubuntu:24.04");
+    let (rc, _) = exec(&ctr, "command -v curl");
+    let mut install = vec!["python3".to_string()];
+    if rc != 0 {
+        install.push("curl".into());
+    }
+    let (r, out) = go(
+        &ctr,
+        "install",
+        &V {
+            install,
+            plain_sum: String::new(),
+            tgz_sum: String::new(),
+        },
+        pb_install,
+    );
+    assert_eq!(r.exit_code(), 0, "install:\n{out}\n{}", r.render());
+
+    let (rc, o) = exec(
+        &ctr,
+        "rm -rf /srv/www && mkdir -p /srv/www/src/DEBIAN /srv/www/src/usr/share/telepatch-keyring \
+         && printf 'installed\\n' > /srv/www/src/usr/share/telepatch-keyring/marker \
+         && printf '%s\\n' \
+            'Package: telepatch-keyring' \
+            'Version: 1.2.3' \
+            'Architecture: all' \
+            'Maintainer: Telepatch <telepatch@example.invalid>' \
+            'Description: fixture' \
+            > /srv/www/src/DEBIAN/control \
+         && dpkg-deb --build /srv/www/src /srv/www/telepatch-keyring_1.2.3_all.deb 2>&1",
+    );
+    assert_eq!(rc, 0, "dpkg-deb: {o}");
+    let (rc, sum) = exec(
+        &ctr,
+        "sha256sum /srv/www/telepatch-keyring_1.2.3_all.deb | cut -d' ' -f1",
+    );
+    assert_eq!(rc, 0, "sha256: {sum}");
+    assert_eq!(sum.len(), 64, "{sum}");
+
+    let o = Command::new("docker")
+        .args([
+            "exec",
+            "-d",
+            &ctr.name,
+            "sh",
+            "-c",
+            &format!(
+                "cd /srv/www && echo $$ > /srv/httpd.pid && exec python3 -m http.server {PORT} --bind 127.0.0.1 > /srv/httpd.log 2>&1"
+            ),
+        ])
+        .stdin(Stdio::null())
+        .output()
+        .expect("docker exec -d");
+    assert!(o.status.success(), "starting the server");
+    let (rc, o) = exec(
+        &ctr,
+        &format!(
+            "for i in $(seq 1 50); do curl -fsS -o /dev/null http://127.0.0.1:{PORT}/telepatch-keyring_1.2.3_all.deb && exit 0; sleep 0.2; done; exit 1"
+        ),
+    );
+    assert_eq!(rc, 0, "the server did not come up: {o}");
+
+    let (_, tmp_before) = exec(&ctr, "ls -A /tmp");
+    let v = DebVars { sum: sum.clone() };
+    let (r1, out1) = go_deb(&ctr, "pkg-file", &v);
+    assert_eq!(r1.exit_code(), 0, "run 1:\n{out1}\n{}", r1.render());
+    assert_eq!(r1.hosts[0].status, HostStatus::Changed, "{}", r1.render());
+    let fetched = format!(
+        "== c [prepare] fetch http://127.0.0.1:{PORT}/telepatch-keyring_1.2.3_all.deb: fetched, sha256 ok =="
+    );
+    assert!(out1.contains(&fetched), "{fetched}\n{out1}");
+    let (rc, st) = exec(
+        &ctr,
+        "dpkg-query -W -f='${db:Status-Status}:${Version}' telepatch-keyring",
+    );
+    assert_eq!(rc, 0, "{st}");
+    assert_eq!(st, "installed:1.2.3");
+    let (rc, body) = exec(&ctr, "cat /usr/share/telepatch-keyring/marker");
+    assert_eq!((rc, body.as_str()), (0, "installed"));
+    let (_, cache) = exec(&ctr, "ls /var/cache/telepatch/sha256");
+    assert_eq!(cache, sum);
+    let (_, stage) = exec(&ctr, "ls -A /var/tmp/telepatch 2>/dev/null");
+    assert_eq!(stage, "", "the staging dir is cleaned");
+    let (_, tmp_after) = exec(&ctr, "ls -A /tmp");
+    assert_eq!(tmp_after, tmp_before, "nothing left in /tmp");
+
+    let (rc, o) = exec(&ctr, "kill $(cat /srv/httpd.pid)");
+    assert_eq!(rc, 0, "stopping the server: {o}");
+    let (r2, out2) = go_deb(&ctr, "pkg-file", &v);
+    assert_eq!(r2.exit_code(), 0, "run 2:\n{out2}\n{}", r2.render());
+    assert_eq!(r2.hosts[0].status, HostStatus::Ok, "{}", r2.render());
+    for o in &r2.hosts[0].ops {
+        assert!(!o.changed, "run 2 changed {}: {}", o.id, o.desc);
+    }
+    let cached = format!(
+        "== c [prepare] fetch http://127.0.0.1:{PORT}/telepatch-keyring_1.2.3_all.deb: cached =="
+    );
+    assert!(out2.contains(&cached), "{cached}\n{out2}");
+    let (_, stage) = exec(&ctr, "ls -A /var/tmp/telepatch 2>/dev/null");
+    assert_eq!(stage, "", "the staging dir is cleaned");
+    let (_, tmp_after) = exec(&ctr, "ls -A /tmp");
+    assert_eq!(tmp_after, tmp_before, "nothing left in /tmp");
+}
+
 #[test]
 #[ignore = "needs docker"]
 fn fetch_ubuntu_wget_only() {
