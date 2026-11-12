@@ -985,3 +985,15 @@ are appended, never edited in; a hook refuses rewrites.
   unchanged, zero daemon-reloads; run 5 CHANGED 0). `just docker-vm
   test-services ubuntu2404` PASS, init-less, no reload line.
 - Commits: telepatch a916c60, tp_basic 3db6094
+
+## 2026-11-11 — T86f Second-run proof for `rust_kernel`
+
+- `test-idempotent` accepts `latest_kernel_build`. `just docker-vm
+  test-idempotent ubuntu2604 latest_kernel_build` second run CHANGED 0
+  (`/tmp/t86f-idem2.log`, IDEM_EXIT:0); one `pkg[rustup]` op carrying
+  `rust-src`. Peak 634 MiB, swap 397 MiB, no OOM. VM deleted.
+- Ubuntu kernel extras request `libbabeltrace-dev` only. The virtual
+  name `libbabeltrace-ctf-dev` stayed changed forever: apt's present
+  check does not see Provides. Four Ubuntu plan snapshots move on that
+  name. The first live gate (`/tmp/t86f-idem.log`) was CHANGED 1 on it.
+- Commits: tp_basic 009c780
