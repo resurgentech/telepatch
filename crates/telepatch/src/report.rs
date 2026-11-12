@@ -25,6 +25,9 @@ pub enum HostStatus {
     Blocked(String),
     /// The playbook itself is wrong (trace error) or the engine gave up.
     Error(String),
+    /// Never started: `--serial` held it back and `--max-fail` stopped the
+    /// run first. Nothing ran on it. Counts as not a success.
+    NotStarted(String),
 }
 
 impl HostStatus {
@@ -35,6 +38,7 @@ impl HostStatus {
             HostStatus::Failed { .. } => "failed",
             HostStatus::Blocked(_) => "blocked",
             HostStatus::Error(_) => "error",
+            HostStatus::NotStarted(_) => "skipped",
         }
     }
 
@@ -396,6 +400,8 @@ pub struct HostReport {
     /// Roles with ops that never ran because the host stopped, in trace
     /// order, excluding the failed role.
     pub skipped_roles: Vec<String>,
+    /// Roles `--only` skipped, in trace order (empty without `--only`).
+    pub not_selected: Vec<String>,
     pub will_install: Vec<WillInstall>,
     pub will_remove: Vec<WillRemove>,
     /// Names absent pkg ops removed, in the order the ops finished.
@@ -429,6 +435,7 @@ impl HostReport {
             status: HostStatus::Ok,
             ops: Vec::new(),
             skipped_roles: Vec::new(),
+            not_selected: Vec::new(),
             will_install: Vec::new(),
             will_remove: Vec::new(),
             removed: Vec::new(),
@@ -486,6 +493,9 @@ impl Report {
                 HostStatus::Error(why) => {
                     let _ = writeln!(out, "{}: error: {why}", h.name);
                 }
+                HostStatus::NotStarted(why) => {
+                    let _ = writeln!(out, "{}: not started: {why}", h.name);
+                }
                 HostStatus::Failed { role, op, rc, .. } => {
                     let _ = writeln!(out, "{}: role {role} failed: {op} (rc {rc})", h.name);
                 }
@@ -493,6 +503,14 @@ impl Report {
             }
             if let Some(stop) = h.check.as_ref().and_then(|c| c.stopped.as_ref()) {
                 let _ = writeln!(out, "{}: {}", h.name, stop.line());
+            }
+            if !h.not_selected.is_empty() {
+                let _ = writeln!(
+                    out,
+                    "{}: skipped by --only: {}",
+                    h.name,
+                    h.not_selected.join(", ")
+                );
             }
         }
         out
@@ -524,7 +542,7 @@ impl Report {
                 HostStatus::Failed { role, op, rc, .. } => {
                     format!("role {role}: {op} (rc {rc})")
                 }
-                HostStatus::Blocked(why) | HostStatus::Error(why) => {
+                HostStatus::Blocked(why) | HostStatus::Error(why) | HostStatus::NotStarted(why) => {
                     why.lines().next().unwrap_or("").to_string()
                 }
                 _ => String::new(),
@@ -617,6 +635,9 @@ impl Report {
                 HostStatus::Error(why) => {
                     let _ = writeln!(out, "\n{}: error: {why}", h.name);
                 }
+                HostStatus::NotStarted(why) => {
+                    let _ = writeln!(out, "\n{}: not started: {why}", h.name);
+                }
                 _ => {}
             }
             if !h.skipped_roles.is_empty() {
@@ -625,6 +646,14 @@ impl Report {
                     "{}: skipped roles: {}",
                     h.name,
                     h.skipped_roles.join(", ")
+                );
+            }
+            if !h.not_selected.is_empty() {
+                let _ = writeln!(
+                    out,
+                    "{}: skipped by --only: {}",
+                    h.name,
+                    h.not_selected.join(", ")
                 );
             }
         }

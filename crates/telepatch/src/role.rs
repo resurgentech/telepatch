@@ -87,11 +87,38 @@ impl<V> Playbook<V> {
 pub struct RoleGuard {
     trace: Rc<RefCell<Trace>>,
     name: String,
+    selected: bool,
 }
 
 impl RoleGuard {
-    pub(crate) fn new(trace: Rc<RefCell<Trace>>, name: String) -> RoleGuard {
-        RoleGuard { trace, name }
+    pub(crate) fn new(trace: Rc<RefCell<Trace>>, name: String, selected: bool) -> RoleGuard {
+        RoleGuard {
+            trace,
+            name,
+            selected,
+        }
+    }
+
+    /// Does `--only` run this role's body? Always true without `--only`.
+    pub fn selected(&self) -> bool {
+        self.selected
+    }
+}
+
+/// What a role returns when `--only` skips its body: `()` and
+/// `Result<(), E>` (`Ok(())`). `#[role]` returns it right after recording
+/// the role's begin, so the end is recorded too and the skip leaves no ops.
+pub trait Skipped {
+    fn skipped() -> Self;
+}
+
+impl Skipped for () {
+    fn skipped() {}
+}
+
+impl<E> Skipped for Result<(), E> {
+    fn skipped() -> Self {
+        Ok(())
     }
 }
 

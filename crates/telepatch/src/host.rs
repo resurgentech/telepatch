@@ -239,12 +239,63 @@ impl<V> Host<V> {
         self.trace.borrow_mut().push(Node::Barrier)
     }
 
-    /// Mark a role boundary; the matching end is recorded when the guard drops.
+    /// Mark a role boundary; the matching end is recorded when the guard
+    /// drops. The guard says whether `--only` selects the role
+    /// ([`RoleGuard::selected`]); `#[role]` returns early when it does not.
     pub fn role_enter(&self, name: &str) -> RoleGuard {
-        self.trace
-            .borrow_mut()
-            .push(Node::RoleBegin(name.to_string()));
-        RoleGuard::new(self.trace.clone(), name.to_string())
+        let mut t = self.trace.borrow_mut();
+        let selected = t.selects(name);
+        t.push(Node::RoleBegin(name.to_string()));
+        if !selected && !t.not_selected.iter().any(|n| n == name) {
+            t.not_selected.push(name.to_string());
+        }
+        drop(t);
+        RoleGuard::new(self.trace.clone(), name.to_string(), selected)
+    }
+
+    /// Run only the roles named (`--only`); the empty set runs them all.
+    /// Roles called inside a selected role run whole; see
+    /// [`Trace::selects`].
+    pub fn with_only<S: Into<String>>(self, names: impl IntoIterator<Item = S>) -> Host<V> {
+        let set: std::collections::BTreeSet<String> = names.into_iter().map(Into::into).collect();
+        self.trace.borrow_mut().only = (!set.is_empty()).then(|| Rc::new(set));
+        self
+    }
+
+    /// The roles `--only` skipped on this host, in trace order.
+    pub fn not_selected_roles(&self) -> Vec<String> {
+        self.trace.borrow().not_selected.clone()
+    }
+
+    /// `--only` names a role the finished trace lacks: an error listing the
+    /// roles it traced (checked when the playbook ends).
+    pub(crate) fn check_only(&self) -> Result<(), TraceError> {
+        let t = self.trace.borrow();
+        let Some(only) = &t.only else { return Ok(()) };
+        let traced = t.traced_roles();
+        let unknown: Vec<String> = only
+            .iter()
+            .filter(|n| !traced.contains(n))
+            .map(|n| format!("`{n}`"))
+            .collect();
+        if unknown.is_empty() {
+            return Ok(());
+        }
+        let list = if traced.is_empty() {
+            "no roles".to_string()
+        } else {
+            traced.join(", ")
+        };
+        Err(TraceError {
+            message: format!(
+                "--only: unknown role{} {}; the playbook traced: {list}",
+                if unknown.len() > 1 { "s" } else { "" },
+                unknown.join(", ")
+            ),
+            roles: Vec::new(),
+            site: None,
+            policy: None,
+        })
     }
 
     /// Ops issued through the returned scope run in a fresh login

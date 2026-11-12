@@ -337,6 +337,7 @@ impl<E: Executor> Engine<E> {
             match poll {
                 Poll::Ready(Err(e)) => return Err(EngineError::Playbook(e)),
                 Poll::Ready(Ok(())) => {
+                    host.check_only().map_err(EngineError::Playbook)?;
                     let ids = pending_ids(&host, false);
                     let ran = !ids.is_empty();
                     self.apply(

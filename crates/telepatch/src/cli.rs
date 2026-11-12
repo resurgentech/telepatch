@@ -2,7 +2,7 @@
 //! playbooks. Subcommands: `list`, `plan <name> [--distro D] [--vars f]`,
 //! `run <name> (--local | --host <dest>... | --inventory <file> [--limit n,..])
 //! [--ssh-key <path>] [--ssh-option K=V]... [--vars f] [--log f]
-//! [--check [--diff]]`.
+//! [--serial n] [--max-fail n] [--only a,b] [--check [--diff]]`.
 //!
 //! `run` takes exactly one of `--local` (this machine), `--host`
 //! (repeatable; each `<dest>` goes to `ssh` verbatim, `user@host` or
@@ -13,6 +13,16 @@
 //! with `--local` and `--host` each has the same vars, with `--inventory`
 //! its own, and `--vars` is the lowest place. `--ssh-key` and `--ssh-option`
 //! apply to every ssh host and need `--host` or `--inventory`.
+//!
+//! `--serial n` applies to `n` hosts at a time (n >= 1; hosts start in the
+//! order given). `--max-fail n` stops starting hosts once more than `n` have
+//! failed (failed, blocked or error): hosts already started finish, each one
+//! never started is reported `skipped` with `max-fail n reached`, and the run
+//! exits 1. It holds back only hosts `--serial` has queued. `--only a,b` runs
+//! the named roles' bodies and skips the rest (see
+//! [`crate::host::Host::with_only`]): a role called inside a named role runs
+//! with it, and a name the playbook did not trace is an error on that host
+//! listing the roles it traced. All three also apply under `--check`.
 //!
 //! `--check` traces and prepares every host and applies nothing
 //! ([`crate::executor::run_check`]); `--diff` (only with `--check`) adds a
@@ -31,7 +41,7 @@ use std::rc::Rc;
 use clap::{ArgGroup, Parser, Subcommand};
 use serde::de::DeserializeOwned;
 
-use crate::executor::{CheckOpts, HostSpec, RunOpts, Stdout, Target, run, run_check};
+use crate::executor::{CheckOpts, HostSpec, RunControls, RunOpts, Stdout, Target, run_with};
 use crate::facts::os::Os;
 use crate::inventory::{InvHost, Inventory};
 use crate::role::Playbook;
@@ -107,7 +117,28 @@ enum Cmd {
         /// With `--check`: a unified diff for every file that will change.
         #[arg(long, requires = "check")]
         diff: bool,
+        /// Run on at most this many hosts at a time (at least 1).
+        #[arg(long, value_name = "N", value_parser = parse_serial)]
+        serial: Option<usize>,
+        /// Stop starting hosts once more than this many have failed (failed,
+        /// blocked or error); hosts already started finish. Holds back only
+        /// hosts `--serial` has queued.
+        #[arg(long, value_name = "N")]
+        max_fail: Option<usize>,
+        /// Run only these roles (comma-separated or repeated); the rest are
+        /// skipped. A role called inside a named role runs with it. A name
+        /// the playbook did not trace is an error listing those it did.
+        #[arg(long, value_delimiter = ',')]
+        only: Vec<String>,
     },
+}
+
+fn parse_serial(s: &str) -> Result<usize, String> {
+    match s.parse::<usize>() {
+        Ok(0) => Err("must be at least 1".into()),
+        Ok(n) => Ok(n),
+        Err(_) => Err(format!("`{s}` is not a number")),
+    }
 }
 
 fn parse_ssh_option(s: &str) -> Result<String, String> {
@@ -249,6 +280,9 @@ fn dispatch<V: DeserializeOwned + Default + 'static>(
             ssh_option,
             check,
             diff,
+            serial,
+            max_fail,
+            only,
             ..
         } => {
             let pb = match find(&name) {
@@ -321,11 +355,18 @@ fn dispatch<V: DeserializeOwned + Default + 'static>(
                 })
             }));
             let opts = RunOpts { log, stdout };
-            let report = if check {
-                run_check(pb, hosts, opts, CheckOpts { diff })
-            } else {
-                run(pb, hosts, opts)
+            let controls = RunControls {
+                serial,
+                max_fail,
+                only,
             };
+            let report = run_with(
+                pb,
+                hosts,
+                opts,
+                check.then_some(CheckOpts { diff }),
+                controls,
+            );
             (format!("\n{}", report.render()), report.exit_code())
         }
     }

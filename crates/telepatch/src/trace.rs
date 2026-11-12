@@ -450,6 +450,11 @@ pub struct Trace {
     /// Failed `h.assert` messages, in trace order. Prepare blocks the host
     /// with them before the window's ops run.
     pub assertions: Vec<String>,
+    /// `--only`: the roles whose bodies run (see [`Trace::selects`]).
+    /// `None` runs every role.
+    pub only: Option<std::rc::Rc<std::collections::BTreeSet<String>>>,
+    /// The roles `--only` skipped, in trace order, each once.
+    pub not_selected: Vec<String>,
 }
 
 fn role_stack(nodes: &[Node]) -> Vec<String> {
@@ -489,6 +494,30 @@ impl Trace {
     /// The roles open now: those a node pushed next would be traced in.
     pub fn open_roles(&self) -> Vec<String> {
         role_stack(&self.nodes)
+    }
+
+    /// Does `--only` run the body of a role named `name`, entered now? A
+    /// role entered inside a running role is part of it and runs whole; a
+    /// role entered at the top runs only if it is named. (A skipped body
+    /// never runs, so no skipped role is ever open here.)
+    pub fn selects(&self, name: &str) -> bool {
+        match &self.only {
+            None => true,
+            Some(only) => only.contains(name) || !self.open_roles().is_empty(),
+        }
+    }
+
+    /// Every role name traced so far, first appearance first, each once.
+    pub fn traced_roles(&self) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        for n in &self.nodes {
+            if let Node::RoleBegin(r) = n
+                && !out.contains(r)
+            {
+                out.push(r.clone());
+            }
+        }
+        out
     }
 
     /// `e` placed at op `id`: its site (unless it has one) and the roles

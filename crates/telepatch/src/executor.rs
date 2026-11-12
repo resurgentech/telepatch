@@ -206,6 +206,75 @@ pub struct RunOpts {
     pub stdout: Stdout,
 }
 
+/// The run controls of `--serial`, `--max-fail` and `--only` ([`run_with`]).
+/// The default is no control: every host at once, every role.
+#[derive(Debug, Clone, Default)]
+pub struct RunControls {
+    /// At most this many hosts at a time (`None`: all at once). Hosts start
+    /// in the order given, each as a running one ends.
+    pub serial: Option<usize>,
+    /// Stop starting hosts once more than this many have ended not
+    /// successfully (failed, blocked or errored). Hosts already started
+    /// finish; each one never started is reported `NotStarted`. It can only
+    /// hold a host back that `serial` has queued, so without `serial` every
+    /// host has started already.
+    pub max_fail: Option<usize>,
+    /// Run only these roles (see [`Host::with_only`]); empty runs them all.
+    pub only: Vec<String>,
+}
+
+/// The host limiter: `serial` permits, and the count of hosts that failed.
+struct Limiter {
+    permits: Option<tokio::sync::Semaphore>,
+    max_fail: Option<usize>,
+    failed: std::cell::Cell<usize>,
+}
+
+impl Limiter {
+    fn new(serial: Option<usize>, max_fail: Option<usize>) -> Limiter {
+        Limiter {
+            permits: serial.map(tokio::sync::Semaphore::new),
+            max_fail,
+            failed: std::cell::Cell::new(0),
+        }
+    }
+
+    /// Has `--max-fail` tripped: more than `n` hosts have failed.
+    fn tripped(&self) -> Option<usize> {
+        self.max_fail.filter(|n| self.failed.get() > *n)
+    }
+}
+
+/// Wait for a `--serial` slot (the semaphore is fair, so hosts start in
+/// the order given), then run the host unless `--max-fail` has tripped; a
+/// host that ended without success counts toward it.
+async fn gated(
+    limiter: Rc<Limiter>,
+    sink: Rc<Sink>,
+    name: String,
+    check: Option<CheckOpts>,
+    run: impl std::future::Future<Output = HostReport>,
+) -> HostReport {
+    let _permit = match &limiter.permits {
+        Some(s) => Some(s.acquire().await.expect("the limiter is never closed")),
+        None => None,
+    };
+    if let Some(n) = limiter.tripped() {
+        let mut r = HostReport::new(&name);
+        r.check = check.map(|_| CheckInfo::default());
+        r.status = HostStatus::NotStarted(format!("max-fail {n} reached"));
+        sink.event(
+            json!({"ev":"host_status","host":name,"status":r.status.label(),"detail":r.status_detail()}),
+        );
+        return r;
+    }
+    let rep = run.await;
+    if !rep.status.is_success() {
+        limiter.failed.set(limiter.failed.get() + 1);
+    }
+    rep
+}
+
 /// `--check`: trace and prepare, apply nothing ([`run_check`]).
 #[derive(Debug, Clone, Copy, Default)]
 pub struct CheckOpts {
@@ -2431,6 +2500,7 @@ async fn run_one<V: 'static>(
     spec: HostSpec<V>,
     sink: Rc<Sink>,
     check: Option<CheckOpts>,
+    only: Rc<[String]>,
 ) -> HostReport {
     let name = spec.name.clone();
     sink.event(json!({"ev":"host_open","host":name}));
@@ -2466,7 +2536,10 @@ async fn run_one<V: 'static>(
             return blocked(format!("reading os: {e}"));
         }
     };
-    let host = Host::new(&name, os, Rc::new(spec.vars)).with_groups(spec.groups);
+    let host = Host::new(&name, os, Rc::new(spec.vars))
+        .with_groups(spec.groups)
+        .with_only(only.iter().cloned());
+    let probe = host.clone();
     let pb = Playbook::new(pb_name, pb_run);
     let shells = HostShells {
         host: name.clone(),
@@ -2477,7 +2550,8 @@ async fn run_one<V: 'static>(
     let mut engine = Engine::new(HostExec::new(&name, shells, sink.clone(), check));
     let res = engine.run_host(&pb, host).await;
     engine.executor.cleanup_stage().await;
-    let (rep, shells) = engine.executor.finish(res);
+    let (mut rep, shells) = engine.executor.finish(res);
+    rep.not_selected = probe.not_selected_roles();
     shells.close().await;
     sink.event(json!({"ev":"host_status","host":name,"status":rep.status.label(),"detail":rep.status_detail()}));
     rep
@@ -2487,7 +2561,7 @@ impl HostReport {
     fn status_detail(&self) -> String {
         match &self.status {
             HostStatus::Failed { role, op, rc, .. } => format!("role {role}: {op} (rc {rc})"),
-            HostStatus::Blocked(w) | HostStatus::Error(w) => w.clone(),
+            HostStatus::Blocked(w) | HostStatus::Error(w) | HostStatus::NotStarted(w) => w.clone(),
             _ => String::new(),
         }
     }
@@ -2496,7 +2570,7 @@ impl HostReport {
 /// Run `playbook` on every host concurrently and return the report. Builds
 /// its own current-thread runtime, so call it from plain (non-async) code.
 pub fn run<V: 'static>(playbook: &Playbook<V>, hosts: Vec<HostSpec<V>>, opts: RunOpts) -> Report {
-    run_inner(playbook, hosts, opts, None)
+    run_with(playbook, hosts, opts, None, RunControls::default())
 }
 
 /// [`run`] as a dry run: trace and prepare every host, apply nothing (see
@@ -2508,14 +2582,17 @@ pub fn run_check<V: 'static>(
     opts: RunOpts,
     check: CheckOpts,
 ) -> Report {
-    run_inner(playbook, hosts, opts, Some(check))
+    run_with(playbook, hosts, opts, Some(check), RunControls::default())
 }
 
-fn run_inner<V: 'static>(
+/// [`run`] or [`run_check`] (`check` set) under [`RunControls`]: `--serial`,
+/// `--max-fail` and `--only`.
+pub fn run_with<V: 'static>(
     playbook: &Playbook<V>,
     hosts: Vec<HostSpec<V>>,
     opts: RunOpts,
     check: Option<CheckOpts>,
+    controls: RunControls,
 ) -> Report {
     crate::secret::begin_run();
     let rt = tokio::runtime::Builder::new_current_thread()
@@ -2539,10 +2616,16 @@ fn run_inner<V: 'static>(
     let names: Vec<String> = hosts.iter().map(|h| h.name.clone()).collect();
     let (pb_name, pb_run) = (playbook.name, playbook.run);
     let local = tokio::task::LocalSet::new();
+    let only: Rc<[String]> = controls.only.into();
+    let limiter = Rc::new(Limiter::new(controls.serial, controls.max_fail));
     let reports = rt.block_on(local.run_until(async {
         let tasks: Vec<_> = hosts
             .into_iter()
-            .map(|h| tokio::task::spawn_local(run_one(pb_name, pb_run, h, sink.clone(), check)))
+            .map(|h| {
+                let name = h.name.clone();
+                let run = run_one(pb_name, pb_run, h, sink.clone(), check, only.clone());
+                tokio::task::spawn_local(gated(limiter.clone(), sink.clone(), name, check, run))
+            })
             .collect();
         let mut out = Vec::new();
         for (t, name) in tasks.into_iter().zip(&names) {

@@ -339,6 +339,9 @@ fn expand_role(f: &mut ItemFn) -> syn::Result<TokenStream2> {
     let new_block: syn::Block = syn::parse_quote_spanned! { Span::call_site() =>
         {
             let __tp_role = #host.role_enter(#name);
+            if !__tp_role.selected() {
+                return ::telepatch::role::Skipped::skipped();
+            }
             #block
         }
     };

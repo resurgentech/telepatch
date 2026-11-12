@@ -1390,7 +1390,7 @@ vars = { admin_users = ["bot", "ml"] }</code></pre>
 <section class="prose" id="d-run-controls">
 <h3>Run controls</h3>
 <p>How many hosts at a time, which roles, and how long to wait.</p>
-<p class="status">Status: <strong>built</strong>: <code>.allow_fail()</code>. <strong>designed</strong>: <code>--serial</code>, <code>--max-fail</code>, <code>--only</code>, <code>.retry</code>, <code>.timeout</code>, <code>wait_for</code></p>
+<p class="status">Status: <strong>built</strong>: <code>.allow_fail()</code>, <code>--serial</code>, <code>--max-fail</code> (a host it holds back is reported <code>skipped</code>, <em>max-fail n reached</em>; failed, blocked and error count; hosts already started finish) and <code>--only</code> (a role called inside a named role runs with it; a name the playbook did not trace is an error listing those it did). <strong>designed</strong>: <code>.retry</code>, <code>.timeout</code>, <code>wait_for</code></p>
 <pre><code>$ tp-basic run site --inventory inventory.toml --limit web \
       --serial 2 --max-fail 1 --only docker,telegraf</code></pre>
 <pre><code>h.fetch(url).sha256(sum).retry(3).timeout(5 * MIN);
@@ -1398,7 +1398,7 @@ vars = { admin_users = ["bot", "ml"] }</code></pre>
 h.svc("postgresql").enabled().started();
 h.wait_for(Port::tcp(5432)).timeout(60 * SEC);    <span class="c">// fails the role if it never opens</span></code></pre>
 <ul>
-  <li><code>--serial n</code> applies to <code>n</code> hosts at a time. <code>--max-fail n</code> stops the run when more than <code>n</code> hosts have failed.</li>
+  <li><code>--serial n</code> applies to <code>n</code> hosts at a time. <code>--max-fail n</code> stops starting hosts once more than <code>n</code> have failed; hosts already started finish.</li>
   <li><code>--only</code> runs the named roles and skips the rest.</li>
   <li><code>.retry(n)</code> and <code>.timeout(d)</code> are available on every op.</li>
   <li><code>wait_for</code> is an op with no change of its own: a port, a path, or a unit reaching active.</li>
