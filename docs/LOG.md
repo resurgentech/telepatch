@@ -1225,3 +1225,15 @@ are appended, never edited in; a hook refuses rewrites.
   port against the T97b table and Ansible tasks: no mismatch. Gate B
   green. No VM.
 - Commits: tp_basic 04d1a5e
+
+## 2026-11-12 — T97g Debian edge pair becomes libz-dev / zlib1g-dev
+
+- The Debian-family edge pair is `zlib1g-dev` (provider) and `libz-dev`
+  (virtual name), replacing `w3m`/`www-browser`, which has 25 providers
+  on ubuntu 24.04. Changed the apt task, `check-edge-playbook.sh`,
+  `src/roles/edge.rs` and the two edge tests. Only op #1 of the four
+  Debian-family `edge__*` snapshots moved; every other snapshot is
+  byte-identical. T97e's uncommitted harness was left as it was.
+  Telepatch unchanged. Gate `just check-edge && cargo test && just
+  test-oracle-selftest` green. No VM.
+- Commits: tp_basic 6ad1160
