@@ -1361,3 +1361,21 @@ are appended, never edited in; a hook refuses rewrites.
   was deleted and verified gone.
 - Gate green.
 - Commits: tp_basic 73f4833, telepatch fc68029
+
+## 2026-11-12 — T97j `test-vm.sh` and `test-vm-oracle.sh` on the VM host
+
+- T97i's refusal is gone from both scripts. `tp-basic run --host` takes
+  its ssh arguments from `tpb_ssh_args`: `--ssh-key`, the known_hosts
+  options and, on a remote VM host, `--ssh-option
+  ProxyJump=$TP_VM_HOST`. The vmtool preflight is local-only.
+- `write_inventory` puts `-o ProxyJump=<host>` inside the one
+  `ansible_ssh_common_args` value on a remote host. It still names only
+  the key's path.
+- Every guest command in `test-vm.sh` (`su_tpdev`, journal, systemctl)
+  already went through `sshv`, which jumps since T97i. Unchanged.
+- `TP_VM_HOST=local`: the argv and the inventory are byte-identical,
+  proved by self-test. The jump through telepatch's ssh master was
+  checked offline with `ssh -G`: no engine change.
+- No live run (T103 is the first). Gate `just test-oracle-selftest`
+  green. No tp-* VM listed on veritech04 or here afterwards.
+- Commits: tp_basic 3c0f51e
