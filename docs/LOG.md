@@ -1016,3 +1016,25 @@ are appended, never edited in; a hook refuses rewrites.
   status and PORT.md `Playbook::new` stay `cc84358`. Acceptance scripts
   not deleted.
 - Commits: telepatch (this LOG commit); `cc84358` unchanged
+
+## 2026-11-11 — T88 Secret, references and the dependency-free backends
+
+- `Secret` deserializes from a literal or `{ bao, field }`, `{ env }`,
+  `{ file }`, `{ prompt }`. Display and Debug are `<secret>`. The bytes
+  zeroize. Prepare resolves every reference the trace used, one read per
+  path, before any host change; a miss names the var and the role; an
+  unknown scheme names the scheme. `plan` resolves nothing. The user op
+  takes a `Secret`; plan, log, report and events show `<secret>`; the
+  host compares the shadow field by checksum. `secret_literals` fails
+  tp_basic when a tracked vars or inventory file gives a `Secret` a
+  literal.
+- tp_basic `default_password` is `Option<Secret>`. `test-vm.sh` passes
+  the throwaway hash through `{ env = "TP_TEST_PW_HASH" }` and does not
+  print it. The first VM run applied the hash (`user tpdev` changed,
+  run 3 CHANGED 0, working checks passed) but `su_tpdev` treated the pty
+  closing as failure before it reaped the child. The checker now reaps,
+  covered by `--self-test`. Retry `just test-vm ubuntu2404 dev_desktop`
+  PASS (`/tmp/t88-vm.log`, VM_EXIT 0, run 3 CHANGED 0). VM deleted. No
+  OOM. dev_desktop's idempotent pass is run 3; run 2 is the docker
+  enable-then-start, CHANGED 1.
+- Commits: telepatch d39168c, tp_basic 09363d7
