@@ -1197,3 +1197,17 @@ are appended, never edited in; a hook refuses rewrites.
   `ansible-core==2.22.0` (PyPI's newest stable that day). `just check-edge`
   green, including `ansible-playbook --syntax-check`. No VM.
 - Commits: tp_basic 2b9416e
+
+## 2026-11-12 — T97c Apt counts a provided name as installed
+
+- An apt Present name is not missing when dpkg says `installed` or an
+  installed package Provides it (`tp_apt_present` in the install
+  script). Pin, latest, absent and a `.deb` file install keep the
+  status check. dnf stays on `rpm -q --whatprovides` and pacman on
+  `pacman -T`. 44 snapshots moved, and only in that present-check
+  text: 16 in telepatch, 28 Debian-family plans in tp_basic. Red Hat
+  and Arch plans are byte-identical. tp_basic's lock also records
+  telepatch's `sha2` dependency from T94.
+- Gate E green (`cargo test --workspace`, `just lint`, tp_basic
+  `cargo test`). No VM.
+- Commits: telepatch 47d4c45, tp_basic 3e79742
