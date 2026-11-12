@@ -473,12 +473,13 @@ impl PkgSpec {
         }
     }
 
+    /// A Present name is missing unless dpkg says `installed` or an
+    /// installed package Provides it. Pin, latest, absent and a `.deb`
+    /// file install keep their own status checks.
     fn apt(&self, o: &mut String) {
         o.push_str("export DEBIAN_FRONTEND=noninteractive\n");
         self.apt_update_block(o);
-        o.push_str(
-            "for tp_n in \"${tp_want[@]}\"; do\n  [ \"$(dpkg-query -W -f='${db:Status-Status}' \"$tp_n\" 2>/dev/null)\" = installed ] || tp_missing+=(\"$tp_n\")\ndone\n",
-        );
+        o.push_str(APT_PRESENT);
         o.push_str("if [ \"$rc\" -eq 0 ] && [ \"${#tp_missing[@]}\" -gt 0 ]; then\n");
         if !self.update_cache {
             o.push_str(APT_LISTS_GUARD);
@@ -609,6 +610,19 @@ impl PkgSpec {
 
 /// Runtime guard: update when apt has no package lists at all.
 const APT_LISTS_GUARD: &str = "  if ! find /var/lib/apt/lists -maxdepth 1 -type f ! -name lock 2>/dev/null | grep -q .; then apt-get -q update || rc=$?; fi\n";
+
+/// Present install check. Status `installed` counts, and so does a name in
+/// the Provides of an installed package (`www-browser` from `w3m`). A
+/// versioned provide (`mail-transport-agent (= 1)`) counts as its name.
+/// `config-files` and `not-installed` do not.
+const APT_PRESENT: &str = r#"tp_apt_present() {
+  [ "$(dpkg-query -W -f='${db:Status-Status}' "$1" 2>/dev/null)" = installed ] && return 0
+  dpkg-query -W -f='${db:Status-Status} ${Provides}\n' 2>/dev/null | awk -v n="$1" '$1 != "installed" { next } { line=$0; sub(/^installed[[:space:]]+/, "", line); k=split(line, parts, /,/); for (i=1; i<=k; i++) { p=parts[i]; gsub(/^[[:space:]]+|[[:space:]]+$/, "", p); sub(/[[:space:]].*/, "", p); if (p == n) found=1 } } END { exit (found ? 0 : 1) }'
+}
+for tp_n in "${tp_want[@]}"; do
+  tp_apt_present "$tp_n" || tp_missing+=("$tp_n")
+done
+"#;
 
 /// dnf and yum. Plain names and provides (`perl(ExtUtils::Embed)`) are
 /// checked with `rpm -q --whatprovides`; `@group` names against the
@@ -2268,5 +2282,116 @@ mod tests {
         let o = op_of(&h, 0);
         assert!(o.at_end);
         assert_eq!(o.reads, BTreeSet::from([Key::file("/x")]));
+    }
+
+    /// Present accepts dpkg `installed` or an installed package's Provides.
+    /// A name that is neither is still missing. Pin, latest, absent and a
+    /// `.deb` file install keep the status check. dnf and pacman stay on
+    /// `rpm -q --whatprovides` and `pacman -T`.
+    #[test]
+    fn apt_present_counts_a_provide_and_leaves_other_checks() {
+        let mut present = PkgSpec::new(Manager::Apt, names(["w3m", "www-browser", "missing-name"]));
+        present.wanted = Wanted::Present;
+        let r = present.render();
+        assert!(
+            r.contains("${Provides}"),
+            "present check does not look at Provides:\n{r}"
+        );
+        assert!(
+            !r.contains(
+                "[ \"$(dpkg-query -W -f='${db:Status-Status}' \"$tp_n\" 2>/dev/null)\" = installed ] || tp_missing"
+            ),
+            "present check is still status-only:\n{r}"
+        );
+        assert!(r.contains("db:Status-Status"), "{r}");
+
+        let mut pin = PkgSpec::new(Manager::Apt, names(["git"]));
+        pin.wanted = Wanted::Pinned("1:2".into());
+        let pin_r = pin.render();
+        assert!(!pin_r.contains("${Provides}"), "{pin_r}");
+        assert!(pin_r.contains("installed:$tp_pin"), "{pin_r}");
+
+        let mut latest = PkgSpec::new(Manager::Apt, names(["git"]));
+        latest.wanted = Wanted::Latest;
+        let latest_r = latest.render();
+        assert!(!latest_r.contains("${Provides}"), "{latest_r}");
+        assert!(latest_r.contains("Candidate:"), "{latest_r}");
+
+        let mut absent = PkgSpec::new(Manager::Apt, names(["git"]));
+        absent.wanted = Wanted::Absent;
+        let absent_r = absent.render();
+        assert!(!absent_r.contains("${Provides}"), "{absent_r}");
+        assert!(absent_r.contains("db:Status-Status"), "{absent_r}");
+
+        let h = host();
+        let deb = keyring(&h);
+        h.pkg(["cuda-keyring"]).from(&deb).pin("1.2.3");
+        let file_r = spec_of(&h, 0).render();
+        assert!(!file_r.contains("${Provides}"), "{file_r}");
+        assert!(file_r.contains("installed:$tp_pin"), "{file_r}");
+
+        let mut dnf = PkgSpec::new(Manager::Dnf, names(["mailx"]));
+        dnf.wanted = Wanted::Present;
+        let dnf_r = dnf.render();
+        assert!(dnf_r.contains("rpm -q --whatprovides"), "{dnf_r}");
+        assert!(!dnf_r.contains("${Provides}"), "{dnf_r}");
+
+        let mut pac = PkgSpec::new(Manager::Pacman, names(["sh"]));
+        pac.wanted = Wanted::Present;
+        let pac_r = pac.render();
+        assert!(pac_r.contains("pacman -T"), "{pac_r}");
+        assert!(!pac_r.contains("${Provides}"), "{pac_r}");
+
+        let script = format!(
+            r#"
+dpkg-query() {{
+  local fmt="" name=""
+  while [ $# -gt 0 ]; do
+    case $1 in
+      -f=*) fmt=${{1#-f=}} ;;
+      -W) ;;
+      *) name=$1 ;;
+    esac
+    shift
+  done
+  case $fmt in
+    *Provides*)
+      printf '%s\n' 'installed www-browser, mail-reader' 'installed mail-transport-agent (= 1)' 'config-files gone-browser' 'not-installed not-browser'
+      ;;
+    *)
+      case $name in
+        w3m) printf 'installed' ;;
+        *) printf '' ;;
+      esac
+      ;;
+  esac
+}}
+apt-get() {{ echo "APTGET $*"; return 0; }}
+{r}
+printf 'MISSING:%s\n' "${{tp_missing[*]}}"
+printf 'CHANGED:%s\n' "$changed"
+"#
+        );
+        let out = std::process::Command::new("bash")
+            .arg("-c")
+            .arg(&script)
+            .output()
+            .expect("bash");
+        let text = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            out.status.success(),
+            "{text}\n{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(
+            text.contains("MISSING:missing-name\n"),
+            "w3m is installed and www-browser is provided; only missing-name should be missing:\n{text}"
+        );
+        assert!(text.contains("APTGET"), "{text}");
+        assert!(
+            !text.contains("APTGET") || !text.contains("www-browser"),
+            "{text}"
+        );
+        assert!(text.contains("CHANGED:1"), "{text}");
     }
 }

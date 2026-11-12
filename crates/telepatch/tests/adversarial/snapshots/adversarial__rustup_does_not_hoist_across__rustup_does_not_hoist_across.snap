@@ -489,8 +489,12 @@ role (none)
       | tp_want=('git')
       | tp_missing=()
       | export DEBIAN_FRONTEND=noninteractive
+      | tp_apt_present() {
+      |   [ "$(dpkg-query -W -f='${db:Status-Status}' "$1" 2>/dev/null)" = installed ] && return 0
+      |   dpkg-query -W -f='${db:Status-Status} ${Provides}\n' 2>/dev/null | awk -v n="$1" '$1 != "installed" { next } { line=$0; sub(/^installed[[:space:]]+/, "", line); k=split(line, parts, /,/); for (i=1; i<=k; i++) { p=parts[i]; gsub(/^[[:space:]]+|[[:space:]]+$/, "", p); sub(/[[:space:]].*/, "", p); if (p == n) found=1 } } END { exit (found ? 0 : 1) }'
+      | }
       | for tp_n in "${tp_want[@]}"; do
-      |   [ "$(dpkg-query -W -f='${db:Status-Status}' "$tp_n" 2>/dev/null)" = installed ] || tp_missing+=("$tp_n")
+      |   tp_apt_present "$tp_n" || tp_missing+=("$tp_n")
       | done
       | if [ "$rc" -eq 0 ] && [ "${#tp_missing[@]}" -gt 0 ]; then
       |   if ! find /var/lib/apt/lists -maxdepth 1 -type f ! -name lock 2>/dev/null | grep -q .; then apt-get -q update || rc=$?; fi
