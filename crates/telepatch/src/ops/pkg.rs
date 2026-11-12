@@ -504,9 +504,9 @@ impl PkgSpec {
                 "for tp_n in \"${tp_want[@]}\"; do\n  tp_st=$(dpkg-query -W -f='${db:Status-Status}' \"$tp_n\" 2>/dev/null || true)\n  case \"$tp_st\" in installed|config-files) tp_have+=(\"$tp_n\");; esac\ndone\n",
             );
         } else {
-            o.push_str(
-                "for tp_n in \"${tp_want[@]}\"; do\n  [ \"$(dpkg-query -W -f='${db:Status-Status}' \"$tp_n\" 2>/dev/null)\" = installed ] && tp_have+=(\"$tp_n\")\ndone\n",
-            );
+            o.push_str(&format!(
+                "for tp_n in \"${{tp_want[@]}}\"; do\n  {APT_INSTALLED_TEST} && tp_have+=(\"$tp_n\")\ndone\n"
+            ));
         }
         o.push_str(&format!(
             "if [ \"$rc\" -eq 0 ] && [ \"${{#tp_have[@]}}\" -gt 0 ]; then\n  apt-get -y {verb} \"${{tp_have[@]}}\"\n  rc=$?\n"
@@ -624,12 +624,32 @@ for tp_n in "${tp_want[@]}"; do
 done
 "#;
 
+/// The apt function `tp_apt_present`, as the Present install script
+/// renders it, without the loop that calls it. Prepare's probe runs the
+/// same text.
+pub fn apt_present_fn() -> &'static str {
+    APT_PRESENT
+        .split_once("for tp_n in")
+        .map_or(APT_PRESENT, |(f, _)| f)
+}
+
+/// The tests the install and absent scripts apply to `$tp_n`, one per
+/// manager. Prepare's probe runs the same text, so it announces exactly
+/// what the scripts would do.
+pub const APT_INSTALLED_TEST: &str =
+    r#"[ "$(dpkg-query -W -f='${db:Status-Status}' "$tp_n" 2>/dev/null)" = installed ]"#;
+pub const RPM_PRESENT_TEST: &str = r#"rpm -q --whatprovides "$tp_n" >/dev/null 2>&1"#;
+pub const RPM_ABSENT_TEST: &str = r#"rpm -q "$tp_n" >/dev/null 2>&1"#;
+pub const PACMAN_PRESENT_TEST: &str =
+    r#"[ -z "$(pacman -T "$tp_n" 2>/dev/null)" ] || [ -n "$(pacman -Qqg "$tp_n" 2>/dev/null)" ]"#;
+pub const PACMAN_ABSENT_TEST: &str = r#"pacman -Q "$tp_n" >/dev/null 2>&1"#;
+
 /// dnf and yum. Plain names and provides (`perl(ExtUtils::Embed)`) are
 /// checked with `rpm -q --whatprovides`; `@group` names against the
 /// manager's installed-groups list.
 fn rpm_like(o: &mut String, mgr: &str, group_list: &str) {
     o.push_str(&format!(
-        "for tp_n in \"${{tp_want[@]}}\"; do\n  case \"$tp_n\" in\n    @*) {group_list} 2>/dev/null | grep -qF -- \"${{tp_n#@}}\" || tp_missing+=(\"$tp_n\");;\n    *) rpm -q --whatprovides \"$tp_n\" >/dev/null 2>&1 || tp_missing+=(\"$tp_n\");;\n  esac\ndone\nif [ \"${{#tp_missing[@]}}\" -gt 0 ]; then\n  {mgr} install -y \"${{tp_missing[@]}}\"\n  rc=$?\n  if [ \"$rc\" -eq 0 ]; then changed=1; installed=(\"${{tp_missing[@]}}\"); fi\nfi\n"
+        "for tp_n in \"${{tp_want[@]}}\"; do\n  case \"$tp_n\" in\n    @*) {group_list} 2>/dev/null | grep -qF -- \"${{tp_n#@}}\" || tp_missing+=(\"$tp_n\");;\n    *) {RPM_PRESENT_TEST} || tp_missing+=(\"$tp_n\");;\n  esac\ndone\nif [ \"${{#tp_missing[@]}}\" -gt 0 ]; then\n  {mgr} install -y \"${{tp_missing[@]}}\"\n  rc=$?\n  if [ \"$rc\" -eq 0 ]; then changed=1; installed=(\"${{tp_missing[@]}}\"); fi\nfi\n"
     ));
 }
 
@@ -677,23 +697,23 @@ impl PkgSpec {
 /// dnf and yum: remove only packages `rpm -q` says are installed, by name.
 fn rpm_absent(o: &mut String, mgr: &str) {
     o.push_str(&format!(
-        "tp_have=()\nfor tp_n in \"${{tp_want[@]}}\"; do\n  rpm -q \"$tp_n\" >/dev/null 2>&1 && tp_have+=(\"$tp_n\")\ndone\nif [ \"${{#tp_have[@]}}\" -gt 0 ]; then\n  {mgr} remove -y \"${{tp_have[@]}}\"\n  rc=$?\n  if [ \"$rc\" -eq 0 ]; then changed=1; installed=(\"${{tp_have[@]}}\"); fi\nfi\n"
+        "tp_have=()\nfor tp_n in \"${{tp_want[@]}}\"; do\n  {RPM_ABSENT_TEST} && tp_have+=(\"$tp_n\")\ndone\nif [ \"${{#tp_have[@]}}\" -gt 0 ]; then\n  {mgr} remove -y \"${{tp_have[@]}}\"\n  rc=$?\n  if [ \"$rc\" -eq 0 ]; then changed=1; installed=(\"${{tp_have[@]}}\"); fi\nfi\n"
     ));
 }
 
 /// `pacman -T` is satisfied by installed packages and their provides; the
 /// group query covers group names.
 fn pacman(o: &mut String) {
-    o.push_str(
-        "for tp_n in \"${tp_want[@]}\"; do\n  if [ -z \"$(pacman -T \"$tp_n\" 2>/dev/null)\" ] || [ -n \"$(pacman -Qqg \"$tp_n\" 2>/dev/null)\" ]; then :; else tp_missing+=(\"$tp_n\"); fi\ndone\nif [ \"${#tp_missing[@]}\" -gt 0 ]; then\n  pacman -S --needed --noconfirm \"${tp_missing[@]}\"\n  rc=$?\n  if [ \"$rc\" -eq 0 ]; then changed=1; installed=(\"${tp_missing[@]}\"); fi\nfi\n",
-    );
+    o.push_str(&format!(
+        "for tp_n in \"${{tp_want[@]}}\"; do\n  if {PACMAN_PRESENT_TEST}; then :; else tp_missing+=(\"$tp_n\"); fi\ndone\nif [ \"${{#tp_missing[@]}}\" -gt 0 ]; then\n  pacman -S --needed --noconfirm \"${{tp_missing[@]}}\"\n  rc=$?\n  if [ \"$rc\" -eq 0 ]; then changed=1; installed=(\"${{tp_missing[@]}}\"); fi\nfi\n"
+    ));
 }
 
 /// Remove only names `pacman -Q` lists. No dependency cascade.
 fn pacman_absent(o: &mut String) {
-    o.push_str(
-        "tp_have=()\nfor tp_n in \"${tp_want[@]}\"; do\n  pacman -Q \"$tp_n\" >/dev/null 2>&1 && tp_have+=(\"$tp_n\")\ndone\nif [ \"${#tp_have[@]}\" -gt 0 ]; then\n  pacman -R --noconfirm \"${tp_have[@]}\"\n  rc=$?\n  if [ \"$rc\" -eq 0 ]; then changed=1; installed=(\"${tp_have[@]}\"); fi\nfi\n",
-    );
+    o.push_str(&format!(
+        "tp_have=()\nfor tp_n in \"${{tp_want[@]}}\"; do\n  {PACMAN_ABSENT_TEST} && tp_have+=(\"$tp_n\")\ndone\nif [ \"${{#tp_have[@]}}\" -gt 0 ]; then\n  pacman -R --noconfirm \"${{tp_have[@]}}\"\n  rc=$?\n  if [ \"$rc\" -eq 0 ]; then changed=1; installed=(\"${{tp_have[@]}}\"); fi\nfi\n"
+    ));
 }
 
 /// rpm's installed versions of one package, one per line, in the forms a

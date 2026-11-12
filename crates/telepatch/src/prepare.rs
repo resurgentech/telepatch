@@ -136,11 +136,12 @@ pub fn pkg_absent(window: &Window) -> Vec<(Source, Vec<String>)> {
     out
 }
 
-/// Names of `names` that `pkg_probe` printed as `present`.
+/// Names of `names` that `pkg_probe` printed as `removable`: the ones the
+/// absent script would remove (not merely provided by another package).
 pub fn present_names(names: &[String], output: &str) -> Vec<String> {
     let present: BTreeSet<&str> = output
         .lines()
-        .filter_map(|l| l.strip_prefix("present "))
+        .filter_map(|l| l.strip_prefix("removable "))
         .collect();
     names
         .iter()
@@ -172,35 +173,44 @@ fn union_pkg_names(
     out
 }
 
-/// A script printing `present <name>` for every name already installed.
+/// A script printing two kinds of line per name. `present <name>` is the
+/// install script's own test passing (the name would be skipped);
+/// `removable <name>` is the absent script's own test passing (the name
+/// would be removed). The tests are the text `ops::pkg` renders into those
+/// scripts, so prepare announces only what the scripts will do.
 pub fn pkg_probe(source: &Source, names: &[String]) -> String {
+    use crate::ops::pkg::{
+        APT_INSTALLED_TEST, PACMAN_ABSENT_TEST, PACMAN_PRESENT_TEST, RPM_ABSENT_TEST,
+        RPM_PRESENT_TEST, apt_present_fn,
+    };
     let mut s = String::new();
     if *source == Source::Pip {
         s.push_str(
             "tp_l=$( (python3 -m pip list --format=freeze 2>/dev/null || pip3 list --format=freeze 2>/dev/null) | cut -d= -f1 | tr 'A-Z_' 'a-z-')\n",
         );
     }
+    if *source == Source::Distro(Manager::Apt) {
+        s.push_str(apt_present_fn());
+    }
+    let pip =
+        "printf '%s\\n' \"$tp_l\" | grep -qx -- \"$(printf %s \"$tp_n\" | tr 'A-Z_' 'a-z-')\"";
+    let (install, absent): (&str, &str) = match source {
+        Source::Distro(Manager::Apt) => ("tp_apt_present \"$tp_n\"", APT_INSTALLED_TEST),
+        Source::Distro(Manager::Dnf | Manager::Yum) => (RPM_PRESENT_TEST, RPM_ABSENT_TEST),
+        Source::Distro(Manager::Pacman) => (PACMAN_PRESENT_TEST, PACMAN_ABSENT_TEST),
+        Source::Pip => (pip, pip),
+        // Not probed here (see `pkg_names`): report nothing as present.
+        Source::Cargo { .. }
+        | Source::Mise
+        | Source::Rustup(_)
+        | Source::Script(_)
+        | Source::BinaryRelease(_) => ("false", "false"),
+    };
     for n in names {
         let q = quote(n);
-        let test = match source {
-            Source::Distro(Manager::Apt) => format!(
-                "[ \"$(dpkg-query -W -f='${{db:Status-Status}}' {q} 2>/dev/null)\" = installed ]"
-            ),
-            Source::Distro(Manager::Dnf | Manager::Yum) => {
-                format!("rpm -q --whatprovides {q} >/dev/null 2>&1")
-            }
-            Source::Distro(Manager::Pacman) => format!("[ -z \"$(pacman -T {q} 2>/dev/null)\" ]"),
-            Source::Pip => format!(
-                "printf '%s\\n' \"$tp_l\" | grep -qx -- \"$(printf %s {q} | tr 'A-Z_' 'a-z-')\""
-            ),
-            // Not probed here (see `pkg_names`): report nothing as present.
-            Source::Cargo { .. }
-            | Source::Mise
-            | Source::Rustup(_)
-            | Source::Script(_)
-            | Source::BinaryRelease(_) => "false".to_string(),
-        };
-        s.push_str(&format!("if {test}; then echo \"present \"{q}; fi\n"));
+        s.push_str(&format!(
+            "tp_n={q}\nif {install}; then echo \"present $tp_n\"; fi\nif {absent}; then echo \"removable $tp_n\"; fi\n"
+        ));
     }
     s
 }
@@ -1107,14 +1117,216 @@ mod tests {
     fn will_remove_names_only_what_the_probe_found_installed() {
         let names = vec!["cmake".to_string(), "nano".to_string()];
         assert_eq!(
-            present_names(&names, "present cmake\n"),
+            present_names(&names, "present cmake\nremovable cmake\n"),
             vec!["cmake".to_string()]
         );
         let line = crate::report::WillRemove {
-            names: present_names(&names, "present cmake\n"),
+            names: present_names(&names, "present cmake\nremovable cmake\n"),
         }
         .line();
         assert_eq!(line, "pkg: will remove cmake");
+    }
+
+    /// Run `script` under bash after the stub functions in `stubs`
+    /// (functions shadow the manager commands; nothing touches a real
+    /// package database and nothing needs root). Returns stdout.
+    fn run_stubbed(stubs: &str, script: &str) -> String {
+        let full = format!("{stubs}\n{script}\n");
+        let out = std::process::Command::new("bash")
+            .arg("-c")
+            .arg(&full)
+            .output()
+            .expect("bash");
+        let text = String::from_utf8_lossy(&out.stdout).to_string();
+        assert!(
+            out.status.success(),
+            "{text}\n{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        text
+    }
+
+    /// Names the stubbed manager command was handed: the non-flag words
+    /// after the verb token on the `CALL` line.
+    fn called_with(out: &str, verb: &str) -> Vec<String> {
+        let Some(line) = out.lines().find(|l| l.starts_with("CALL ")) else {
+            return Vec::new();
+        };
+        let words: Vec<&str> = line.split_whitespace().collect();
+        let at = words.iter().rposition(|w| *w == verb).expect("verb");
+        words[at + 1..]
+            .iter()
+            .filter(|w| !w.starts_with('-'))
+            .map(|w| w.to_string())
+            .collect()
+    }
+
+    fn strings(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    const APT_STUBS: &str = r#"
+dpkg-query() {
+  local fmt="" name=""
+  while [ $# -gt 0 ]; do
+    case $1 in -f=*) fmt=${1#-f=} ;; -W) ;; *) name=$1 ;; esac
+    shift
+  done
+  case $fmt in
+    *Provides*) printf '%s\n' 'installed libz-dev' 'installed ' 'config-files gone-name' ;;
+    *) case $name in zlib1g-dev) printf installed ;; *) printf '' ;; esac ;;
+  esac
+}
+apt-get() {
+  local a
+  for a in "$@"; do case $a in install|remove|purge) echo "CALL $*"; return 0;; esac; done
+  return 0
+}
+"#;
+
+    const DNF_STUBS: &str = r#"
+rpm() {
+  if [ "$1" = -q ] && [ "$2" = --whatprovides ]; then
+    case $3 in s-nail|mailx) return 0 ;; *) return 1 ;; esac
+  fi
+  if [ "$1" = -q ]; then
+    case $2 in s-nail) return 0 ;; *) return 1 ;; esac
+  fi
+  return 1
+}
+dnf() { case $1 in install|remove) echo "CALL $*" ;; esac; return 0; }
+"#;
+
+    const PACMAN_STUBS: &str = r#"
+pacman() {
+  case $1 in
+    -T) case $2 in bash|sh) ;; *) printf '%s\n' "$2" ;; esac ;;
+    -Qqg) case $2 in gnome) printf '%s\n' gdm nautilus ;; esac ;;
+    -Q) case $2 in bash) return 0 ;; *) return 1 ;; esac ;;
+    -S|-R) echo "CALL $*" ;;
+  esac
+  return 0
+}
+"#;
+
+    #[test]
+    fn apt_probe_does_not_announce_a_provided_name() {
+        let src = Source::Distro(Manager::Apt);
+        let names = strings(&["zlib1g-dev", "libz-dev", "missing-name"]);
+        let out = run_stubbed(APT_STUBS, &pkg_probe(&src, &names));
+        assert_eq!(
+            missing_names(&names, &out),
+            strings(&["missing-name"]),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn pacman_probe_counts_an_installed_group() {
+        let src = Source::Distro(Manager::Pacman);
+        let names = strings(&["gnome", "nothing"]);
+        let out = run_stubbed(PACMAN_STUBS, &pkg_probe(&src, &names));
+        assert_eq!(missing_names(&names, &out), strings(&["nothing"]), "{out}");
+    }
+
+    /// The names the install script hands the manager are the probe's
+    /// missing names; the names the absent script hands the remover are
+    /// the probe's removable names. Each stub holds an installed package,
+    /// a provided-only name and an absent name.
+    #[test]
+    fn probe_agrees_with_the_install_and_absent_scripts() {
+        use crate::ops::pkg::{PkgSpec, Wanted};
+        type Case = (
+            Manager,
+            &'static str,
+            &'static [&'static str],
+            &'static str,
+            &'static str,
+            &'static [&'static str],
+            &'static [&'static str],
+        );
+        let cases: [Case; 3] = [
+            (
+                Manager::Apt,
+                APT_STUBS,
+                &["zlib1g-dev", "libz-dev", "missing-name"],
+                "install",
+                "remove",
+                &["missing-name"],
+                &["zlib1g-dev"],
+            ),
+            (
+                Manager::Dnf,
+                DNF_STUBS,
+                &["s-nail", "mailx", "nothing"],
+                "install",
+                "remove",
+                &["nothing"],
+                &["s-nail"],
+            ),
+            (
+                Manager::Pacman,
+                PACMAN_STUBS,
+                &["bash", "sh", "gnome", "nothing"],
+                "-S",
+                "-R",
+                &["nothing"],
+                &["bash"],
+            ),
+        ];
+        for (m, stubs, names, iverb, rverb, want_missing, want_removed) in cases {
+            let names = strings(names);
+            let src = Source::Distro(m);
+            let probe = run_stubbed(stubs, &pkg_probe(&src, &names));
+
+            let mut install = PkgSpec::new(m, names.clone());
+            install.wanted = Wanted::Present;
+            let ran = run_stubbed(stubs, &install.render());
+            let handed = called_with(&ran, iverb);
+            assert_eq!(
+                handed,
+                strings(want_missing),
+                "{m:?} install script:\n{ran}"
+            );
+            assert_eq!(
+                handed,
+                missing_names(&names, &probe),
+                "{m:?} probe:\n{probe}"
+            );
+
+            let mut absent = PkgSpec::new(m, names.clone());
+            absent.wanted = Wanted::Absent;
+            let ran = run_stubbed(stubs, &absent.render());
+            let removed = called_with(&ran, rverb);
+            assert_eq!(
+                removed,
+                strings(want_removed),
+                "{m:?} absent script:\n{ran}"
+            );
+            assert_eq!(
+                removed,
+                present_names(&names, &probe),
+                "{m:?} probe:\n{probe}"
+            );
+        }
+    }
+
+    /// A provided-only name is not announced as removed; an installed
+    /// package is.
+    #[test]
+    fn will_remove_skips_a_provided_only_name() {
+        let apt = strings(&["libz-dev", "zlib1g-dev"]);
+        let out = run_stubbed(APT_STUBS, &pkg_probe(&Source::Distro(Manager::Apt), &apt));
+        assert_eq!(present_names(&apt, &out), strings(&["zlib1g-dev"]), "{out}");
+        let dnf = strings(&["mailx", "s-nail"]);
+        let out = run_stubbed(DNF_STUBS, &pkg_probe(&Source::Distro(Manager::Dnf), &dnf));
+        assert_eq!(present_names(&dnf, &out), strings(&["s-nail"]), "{out}");
+        let pac = strings(&["sh", "bash"]);
+        let out = run_stubbed(
+            PACMAN_STUBS,
+            &pkg_probe(&Source::Distro(Manager::Pacman), &pac),
+        );
+        assert_eq!(present_names(&pac, &out), strings(&["bash"]), "{out}");
     }
 
     #[test]
