@@ -122,7 +122,7 @@ impl OpSpec {
     }
 
     /// The shell script this op runs on a host with the given `os`, as
-    /// every reader sees it (plan, tests): secrets are shown as `<hash>`.
+    /// every reader sees it (plan, tests): secrets are shown as `<secret>`.
     /// What the shell receives is [`OpSpec::exec_script`].
     pub fn script(&self, os: &Os) -> String {
         match self {

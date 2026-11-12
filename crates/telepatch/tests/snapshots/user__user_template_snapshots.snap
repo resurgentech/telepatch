@@ -110,8 +110,17 @@ if ! getent passwd "$tp_u" >/dev/null 2>&1; then
   rc=$?
   if [ "$rc" -eq 0 ]; then changed=1; created=1; fi
   if [ "$rc" -eq 0 ]; then
-    printf '%s:%s\n' "$tp_u" '<hash>' | chpasswd -e
+    printf '%s:%s\n' "$tp_u" '<secret>' | chpasswd -e
     rc=$?
+    if [ "$rc" -eq 0 ]; then
+      tp_w=$(printf %s '<secret>' | sha256sum | cut -d' ' -f1)
+      tp_shadow=$(getent shadow "$tp_u" | cut -d: -f2)
+      tp_g=$(printf %s "$tp_shadow" | sha256sum | cut -d' ' -f1)
+      if [ "$tp_w" != "$tp_g" ]; then
+        echo "telepatch: user $tp_u: password checksum mismatch" >&2
+        rc=1
+      fi
+    fi
   fi
 else
   :

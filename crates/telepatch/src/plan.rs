@@ -39,6 +39,7 @@ fn op_line(out: &mut String, id: usize, op: &OpNode, os: &Os) {
     for a in &op.allowed {
         let _ = writeln!(out, "      {a}");
     }
+    // `script` is the redacted form: a secret is `<secret>`, not its value.
     for line in op.spec.script(os).lines() {
         let _ = writeln!(out, "      | {line}");
     }

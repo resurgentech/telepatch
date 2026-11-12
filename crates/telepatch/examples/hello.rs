@@ -24,5 +24,5 @@ fn entry(h: Host<Vars>) -> PlaybookFuture {
 }
 
 fn main() -> ExitCode {
-    telepatch::cli::main(&[Playbook::new("hello", entry)])
+    telepatch::cli::main(&[Playbook::new("hello", entry)]).run()
 }

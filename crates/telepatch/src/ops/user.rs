@@ -14,7 +14,9 @@
 //! pipe, so it is never in the argv of a process on the host. It exists
 //! only in the executed script ([`UserSpec::render`] with `reveal`); the
 //! text every reader sees ([`OpSpec::script`](crate::trace::OpSpec::script),
-//! the plan, `Debug`) shows `<hash>` instead. An empty hash is not applied.
+//! the plan, `Debug`) shows `<secret>` instead. An empty hash is not applied.
+//! After `chpasswd -e` the host compares `sha256sum` of the wanted hash with
+//! the shadow field. A different hash on an existing account is not applied.
 
 use std::fmt;
 use std::ops::Deref;
@@ -22,6 +24,7 @@ use std::ops::Deref;
 use crate::TraceError;
 use crate::host::{Host, OpHandle};
 use crate::key::Key;
+use crate::secret::Secret;
 use crate::sh::quote;
 use crate::trace::{OpSpec, Principal};
 
@@ -32,7 +35,7 @@ pub struct UserSpec {
     /// Groups the account must be in (appended, never removed).
     pub groups_add: Vec<String>,
     /// A crypt(3) hash, applied only when this op creates the account.
-    password_hash: Option<String>,
+    password_hash: Option<Secret>,
 }
 
 // Hand-written so a `{:?}` of a trace never prints the hash.
@@ -42,7 +45,10 @@ impl fmt::Debug for UserSpec {
             .field("name", &self.name)
             .field("shell", &self.shell)
             .field("groups_add", &self.groups_add)
-            .field("password_hash", &self.password().map(|_| "<hash>"))
+            .field(
+                "password_hash",
+                &self.password_hash.as_ref().map(|_| "<secret>"),
+            )
             .finish()
     }
 }
@@ -57,13 +63,27 @@ impl UserSpec {
         }
     }
 
-    /// The hash to apply: `None` when unset or empty.
-    fn password(&self) -> Option<&str> {
-        self.password_hash.as_deref().filter(|h| !h.is_empty())
+    pub(crate) fn password_secret(&self) -> Option<&Secret> {
+        self.password_hash.as_ref()
+    }
+
+    pub(crate) fn password_secret_mut(&mut self) -> Option<&mut Secret> {
+        self.password_hash.as_mut()
+    }
+
+    /// True when the plan, log, report and events should show `<secret>`.
+    pub(crate) fn shows_secret(&self) -> bool {
+        match &self.password_hash {
+            None => false,
+            Some(s) => match s.plain() {
+                Some(v) => !v.is_empty(),
+                None => true,
+            },
+        }
     }
 
     /// The script body. `reveal` puts the real hash in; without it the
-    /// hash is the text `<hash>`.
+    /// hash is the text `<secret>`.
     pub fn render(&self, reveal: bool) -> String {
         let mut s = format!("created=0\ntp_u={}\n", quote(&self.name));
         if !self.groups_add.is_empty() {
@@ -86,14 +106,26 @@ impl UserSpec {
             " -- \"$tp_u\"\n  rc=$?\n  if [ \"$rc\" -eq 0 ]; then changed=1; created=1; fi\n",
         );
         s.push_str(&add);
-        if self.password().is_some() {
-            let h = match self.password() {
-                Some(h) if reveal => quote(h),
-                _ => "'<hash>'".to_string(),
-            };
-            s.push_str(&format!(
-                "  if [ \"$rc\" -eq 0 ]; then\n    printf '%s:%s\\n' \"$tp_u\" {h} | chpasswd -e\n    rc=$?\n  fi\n"
-            ));
+        if let Some(secret) = &self.password_hash {
+            match secret.plain() {
+                Some("") => {}
+                other => {
+                    let unresolved = reveal && other.is_none();
+                    if unresolved {
+                        s.push_str(
+                            "  echo \"telepatch: user $tp_u: password was not resolved\" >&2\n  rc=1\n",
+                        );
+                    } else {
+                        let h = match other {
+                            Some(v) if reveal => quote(v),
+                            _ => "'<secret>'".to_string(),
+                        };
+                        s.push_str(&format!(
+                            "  if [ \"$rc\" -eq 0 ]; then\n    printf '%s:%s\\n' \"$tp_u\" {h} | chpasswd -e\n    rc=$?\n    if [ \"$rc\" -eq 0 ]; then\n      tp_w=$(printf %s {h} | sha256sum | cut -d' ' -f1)\n      tp_shadow=$(getent shadow \"$tp_u\" | cut -d: -f2)\n      tp_g=$(printf %s \"$tp_shadow\" | sha256sum | cut -d' ' -f1)\n      if [ \"$tp_w\" != \"$tp_g\" ]; then\n        echo \"telepatch: user $tp_u: password checksum mismatch\" >&2\n        rc=1\n      fi\n    fi\n  fi\n"
+                        ));
+                    }
+                }
+            }
         }
         s.push_str("else\n  :\n");
         if let Some(sh) = &self.shell {
@@ -171,16 +203,17 @@ impl UserHandle {
 
     /// A crypt(3) hash for the password, applied only when this op
     /// creates the account. Empty: not applied (the account stays
-    /// locked). Never shown in the plan, report, log or events.
+    /// locked). The plan, report, log and events show `<secret>`. The
+    /// host compares the shadow field by checksum.
     #[track_caller]
-    pub fn password_hash(&self, hash: &str) -> Self {
-        if hash.contains(['\n', '\r', '\0']) {
+    pub fn password_hash(&self, hash: &Secret) -> Self {
+        if hash.plain().is_some_and(|h| h.contains(['\n', '\r', '\0'])) {
             self.0.record_error(TraceError::new(
                 "user: password_hash must be a single line".to_string(),
             ));
             return self.clone();
         }
-        self.spec(|u| u.password_hash = Some(hash.to_string()))
+        self.spec(|u| u.password_hash = Some(hash.clone()))
     }
 }
 
@@ -272,12 +305,14 @@ mod tests {
     #[test]
     fn debug_and_display_hide_the_hash() {
         let mut u = UserSpec::new("x");
-        u.password_hash = Some("$6$secretsalt$secrethash".to_string());
-        assert!(!format!("{u:?}").contains("secret"));
-        assert!(!u.render(false).contains("secret"));
-        assert!(u.render(false).contains("<hash>"));
+        u.password_hash = Some(Secret::literal("$6$saltsalt$secrethash"));
+        assert!(!format!("{u:?}").contains("secrethash"));
+        assert!(format!("{u:?}").contains("<secret>"));
+        assert!(!u.render(false).contains("secrethash"));
+        assert!(u.render(false).contains("<secret>"));
+        assert!(u.render(false).contains("sha256sum"));
         assert!(u.render(true).contains("secrethash"));
-        u.password_hash = Some(String::new());
+        u.password_hash = Some(Secret::literal(""));
         assert!(!u.render(true).contains("chpasswd"));
     }
 }

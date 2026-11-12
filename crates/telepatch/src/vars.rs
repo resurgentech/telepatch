@@ -23,7 +23,7 @@
 //! arise at load, before any host is traced.
 
 use std::cell::RefCell;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use crate::role::Playbook;
@@ -84,7 +84,7 @@ pub fn load<V: DeserializeOwned>(source: &str, text: &str, defaults: &str) -> Re
     file.check(&shape)?;
     defs.check(&shape)?;
     let (merged, origins) = merge(&shape, &file, &defs);
-    toml::from_str::<V>(&merged).map_err(|e| {
+    let map_err = |e: toml::de::Error| {
         let line = e.span().map(|s| merged[..s.start].matches('\n').count());
         match line.and_then(|l| origins.iter().find(|(n, _)| *n == l)) {
             Some((
@@ -109,7 +109,32 @@ pub fn load<V: DeserializeOwned>(source: &str, text: &str, defaults: &str) -> Re
             }
             None => format!("{source}: {}", e.message()),
         }
-    })
+    };
+    // The first parse keeps file:line on a type error. The second walks the
+    // value so a `Secret` records its dotted field. A failure of the second
+    // after the first succeeded is a bug in the path tracker, returned as-is.
+    if let Err(e) = toml::from_str::<V>(&merged) {
+        return Err(map_err(e));
+    }
+    let value: toml::Value = toml::from_str(&merged).map_err(|e| format!("{source}: {e}"))?;
+    crate::secret::from_value(&value).map_err(|e| format!("{source}: {e}"))
+}
+
+/// Dotted paths of `Secret` fields in `paths` that were given a literal.
+/// A reference is not listed. The value is not.
+pub fn secret_literals<V: DeserializeOwned>(paths: &[PathBuf]) -> Result<Vec<String>, String> {
+    let mut found = Vec::new();
+    for path in paths {
+        let text = std::fs::read_to_string(path)
+            .map_err(|e| format!("cannot read vars file {}: {e}", path.display()))?;
+        let (res, hits) =
+            crate::secret::collect_literals(|| load::<V>(&path.display().to_string(), &text, ""));
+        res?;
+        for h in hits {
+            found.push(format!("{}: {h}", path.display()));
+        }
+    }
+    Ok(found)
 }
 
 // ---- documents with line numbers ----
@@ -513,10 +538,10 @@ macro_rules! leaf {
 impl<'de> Deserializer<'de> for Probe {
     type Error = E;
 
-    fn deserialize_any<V: Visitor<'de>>(self, _: V) -> Result<V::Value, E> {
-        Err(de::Error::custom(
-            "the vars type uses deserialize_any, which cannot be probed",
-        ))
+    fn deserialize_any<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, E> {
+        // `Secret` (and any untagged value) deserializes through `deserialize_any`.
+        // The probe discards the value; a flat field stays a pass-through section.
+        visitor.visit_str("")
     }
 
     leaf! {

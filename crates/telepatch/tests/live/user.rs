@@ -10,13 +10,13 @@ use std::process::{Command, Stdio};
 use telepatch::executor::{HostSpec, RunOpts, Stdout, Target, run};
 use telepatch::report::{HostStatus, Report};
 use telepatch::transport::docker::DockerTransport;
-use telepatch::{Host, Playbook, PlaybookFuture};
+use telepatch::{Host, Playbook, PlaybookFuture, Secret};
 
 use crate::container::Container;
 
 fn pb_run(h: Host<String>) -> PlaybookFuture {
     Box::pin(async move {
-        let hash = h.vars.clone();
+        let hash = Secret::literal(&*h.vars);
         h.group("tpgroup");
         h.user("tpdev")
             .shell("/bin/bash")

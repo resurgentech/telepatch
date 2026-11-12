@@ -484,6 +484,12 @@ fn shell_of<'a, S: ShellSet>(shells: &'a mut S, who: &Principal) -> Result<&'a m
 /// not open yet ([`ShellSet::open_user`]); then the package probes, sent
 /// all at once and collected (distro and pip on the root shell, each
 /// non-distro probe on its op's principal's shell).
+/// Resolve secret references in `window` before any probe. A miss is the
+/// error string (`secret <var>: ... (role <role>)`) and nothing is sent.
+pub fn resolve_secrets(window: &mut Window) -> Result<(), String> {
+    crate::secret::resolve_ops(&mut window.ops)
+}
+
 pub async fn prepare_window<S: ShellSet>(
     shells: &mut S,
     window: &Window,
@@ -771,6 +777,14 @@ pub async fn prepare_window<S: ShellSet>(
         let root = shell_of(shells, &Principal::Root)?;
         if let Ok((_, out)) = collect(root, id).await {
             for (name, detail) in crate::ops::user::findings(&out) {
+                let marked = user_specs
+                    .iter()
+                    .any(|u| u.name == name && u.shows_secret());
+                let name = if marked {
+                    format!("{name} <secret>")
+                } else {
+                    name
+                };
                 will.will_create.push(WillCreate {
                     window: window.number,
                     kind: "user".to_string(),

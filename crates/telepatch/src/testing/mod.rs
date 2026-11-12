@@ -74,6 +74,9 @@ pub fn block_on<F: std::future::Future>(fut: F) -> F::Output {
 /// Run `playbook` on one host through the engine (fake executor, every fact
 /// absent) and render the optimized plan: the windows the executor received,
 /// merged ops annotated with their member roles.
+///
+/// Does not resolve secrets. The fake executor never asks the store, so a
+/// reference stays `<secret>` and a missing value is not an error.
 pub fn plan<V>(playbook: &Playbook<V>, host: &FixtureHost<V>) -> String {
     plan_with(playbook, host, FakeExecutor::new())
 }

@@ -161,6 +161,7 @@ pub struct WillCreate {
 
 impl WillCreate {
     /// `group docker: will create`, `user bot: groups +docker`.
+    /// A user whose password is set is `user n <secret>: ...`.
     pub fn line(&self) -> String {
         format!(
             "{} {}: {}",

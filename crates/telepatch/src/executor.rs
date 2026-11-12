@@ -817,6 +817,7 @@ fn describe(op: &OpNode) -> String {
             )
         }
         OpSpec::Group(g) => format!("group {}", g.name),
+        OpSpec::User(u) if u.shows_secret() => format!("user {} <secret>", u.name),
         OpSpec::User(u) => format!("user {}", u.name),
         OpSpec::Repo(r) => format!("repo {}", r.name),
         OpSpec::Svc(s) => match s.action() {
@@ -1534,6 +1535,9 @@ impl Executor for HostExec {
     }
 
     async fn apply(&mut self, host: &HostInfo, window: &Window) -> Result<Applied, String> {
+        let mut window = window.clone();
+        prepare::resolve_secrets(&mut window)?;
+        let window = &window;
         let kind = match window.kind {
             WindowKind::NonMutating => "non-mutating",
             WindowKind::ImplicitBarrier => "implicit barrier",
@@ -1977,6 +1981,7 @@ impl HostReport {
 /// Run `playbook` on every host concurrently and return the report. Builds
 /// its own current-thread runtime, so call it from plain (non-async) code.
 pub fn run<V: 'static>(playbook: &Playbook<V>, hosts: Vec<HostSpec<V>>, opts: RunOpts) -> Report {
+    crate::secret::begin_run();
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()

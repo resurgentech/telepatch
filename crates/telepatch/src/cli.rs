@@ -23,6 +23,7 @@ use serde::de::DeserializeOwned;
 use crate::executor::{HostSpec, RunOpts, Stdout, Target, run};
 use crate::facts::os::Os;
 use crate::role::Playbook;
+use crate::secret::SecretBackend;
 use crate::testing::{self, FixtureHost};
 use crate::transport::local::LocalTransport;
 use crate::transport::ssh::SshTransport;
@@ -85,20 +86,48 @@ fn parse_ssh_option(s: &str) -> Result<String, String> {
     }
 }
 
-/// Parse `std::env::args`, run, print, return the exit code. Each
+/// A playbook binary: [`main`] returns this, [`.secrets`](Main::secrets)
+/// registers stores, [`.run`](Main::run) parses args and runs.
+pub struct Main<'a, V> {
+    playbooks: &'a [Playbook<V>],
+    backends: Vec<Box<dyn SecretBackend>>,
+}
+
+/// Parse `std::env::args` once [`.run`](Main::run) is called. Each
 /// playbook's own defaults ([`Playbook::defaults`]) are the third of the
 /// four layers (see [`crate::vars`]).
-pub fn main<V: DeserializeOwned + Default + 'static>(playbooks: &[Playbook<V>]) -> ExitCode {
-    let args: Vec<String> = std::env::args().collect();
-    let (text, code) = dispatch(
-        &args,
+pub fn main<V: DeserializeOwned + Default + 'static>(playbooks: &[Playbook<V>]) -> Main<'_, V> {
+    Main {
         playbooks,
-        LocalTransport::new,
-        SshTransport::new,
-        Stdout::Inherit,
-    );
-    print!("{text}");
-    ExitCode::from(code as u8)
+        backends: Vec::new(),
+    }
+}
+
+impl<'a, V: DeserializeOwned + Default + 'static> Main<'a, V> {
+    /// Register a secret store. Built-in `env`, `file` and `prompt` stay
+    /// available. The first extra backend with a scheme wins over later ones.
+    pub fn secrets(mut self, backend: impl SecretBackend + 'static) -> Self {
+        self.backends.push(Box::new(backend));
+        self
+    }
+
+    /// Parse args, run, print, return the exit code.
+    pub fn run(self) -> ExitCode {
+        let args: Vec<String> = std::env::args().collect();
+        let playbooks = self.playbooks;
+        let code = crate::secret::with_backends(self.backends, || {
+            let (text, code) = dispatch(
+                &args,
+                playbooks,
+                LocalTransport::new,
+                SshTransport::new,
+                Stdout::Inherit,
+            );
+            print!("{text}");
+            code
+        });
+        ExitCode::from(code as u8)
+    }
 }
 
 /// [`main`] without the process: returns everything it would print (op

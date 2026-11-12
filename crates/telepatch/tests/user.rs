@@ -14,7 +14,11 @@ use telepatch::plan::render_host;
 use telepatch::report::{HostStatus, Report};
 use telepatch::trailer::{OpKind, UserResult, render_op, split_stream, wrap};
 use telepatch::transport::local::LocalTransport;
-use telepatch::{Host, Key, Node, NodeId, Playbook, PlaybookFuture, Value};
+use telepatch::{Host, Key, Node, NodeId, Playbook, PlaybookFuture, Secret, Value};
+
+fn pw(s: &str) -> Secret {
+    Secret::literal(s)
+}
 
 const NONCE: &str = "t0n";
 
@@ -53,6 +57,7 @@ fn wrapped_display(h: &Host<()>, id: NodeId) -> String {
 const GETENT: &str = r#"case "$1" in
 group) grep -qx -- "$2" @D@/groups 2>/dev/null && echo "$2:x:1:" || exit 2;;
 passwd) [ -d @D@/users/"$2" ] && echo "$2:x:1000:1000::/home/$2:$(cat @D@/users/"$2"/shell)" || exit 2;;
+shadow) grep -m1 "^$2:" @D@/shadow 2>/dev/null || exit 2;;
 *) exit 3;;
 esac"#;
 
@@ -187,7 +192,7 @@ fn user_create_then_rerun_changes_nothing() {
         .user("tpdev")
         .shell("/bin/bash")
         .groups_add(["sudo"])
-        .password_hash(&hash)
+        .password_hash(&pw(&hash))
         .id();
     let (r, _) = run_script(&wrapped(&h, id), d.path(), &bin);
     assert_eq!(r, res(0, true, true));
@@ -251,8 +256,8 @@ fn user_password_is_applied_only_on_create() {
     let second = fixture_hash("two");
     assert_ne!(first, second);
     let h = host();
-    let a = h.user("u").password_hash(&first).id();
-    let b = h.user("u").password_hash(&second).id();
+    let a = h.user("u").password_hash(&pw(&first)).id();
+    let b = h.user("u").password_hash(&pw(&second)).id();
     let (r, _) = run_script(&wrapped(&h, a), d.path(), &bin);
     assert_eq!(r, res(0, true, true));
     let (r, _) = run_script(&wrapped(&h, b), d.path(), &bin);
@@ -262,7 +267,7 @@ fn user_password_is_applied_only_on_create() {
 
     // An account that already existed never gets the password.
     add_user(d.path(), "old", "/bin/sh", "old");
-    let c = h.user("old").password_hash(&first).id();
+    let c = h.user("old").password_hash(&pw(&first)).id();
     let (r, _) = run_script(&wrapped(&h, c), d.path(), &bin);
     assert_eq!(r, res(0, false, false));
     assert_eq!(log(d.path()).matches("chpasswd").count(), 1);
@@ -273,7 +278,7 @@ fn user_empty_hash_is_not_applied() {
     let d = tempfile::tempdir().unwrap();
     let bin = stubs(d.path());
     let h = host();
-    let id = h.user("locked").password_hash("").id();
+    let id = h.user("locked").password_hash(&pw("")).id();
     let (r, _) = run_script(&wrapped(&h, id), d.path(), &bin);
     assert_eq!(r, res(0, true, true));
     assert_eq!(log(d.path()), "useradd -m -- locked\n");
@@ -318,20 +323,21 @@ fn user_names_are_quoted() {
 fn user_hash_is_in_the_executed_script_only() {
     let hash = fixture_hash("h");
     let h = host();
-    let id = h.user("tpdev").password_hash(&hash).id();
+    let id = h.user("tpdev").password_hash(&pw(&hash)).id();
     assert!(wrapped(&h, id).contains(&hash), "the shell gets it");
     assert!(!wrapped_display(&h, id).contains(&hash));
-    assert!(wrapped_display(&h, id).contains("<hash>"));
+    assert!(wrapped_display(&h, id).contains("<secret>"));
+    assert!(wrapped_display(&h, id).contains("sha256sum"));
     let plan = render_host("h", &h.os, &h.snapshot());
     assert!(!plan.contains(&hash), "{plan}");
-    assert!(plan.contains("<hash>"), "{plan}");
+    assert!(plan.contains("<secret>"), "{plan}");
     assert!(!format!("{:?}", h.snapshot()).contains(&hash));
 }
 
 #[test]
 fn user_password_hash_must_be_one_line() {
     let h = host();
-    h.user("u").password_hash("a\nb");
+    h.user("u").password_hash(&pw("a\nb"));
     let errs = h.snapshot().errors;
     assert_eq!(errs.len(), 1, "{errs:?}");
     assert!(errs[0].to_string().contains("password_hash"));
@@ -350,7 +356,7 @@ fn user_template_snapshots() {
         .user("tpdev")
         .shell("/bin/bash")
         .groups_add(["sudo"])
-        .password_hash("$6$fixture$placeholder")
+        .password_hash(&pw("$6$fixture$placeholder"))
         .id();
     insta::assert_snapshot!(format!(
         "{}\n{}\n{}",
@@ -367,7 +373,7 @@ fn user_plan_shows_effects() {
     h.user("tpdev")
         .shell("/bin/bash")
         .groups_add(["docker"])
-        .password_hash("$6$fixture$placeholder");
+        .password_hash(&pw("$6$fixture$placeholder"));
     h.user("bare");
     insta::assert_snapshot!(render_host("h", &h.os, &h.snapshot()));
 }
@@ -433,8 +439,8 @@ fn pb_for(run_: fn(Host<PathBuf>) -> PlaybookFuture) -> Playbook<PathBuf> {
 
 /// `h.vars` is the state dir; the hash is read from its `hash` file so
 /// the playbook (a plain fn) can carry a per-test fixture.
-fn hash_in(h: &Host<PathBuf>) -> String {
-    std::fs::read_to_string(h.vars.join("hash")).unwrap()
+fn hash_in(h: &Host<PathBuf>) -> Secret {
+    Secret::literal(std::fs::read_to_string(h.vars.join("hash")).unwrap())
 }
 
 #[test]
@@ -467,14 +473,15 @@ fn user_executor_prepare_lines_then_changed_0_and_no_hash_leak() {
         r1.render()
     );
     for want in [
-        "== h1 [prepare] user tpdev: will create ==",
+        "== h1 [prepare] user tpdev <secret>: will create ==",
         "== h1 [prepare] user bot: groups +docker ==",
         "== h1 [prepare] user bot: shell -> /bin/bash ==",
         "== h1 [prepare] user plain: will create ==",
     ] {
         assert!(out1.contains(want), "{want}\n{out1}");
     }
-    assert!(r1.render().contains("h1: user tpdev: will create"));
+    assert!(r1.render().contains("h1: user tpdev <secret>: will create"));
+    assert!(out1.contains("user tpdev <secret>"));
     assert!(r1.render().contains("h1: user bot: groups +docker"));
     assert!(out1.contains("user tpdev"), "executor label: {out1}");
     assert_eq!(shell_of(d.path(), "bot"), "/bin/bash");
@@ -491,6 +498,8 @@ fn user_executor_prepare_lines_then_changed_0_and_no_hash_leak() {
     ] {
         assert!(!text.contains(&hash), "hash leaked into {what}:\n{text}");
     }
+    assert!(ev.contains("<secret>"), "{ev}");
+    assert!(r1.render().contains("<secret>"));
 
     let (r2, out2) = go(&pb, d.path(), None);
     assert_eq!(r2.hosts[0].status, HostStatus::Ok, "{}", r2.render());
