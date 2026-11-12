@@ -1118,3 +1118,18 @@ are appended, never edited in; a hook refuses rewrites.
   `/tmp`). VM deleted. Not an OOM. Gate E green (`cargo test
   --workspace`, `just lint`).
 - Commits: telepatch 7593e84
+
+## 2026-11-11 — T94 Controller-side files and commands
+
+- `local_file`, `local_dir` and `local([argv])` are read in prepare.
+  A file or tree is compared by sha256 and streamed only where it
+  differs, in 256 KiB chunks, each its own shell script. Nothing on
+  the host is removed by a directory copy. `~` is the operator's
+  home; a relative path is beside the vars file. A missing file or
+  a failed command blocks the host before that window changes it.
+  `.line(&pubkey)` takes a `local_file`. `.via_controller()` downloads
+  with curl or wget on the controller and streams the same way.
+- `cargo test --workspace` and `just lint` green. The local executor
+  test copies a 20 MiB binary (interior NULs; run 2 does not rewrite).
+  No VM.
+- Commits: telepatch d7083e7
