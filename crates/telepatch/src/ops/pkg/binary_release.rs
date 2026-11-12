@@ -391,6 +391,11 @@ impl BinaryRelease {
                     }
                     s.push_str(&installed_is_wanted);
                 }
+                Wanted::Absent => {
+                    s.push_str(
+                        "echo \"br block .absent() is only available on the distro manager\"; return 0\n",
+                    );
+                }
             }
             s.push_str("echo \"br want $tp_want\"\n");
         } else if *wanted != Wanted::Latest {

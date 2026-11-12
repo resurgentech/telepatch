@@ -63,6 +63,11 @@ fn conflicts(a: &Item, b: &Item) -> bool {
     if (is_cargo(a) && is_distro_pkg(b)) || (is_cargo(b) && is_distro_pkg(a)) {
         return true;
     }
+    // An absent op and an install op keep trace order: neither hoists
+    // across the other, even when their package names do not overlap.
+    if (is_pkg_absent(a) && is_pkg_install(b)) || (is_pkg_install(a) && is_pkg_absent(b)) {
+        return true;
+    }
     hit(&a.writes, &b.reads) || hit(&a.writes, &b.writes) || hit(&a.reads, &b.writes)
 }
 
@@ -76,6 +81,14 @@ fn is_distro_pkg(n: &crate::trace::OpNode) -> bool {
 
 fn is_cargo(n: &crate::trace::OpNode) -> bool {
     matches!(&n.spec, OpSpec::Pkg(p) if matches!(p.source, crate::ops::pkg::Source::Cargo { .. }))
+}
+
+fn is_pkg_absent(n: &crate::trace::OpNode) -> bool {
+    matches!(&n.spec, OpSpec::Pkg(p) if matches!(p.wanted, crate::ops::pkg::Wanted::Absent))
+}
+
+fn is_pkg_install(n: &crate::trace::OpNode) -> bool {
+    matches!(&n.spec, OpSpec::Pkg(p) if !matches!(p.wanted, crate::ops::pkg::Wanted::Absent))
 }
 
 fn is_rustup(item: &Item) -> bool {
@@ -92,6 +105,7 @@ struct MergeKey {
     /// `None` for rustup ([`crate::ops::pkg::PkgSpec::merge_wanted`]).
     wanted: Option<crate::ops::pkg::Wanted>,
     mode: crate::ops::pkg::PkgMode,
+    purge: bool,
     run_as: RunAs,
     guard: Option<Guard>,
     allow_fail: bool,
@@ -108,6 +122,7 @@ fn merge_key(item: &Item) -> Option<MergeKey> {
             scope: p.merge_scope(),
             wanted: p.merge_wanted(),
             mode: p.mode,
+            purge: p.purge,
             run_as: w.node.run_as.clone(),
             guard: w.node.guard.clone(),
             allow_fail: w.node.allow_fail,
@@ -784,6 +799,30 @@ mod tests {
         // Not with other kinds of op.
         let g = Graph::from_items(vec![repo(0, "r"), file(1, "/etc/x")]);
         assert!(!g.edges().contains(&(0, 1)));
+    }
+
+    fn absent(id: usize, name: &str) -> Item {
+        let mut spec = PkgSpec::new(Manager::Apt, vec![name.into()]);
+        spec.wanted = crate::ops::pkg::Wanted::Absent;
+        let w: Vec<Key> = spec.keys().into_iter().collect();
+        op(id, OpSpec::Pkg(spec), &[], &w)
+    }
+
+    #[test]
+    fn an_absent_op_does_not_cross_an_install() {
+        // install, remove, install: the later install does not hoist over
+        // the removal, and the two removals do not merge across an install.
+        let g = optimize(vec![pkg(0, "curl"), absent(1, "cmake"), pkg(2, "wget")]);
+        assert_eq!(ids(g), [vec![0], vec![1], vec![2]]);
+        let g = optimize(vec![absent(0, "cmake"), pkg(1, "git"), absent(2, "nano")]);
+        assert_eq!(ids(g), [vec![0], vec![1], vec![2]]);
+        let ops = optimize(vec![absent(0, "cmake"), absent(1, "nano")]).schedule();
+        assert_eq!(ops.len(), 1);
+        let OpSpec::Pkg(p) = &ops[0].node.spec else {
+            panic!()
+        };
+        assert_eq!(p.names, ["cmake", "nano"]);
+        assert_eq!(p.wanted, crate::ops::pkg::Wanted::Absent);
     }
 
     #[test]

@@ -33,7 +33,7 @@ use crate::engine::Window;
 use crate::facts::os::Os;
 use crate::ops::pkg::{Manager, PkgMode, PkgSpec, Source, Wanted};
 use crate::pool::{Shell, ShellError};
-use crate::report::{FetchLine, FetchState, WillChange, WillCreate, WillInstall};
+use crate::report::{FetchLine, FetchState, WillChange, WillCreate, WillInstall, WillRemove};
 use crate::sh::quote;
 use crate::trace::{NodeId, OpNode, OpSpec, Principal};
 use crate::trailer::{OpKind, wrap};
@@ -80,7 +80,7 @@ pub fn pkg_names(window: &Window) -> Vec<(Source, Vec<String>)> {
         let OpSpec::Pkg(p) = &op.node.spec else {
             continue;
         };
-        if p.mode == PkgMode::BuildDep {
+        if p.mode == PkgMode::BuildDep || p.wanted == Wanted::Absent {
             continue;
         }
         // Only distro and pip names go through `pkg_probe`; the other
@@ -97,6 +97,73 @@ pub fn pkg_names(window: &Window) -> Vec<(Source, Vec<String>)> {
         };
         for n in &p.names {
             if !n.starts_with('@') && !out[i].1.contains(n) {
+                out[i].1.push(n.clone());
+            }
+        }
+    }
+    out.retain(|(_, v)| !v.is_empty());
+    out
+}
+
+/// Package names an absent op asks to remove, per manager, in first-seen
+/// order. Install names stay in [`pkg_names`].
+pub fn pkg_absent(window: &Window) -> Vec<(Source, Vec<String>)> {
+    let mut out: Vec<(Source, Vec<String>)> = Vec::new();
+    for op in &window.ops {
+        let OpSpec::Pkg(p) = &op.node.spec else {
+            continue;
+        };
+        if p.wanted != Wanted::Absent {
+            continue;
+        }
+        if !matches!(p.source, Source::Distro(_) | Source::Pip) {
+            continue;
+        }
+        let i = match out.iter().position(|(s, _)| *s == p.source) {
+            Some(i) => i,
+            None => {
+                out.push((p.source.clone(), Vec::new()));
+                out.len() - 1
+            }
+        };
+        for n in &p.names {
+            if !n.starts_with('@') && !out[i].1.contains(n) {
+                out[i].1.push(n.clone());
+            }
+        }
+    }
+    out.retain(|(_, v)| !v.is_empty());
+    out
+}
+
+/// Names of `names` that `pkg_probe` printed as `present`.
+pub fn present_names(names: &[String], output: &str) -> Vec<String> {
+    let present: BTreeSet<&str> = output
+        .lines()
+        .filter_map(|l| l.strip_prefix("present "))
+        .collect();
+    names
+        .iter()
+        .filter(|n| present.contains(n.as_str()))
+        .cloned()
+        .collect()
+}
+
+fn union_pkg_names(
+    installs: &[(Source, Vec<String>)],
+    absents: &[(Source, Vec<String>)],
+) -> Vec<(Source, Vec<String>)> {
+    let mut out = installs.to_vec();
+    for (src, names) in absents {
+        let i = match out.iter().position(|(s, _)| s == src) {
+            Some(i) => i,
+            None => {
+                out.push((src.clone(), Vec::new()));
+                out.len() - 1
+            }
+        };
+        for n in names {
+            if !out[i].1.contains(n) {
                 out[i].1.push(n.clone());
             }
         }
@@ -303,6 +370,7 @@ pub fn source_changes(window: usize, p: &PkgSpec, out: Option<&str>) -> Vec<Will
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Prepared {
     pub will_install: Vec<WillInstall>,
+    pub will_remove: Vec<WillRemove>,
     pub will_change: Vec<WillChange>,
     pub will_create: Vec<WillCreate>,
     pub fetches: Vec<FetchLine>,
@@ -503,7 +571,9 @@ pub async fn prepare_window<S: ShellSet>(
         .filter(|u| !users_ok.contains(*u))
         .cloned()
         .collect();
-    let groups = pkg_names(window);
+    let installs = pkg_names(window);
+    let absents = pkg_absent(window);
+    let groups = union_pkg_names(&installs, &absents);
 
     let mut next = || {
         *seq += 1;
@@ -718,12 +788,26 @@ pub async fn prepare_window<S: ShellSet>(
         fetches,
         ..Prepared::default()
     };
-    for ((m, names), id) in groups.iter().zip(pkg_ids) {
+    for ((m, _names), id) in groups.iter().zip(pkg_ids) {
         // Gather only: a failed probe means "unknown", not "blocked".
         let root = shell_of(shells, &Principal::Root)?;
-        let missing = match collect(root, id).await {
-            Ok((_, out)) => missing_names(names, &out),
-            Err(_) => names.clone(),
+        let probed = match collect(root, id).await {
+            Ok((_, out)) => Some(out),
+            Err(_) => None,
+        };
+        let install_names = installs
+            .iter()
+            .find(|(s, _)| s == m)
+            .map(|(_, n)| n.as_slice())
+            .unwrap_or(&[]);
+        let absent_names = absents
+            .iter()
+            .find(|(s, _)| s == m)
+            .map(|(_, n)| n.as_slice())
+            .unwrap_or(&[]);
+        let missing = match &probed {
+            Some(out) => missing_names(install_names, out),
+            None => install_names.to_vec(),
         };
         if !missing.is_empty() {
             will.will_install.push(WillInstall {
@@ -731,6 +815,12 @@ pub async fn prepare_window<S: ShellSet>(
                 manager: manager_name(m).to_string(),
                 names: missing,
             });
+        }
+        if let Some(out) = &probed {
+            let removing = present_names(absent_names, out);
+            if !removing.is_empty() {
+                will.will_remove.push(WillRemove { names: removing });
+            }
         }
     }
     for (op_id, p, who, id) in src_ids {
@@ -850,6 +940,20 @@ mod tests {
         let names = vec!["a".to_string(), "b".to_string()];
         assert_eq!(missing_names(&names, "present a\n"), vec!["b".to_string()]);
         assert_eq!(missing_users("ok x\nmissing y\n"), vec!["y".to_string()]);
+    }
+
+    #[test]
+    fn will_remove_names_only_what_the_probe_found_installed() {
+        let names = vec!["cmake".to_string(), "nano".to_string()];
+        assert_eq!(
+            present_names(&names, "present cmake\n"),
+            vec!["cmake".to_string()]
+        );
+        let line = crate::report::WillRemove {
+            names: present_names(&names, "present cmake\n"),
+        }
+        .line();
+        assert_eq!(line, "pkg: will remove cmake");
     }
 
     #[test]

@@ -86,6 +86,27 @@ pub struct WillInstall {
     pub names: Vec<String>,
 }
 
+/// Packages an absent op will remove: only names the prepare probe found
+/// installed. The line is `pkg: will remove cmake`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WillRemove {
+    pub names: Vec<String>,
+}
+
+impl WillRemove {
+    pub fn line(&self) -> String {
+        format!("pkg: will remove {}", self.names.join(", "))
+    }
+}
+
+/// Names an absent pkg op actually removed. The inverse is to reinstall
+/// them (T98).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Removed {
+    pub id: usize,
+    pub names: Vec<String>,
+}
+
 /// A non-distro package a window's op will change, from the prepare
 /// probe of its source. Only items that will change are listed.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -278,6 +299,9 @@ pub struct HostReport {
     /// order, excluding the failed role.
     pub skipped_roles: Vec<String>,
     pub will_install: Vec<WillInstall>,
+    pub will_remove: Vec<WillRemove>,
+    /// Names absent pkg ops removed, in the order the ops finished.
+    pub removed: Vec<Removed>,
     pub will_change: Vec<WillChange>,
     pub will_create: Vec<WillCreate>,
     /// Every download the host's file ops needed, in window order.
@@ -299,6 +323,8 @@ impl HostReport {
             ops: Vec::new(),
             skipped_roles: Vec::new(),
             will_install: Vec::new(),
+            will_remove: Vec::new(),
+            removed: Vec::new(),
             will_change: Vec::new(),
             will_create: Vec::new(),
             fetches: Vec::new(),
@@ -399,6 +425,9 @@ impl Report {
                     w.manager,
                     w.names.join(", ")
                 );
+            }
+            for w in &h.will_remove {
+                let _ = writeln!(out, "\n{}: {}", h.name, w.line());
             }
             for l in WillChange::lines(&h.will_change) {
                 let _ = writeln!(out, "\n{}: {l}", h.name);

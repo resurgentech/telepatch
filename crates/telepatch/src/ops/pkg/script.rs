@@ -215,6 +215,9 @@ impl InstallerScript {
                     "if [ -z \"$tp_want_v\" ]; then echo \"telepatch: script \"{n}\": could not resolve the latest version\" >&2; rc=1; fi\n"
                 ));
             }
+            Wanted::Absent => o.push_str(
+                "echo 'telepatch: .absent() is only available on the distro manager' >&2; rc=1\n",
+            ),
         }
         o.push_str(
             "tp_probe\ntp_had=$tp_have; tp_before=$tp_v; tp_act=\n\
@@ -297,11 +300,13 @@ pub fn will_change(
         Wanted::Present => "present".to_string(),
         Wanted::Pinned(v) => v.clone(),
         Wanted::Latest => format!("{} (latest)", latest.unwrap_or("unknown")),
+        Wanted::Absent => return None,
     };
     let target = match wanted {
         Wanted::Present => None,
         Wanted::Pinned(v) => Some(v.as_str()),
         Wanted::Latest => Some(latest.unwrap_or("")),
+        Wanted::Absent => return None,
     };
     let installed = match have {
         Probed::Absent => None,

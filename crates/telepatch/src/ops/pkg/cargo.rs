@@ -57,6 +57,12 @@ pub fn render(names: &[String], wanted: &Wanted, locked: bool) -> String {
             ));
             format!("cargo install{lk} \"${{tp_todo[@]}}\"")
         }
+        Wanted::Absent => {
+            o.push_str(
+                "  echo 'telepatch: .absent() is only available on the distro manager' >&2; rc=1\n",
+            );
+            String::new()
+        }
     };
     o.push_str("fi\n");
     o.push_str(&format!(

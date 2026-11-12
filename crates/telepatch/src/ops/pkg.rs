@@ -86,6 +86,8 @@ pub enum Wanted {
     Present,
     Pinned(String),
     Latest,
+    /// Not installed. Removes only names the host already has.
+    Absent,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -102,6 +104,9 @@ pub struct PkgSpec {
     pub names: Vec<String>,
     pub wanted: Wanted,
     pub mode: PkgMode,
+    /// Apt only: `apt-get purge` instead of `remove` (config files too).
+    /// Meaningful with [`Wanted::Absent`].
+    pub purge: bool,
     /// Run `apt-get update` first (set by [`apply_apt_update`]). Ignored by
     /// other managers.
     pub update_cache: bool,
@@ -131,6 +136,7 @@ impl PkgSpec {
             names,
             wanted: Wanted::Present,
             mode: PkgMode::Install,
+            purge: false,
             update_cache: false,
             user: "root".to_string(),
             sourced: false,
@@ -221,10 +227,17 @@ impl PkgSpec {
         }
     }
 
-    /// Default postconditions: every name `Installed`; a script op also
-    /// posts `file:<bin> = Exists(true)`, a rustup op each target and
-    /// component.
+    /// Default postconditions: every name `Installed`, or `Absent` when
+    /// the op removes. A script op also posts `file:<bin> = Exists(true)`,
+    /// a rustup op each target and component.
     pub fn default_post(&self) -> BTreeMap<Key, Value> {
+        if self.wanted == Wanted::Absent {
+            return self
+                .names
+                .iter()
+                .map(|n| (self.key_of(n), Value::Absent))
+                .collect();
+        }
         let mut post: BTreeMap<Key, Value> = self
             .names
             .iter()
@@ -341,6 +354,7 @@ impl PkgSpec {
             && self.merge_scope() == other.merge_scope()
             && self.merge_wanted() == other.merge_wanted()
             && self.mode == other.mode
+            && self.purge == other.purge
     }
 
     /// Union of names, keeping first-seen order. `update_cache` is or-ed.
@@ -402,6 +416,7 @@ impl PkgSpec {
             (Source::Distro(Manager::Apt), PkgMode::BuildDep) => self.apt_build_dep(&mut o),
             (Source::Distro(Manager::Apt), _) => match &self.wanted {
                 Wanted::Present => self.apt(&mut o),
+                Wanted::Absent => self.apt_absent(&mut o),
                 w => self.apt_versioned(&mut o, w),
             },
             (Source::Distro(m @ (Manager::Dnf | Manager::Yum)), _) => {
@@ -411,17 +426,22 @@ impl PkgSpec {
                 };
                 match &self.wanted {
                     Wanted::Present => rpm_like(&mut o, mgr, groups),
+                    Wanted::Absent => rpm_absent(&mut o, mgr),
                     w => rpm_versioned(&mut o, mgr, w),
                 }
             }
             (Source::Distro(Manager::Pacman), _) => match &self.wanted {
                 Wanted::Present => pacman(&mut o),
+                Wanted::Absent => pacman_absent(&mut o),
                 w => pacman_versioned(&mut o, w),
             },
             (Source::Pip, _) => match &self.wanted {
                 Wanted::Latest => pip_latest(&mut o),
                 Wanted::Pinned(_) => pip_pinned(&mut o),
                 Wanted::Present => pip(&mut o),
+                Wanted::Absent => o.push_str(
+                    "echo 'telepatch: .absent() is only available on the distro manager' >&2\nrc=1\n",
+                ),
             },
             // Rendered above; every source is built.
             (
@@ -454,6 +474,38 @@ impl PkgSpec {
         }
         o.push_str(
             "  if [ \"$rc\" -eq 0 ]; then\n    apt-get -y -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold install \"${tp_missing[@]}\"\n    rc=$?\n    if [ \"$rc\" -eq 0 ]; then changed=1; installed=(\"${tp_missing[@]}\"); fi\n  fi\nfi\n",
+        );
+    }
+
+    /// Remove only names dpkg reports as installed. `purge` also takes a
+    /// name left in `config-files`, and if `apt-get purge` returns 0 while
+    /// the name is still `installed` or `config-files`, finishes with
+    /// `dpkg --purge`. `--force-confdef` / `--force-confold` are upgrade
+    /// prompts and are not passed here: with them, purge can unlink the
+    /// conffiles and still leave the package registered. `installed` in
+    /// the trailer is the names removed (the inverse).
+    fn apt_absent(&self, o: &mut String) {
+        let verb = if self.purge { "purge" } else { "remove" };
+        o.push_str("export DEBIAN_FRONTEND=noninteractive\ntp_have=()\n");
+        if self.purge {
+            o.push_str(
+                "for tp_n in \"${tp_want[@]}\"; do\n  tp_st=$(dpkg-query -W -f='${db:Status-Status}' \"$tp_n\" 2>/dev/null || true)\n  case \"$tp_st\" in installed|config-files) tp_have+=(\"$tp_n\");; esac\ndone\n",
+            );
+        } else {
+            o.push_str(
+                "for tp_n in \"${tp_want[@]}\"; do\n  [ \"$(dpkg-query -W -f='${db:Status-Status}' \"$tp_n\" 2>/dev/null)\" = installed ] && tp_have+=(\"$tp_n\")\ndone\n",
+            );
+        }
+        o.push_str(&format!(
+            "if [ \"$rc\" -eq 0 ] && [ \"${{#tp_have[@]}}\" -gt 0 ]; then\n  apt-get -y {verb} \"${{tp_have[@]}}\"\n  rc=$?\n"
+        ));
+        if self.purge {
+            o.push_str(
+                "  if [ \"$rc\" -eq 0 ]; then\n    tp_left=()\n    for tp_n in \"${tp_have[@]}\"; do\n      tp_st=$(dpkg-query -W -f='${db:Status-Status}' \"$tp_n\" 2>/dev/null || true)\n      case \"$tp_st\" in installed|config-files) tp_left+=(\"$tp_n\");; esac\n    done\n    if [ \"${#tp_left[@]}\" -gt 0 ]; then dpkg --purge \"${tp_left[@]}\"; rc=$?; fi\n  fi\n",
+            );
+        }
+        o.push_str(
+            "  if [ \"$rc\" -eq 0 ]; then changed=1; installed=(\"${tp_have[@]}\"); fi\nfi\n",
         );
     }
 
@@ -525,11 +577,25 @@ fn rpm_like(o: &mut String, mgr: &str, group_list: &str) {
     ));
 }
 
+/// dnf and yum: remove only packages `rpm -q` says are installed, by name.
+fn rpm_absent(o: &mut String, mgr: &str) {
+    o.push_str(&format!(
+        "tp_have=()\nfor tp_n in \"${{tp_want[@]}}\"; do\n  rpm -q \"$tp_n\" >/dev/null 2>&1 && tp_have+=(\"$tp_n\")\ndone\nif [ \"${{#tp_have[@]}}\" -gt 0 ]; then\n  {mgr} remove -y \"${{tp_have[@]}}\"\n  rc=$?\n  if [ \"$rc\" -eq 0 ]; then changed=1; installed=(\"${{tp_have[@]}}\"); fi\nfi\n"
+    ));
+}
+
 /// `pacman -T` is satisfied by installed packages and their provides; the
 /// group query covers group names.
 fn pacman(o: &mut String) {
     o.push_str(
         "for tp_n in \"${tp_want[@]}\"; do\n  if [ -z \"$(pacman -T \"$tp_n\" 2>/dev/null)\" ] || [ -n \"$(pacman -Qqg \"$tp_n\" 2>/dev/null)\" ]; then :; else tp_missing+=(\"$tp_n\"); fi\ndone\nif [ \"${#tp_missing[@]}\" -gt 0 ]; then\n  pacman -S --needed --noconfirm \"${tp_missing[@]}\"\n  rc=$?\n  if [ \"$rc\" -eq 0 ]; then changed=1; installed=(\"${tp_missing[@]}\"); fi\nfi\n",
+    );
+}
+
+/// Remove only names `pacman -Q` lists. No dependency cascade.
+fn pacman_absent(o: &mut String) {
+    o.push_str(
+        "tp_have=()\nfor tp_n in \"${tp_want[@]}\"; do\n  pacman -Q \"$tp_n\" >/dev/null 2>&1 && tp_have+=(\"$tp_n\")\ndone\nif [ \"${#tp_have[@]}\" -gt 0 ]; then\n  pacman -R --noconfirm \"${tp_have[@]}\"\n  rc=$?\n  if [ \"$rc\" -eq 0 ]; then changed=1; installed=(\"${tp_have[@]}\"); fi\nfi\n",
     );
 }
 
@@ -867,6 +933,42 @@ impl PkgHandle {
         self.clone()
     }
 
+    /// Remove the named packages. Only names the host has installed are
+    /// removed. Posts `Absent`. Does not merge with an install op.
+    #[track_caller]
+    pub fn absent(&self) -> Self {
+        self.want(Wanted::Absent);
+        self.0.edit(|op| {
+            let OpSpec::Pkg(p) = &op.spec else { return };
+            if p.wanted != Wanted::Absent {
+                return;
+            }
+            for (k, v) in p.default_post() {
+                op.post.insert(k, v);
+            }
+        });
+        self.clone()
+    }
+
+    /// Apt: remove config files too (`apt-get purge`). Implies
+    /// [`Self::absent`]. Any other manager is a trace error.
+    #[track_caller]
+    pub fn purge(&self) -> Self {
+        let mut apt = false;
+        self.spec(|s| {
+            apt = s.source == Source::Distro(Manager::Apt);
+            if apt {
+                s.purge = true;
+            }
+        });
+        if !apt {
+            self.0
+                .record_error(TraceError::new("purge() is only available on apt hosts"));
+            return self.clone();
+        }
+        self.absent()
+    }
+
     /// Want the newest release (pip: `install -U`; distro: upgrade what is
     /// behind).
     #[track_caller]
@@ -968,6 +1070,22 @@ impl PkgHandle {
         let mut mise_pin_many = false;
         let mut rustup_pin = false;
         self.spec(|s| {
+            if s.purge && !matches!(w, Wanted::Absent) {
+                distro_err = Some("pkg: .purge() applies only to an absent op");
+                return;
+            }
+            if matches!(w, Wanted::Absent) {
+                if !matches!(s.source, Source::Distro(_)) {
+                    distro_err = Some("absent() is only available on the distro manager");
+                } else if s.mode == PkgMode::BuildDep {
+                    distro_err = Some("pkg: build-dep cannot be absent");
+                } else if s.names.iter().any(|n| n.starts_with('@')) {
+                    distro_err = Some("pkg: a @group cannot be absent");
+                } else {
+                    s.wanted = Wanted::Absent;
+                }
+                return;
+            }
             if matches!(s.source, Source::Distro(_)) {
                 if s.mode == PkgMode::BuildDep {
                     distro_err = Some("pkg: build-dep cannot be pinned or latest");
@@ -1173,6 +1291,96 @@ mod tests {
                 "pkg: build-dep cannot be pinned or latest",
             ]
         );
+    }
+
+    #[test]
+    fn absent_posts_absent_and_removes_only_installed_names() {
+        let h = host();
+        h.pkg(["cmake"]).absent();
+        assert!(errors(&h).is_empty(), "{:?}", errors(&h));
+        let t = h.snapshot();
+        let Node::Op(op) = &t.nodes[0] else { panic!() };
+        let OpSpec::Pkg(p) = &op.spec else { panic!() };
+        assert_eq!(p.wanted, Wanted::Absent);
+        assert!(!p.purge);
+        assert_eq!(op.post.get(&Key::pkg("cmake")), Some(&Value::Absent));
+        let r = p.render();
+        assert!(r.contains("db:Status-Status"), "{r}");
+        assert!(r.contains(" apt-get "), "{r}");
+        assert!(r.contains(" remove "), "{r}");
+        assert!(!r.contains(" install "), "{r}");
+        assert!(!r.contains("force-conf"), "{r}");
+        assert!(!r.contains("dpkg --purge"), "{r}");
+        assert!(!r.contains("config-files"), "{r}");
+        assert!(r.contains("installed=(\"${tp_have[@]}\")"), "{r}");
+
+        let mut dnf = PkgSpec::new(Manager::Dnf, names(["cmake"]));
+        dnf.wanted = Wanted::Absent;
+        let r = dnf.render();
+        assert!(r.contains("rpm -q"), "{r}");
+        assert!(r.contains("dnf remove -y"), "{r}");
+        assert!(!r.contains("dnf install"), "{r}");
+
+        let mut pac = PkgSpec::new(Manager::Pacman, names(["cmake"]));
+        pac.wanted = Wanted::Absent;
+        let r = pac.render();
+        assert!(r.contains("pacman -Q"), "{r}");
+        assert!(r.contains("pacman -R --noconfirm"), "{r}");
+        assert!(!r.contains("pacman -S"), "{r}");
+    }
+
+    #[test]
+    fn purge_is_apt_only_and_removes_config_files() {
+        let h = host();
+        h.pkg(["nano"]).absent().purge();
+        assert!(errors(&h).is_empty(), "{:?}", errors(&h));
+        let p = spec_of(&h, 0);
+        assert!(p.purge);
+        assert_eq!(p.wanted, Wanted::Absent);
+        let r = p.render();
+        assert!(r.contains(" purge "), "{r}");
+        assert!(!r.contains(" remove "), "{r}");
+        // Upgrade-only dpkg options stay off this path, and a package left
+        // in config-files is finished with dpkg --purge.
+        assert!(!r.contains("force-conf"), "{r}");
+        assert!(r.contains("config-files"), "{r}");
+        assert!(r.contains("dpkg --purge"), "{r}");
+
+        let os = Os::parse("ID=fedora\nVERSION_ID=41\n").unwrap();
+        let f = Host::new("f", os, Rc::new(()));
+        f.pkg(["nano"]).absent().purge();
+        assert_eq!(errors(&f), ["purge() is only available on apt hosts"]);
+
+        let h = host();
+        h.pkg(["nano"]).pip().purge();
+        assert!(
+            errors(&h).iter().any(|e| e.contains("purge()")),
+            "{:?}",
+            errors(&h)
+        );
+
+        let h = host();
+        h.pkg(["requests"]).pip().absent();
+        assert_eq!(
+            errors(&h),
+            ["absent() is only available on the distro manager"]
+        );
+    }
+
+    #[test]
+    fn absent_never_merges_with_an_install() {
+        let inst = PkgSpec::new(Manager::Apt, names(["a"]));
+        let mut ab = PkgSpec::new(Manager::Apt, names(["b"]));
+        ab.wanted = Wanted::Absent;
+        assert!(!inst.can_merge(&ab));
+        assert!(!ab.can_merge(&inst));
+        let mut ab2 = ab.clone();
+        ab2.names = names(["c"]);
+        assert!(ab.can_merge(&ab2));
+        let mut pur = ab.clone();
+        pur.purge = true;
+        assert!(!ab.can_merge(&pur));
+        assert!(pur.can_merge(&pur));
     }
 
     #[test]

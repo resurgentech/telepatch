@@ -804,6 +804,7 @@ fn describe(op: &OpNode) -> String {
                 Wanted::Present => "install".to_string(),
                 Wanted::Pinned(v) => format!("pin {v}"),
                 Wanted::Latest => "latest".to_string(),
+                Wanted::Absent => "absent".to_string(),
             };
             format!("{} {mode} {}", p.kind(), p.names.join(" "))
         }
@@ -812,6 +813,8 @@ fn describe(op: &OpNode) -> String {
                 (PkgMode::BuildDep, _) => "build-dep",
                 (_, Wanted::Latest) => "latest",
                 (_, Wanted::Pinned(_)) => "pinned",
+                (_, Wanted::Absent) if p.purge => "purge",
+                (_, Wanted::Absent) => "absent",
                 (PkgMode::Install, Wanted::Present) => "install",
             };
             format!(
@@ -1625,6 +1628,13 @@ impl Executor for HostExec {
                         "window":w.window,"manager":w.manager,"names":w.names}));
                     self.report.will_install.push(w);
                 }
+                for w in will.will_remove {
+                    self.sink
+                        .line(&format!("== {} [prepare] {} ==", self.name, w.line()));
+                    self.sink.event(json!({"ev":"will_remove","host":self.name,
+                        "names":w.names}));
+                    self.report.will_remove.push(w);
+                }
                 for fl in will.fetches {
                     self.sink
                         .line(&format!("== {} [prepare] {} ==", self.name, fl.line()));
@@ -1834,6 +1844,19 @@ impl Executor for HostExec {
                                     };
                                     let note = if skipped { "skipped" } else { "" };
                                     self.finish_op(w, &descs[i], o, 0, changed, note);
+                                    if let (crate::trace::OpSpec::Pkg(p), Some(names)) =
+                                        (&w.node.spec, installed.as_ref())
+                                        && matches!(p.wanted, Wanted::Absent)
+                                        && !names.is_empty()
+                                    {
+                                        self.sink
+                                            .event(json!({"ev":"pkg_removed","host":self.name,
+                                            "id":w.id.0,"names":names}));
+                                        self.report.removed.push(crate::report::Removed {
+                                            id: w.id.0,
+                                            names: names.clone(),
+                                        });
+                                    }
                                     if installed.is_some() {
                                         self.remember(w, o, changed, installed.as_deref());
                                     }

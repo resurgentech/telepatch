@@ -78,6 +78,9 @@ pub fn render(names: &[String], wanted: &Wanted) -> String {
         Wanted::Latest => o.push_str(
             "  for tp_n in \"${tp_want[@]}\"; do\n    tp_l=$(\"$tp_mise\" latest \"$tp_n\" 2>/dev/null) || tp_l=\n    tp_l=${tp_l%%$'\\n'*}\n    if [ -z \"$tp_l\" ]; then echo \"telepatch: mise $tp_n: could not resolve the latest version\" >&2; rc=1; continue; fi\n    tp_spec[$tp_n]=latest; tp_wantv[$tp_n]=$tp_l\n    tp_has \"$tp_n\" \"$tp_l\" || { tp_todo+=(\"$tp_n\"); tp_args+=(\"$tp_n@$tp_l\"); }\n  done\n",
         ),
+        Wanted::Absent => o.push_str(
+            "  echo 'telepatch: .absent() is only available on the distro manager' >&2; rc=1\n",
+        ),
     }
     o.push_str("fi\n");
     // The config entries, only where they differ.
