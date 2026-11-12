@@ -1379,3 +1379,20 @@ are appended, never edited in; a hook refuses rewrites.
 - No live run (T103 is the first). Gate `just test-oracle-selftest`
   green. No tp-* VM listed on veritech04 or here afterwards.
 - Commits: tp_basic 3c0f51e
+
+## 2026-11-12 — T98 `--check`, `--diff` and coverage
+
+- `run --check` traces and prepares every host and applies nothing.
+  File ops are probed read-only; a line edit runs on a temp copy.
+  `--diff` (needs `--check`) adds a unified diff per file. A secret file
+  shows no diff and its body is never read back.
+- Exit 0 nothing to change, 2 changes pending, 1 a host blocked.
+- At the first implicit barrier the check stops: `check stopped at
+  <file:line>: this read needs the changes above` (G7-4). Fact reads now
+  record their call site for it.
+- One `[coverage] <role>: n ops, m reversible` line per role, from
+  `OpSpec::has_inverse` (G7-1). file, unit, repo, user and sh count as
+  irreversible: their trailers capture no inverse yet.
+- 14 tests in `tests/check.rs`, 2 in `tests/cli.rs`. No VM (T104).
+- Gate E green; no plan snapshot moved in either repo.
+- Commits: telepatch 294f3ac, tp_basic d021e3d (Cargo.lock)
