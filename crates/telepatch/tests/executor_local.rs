@@ -1,9 +1,8 @@
 //! The real executor over the local transport (uid injected as 0, so no
 //! sudo): idempotent re-runs, failure semantics, prepare failures.
 
-use std::cell::RefCell;
-use std::path::PathBuf;
 use std::rc::Rc;
+use std::{cell::RefCell, path::PathBuf};
 
 use telepatch::executor::{HostSpec, RunOpts, Stdout, Target, run};
 use telepatch::report::{HostStatus, Report};
@@ -16,6 +15,7 @@ fn local() -> Target {
 
 fn spec(name: &str, dir: &std::path::Path) -> HostSpec<PathBuf> {
     HostSpec {
+        groups: Vec::new(),
         name: name.into(),
         target: local(),
         vars: dir.to_path_buf(),
@@ -581,6 +581,7 @@ fn cargo_log(d: &std::path::Path) -> String {
 
 fn cargo_host(name: &str, dir: &std::path::Path, path: &str) -> HostSpec<PathBuf> {
     HostSpec {
+        groups: Vec::new(),
         name: name.into(),
         target: Target::Local(LocalTransport::new().uid(0).env("PATH", path)),
         vars: dir.to_path_buf(),
@@ -989,6 +990,7 @@ fn mise_cfg(d: &std::path::Path) -> String {
 
 fn mise_host(name: &str, dir: &std::path::Path, path: &str) -> HostSpec<PathBuf> {
     HostSpec {
+        groups: Vec::new(),
         name: name.into(),
         target: Target::Local(
             LocalTransport::new()
@@ -1454,6 +1456,7 @@ fn rustup_host_with(
     cargo_home: &str,
 ) -> HostSpec<PathBuf> {
     HostSpec {
+        groups: Vec::new(),
         name: name.into(),
         target: Target::Local(
             LocalTransport::new()

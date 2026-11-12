@@ -98,6 +98,7 @@ fn go<V: 'static>(name: &'static str, f: fn(Host<V>) -> PlaybookFuture, v: V) ->
     let report = run(
         &pb,
         vec![HostSpec {
+            groups: Vec::new(),
             name: "h".into(),
             target: target(),
             vars: v,

@@ -1166,7 +1166,7 @@ h.file("/etc/profile.d/android.sh").content(include_str!("../templates/android.s
 <section class="prose" id="d-role-vars">
 <h3>Vars per role</h3>
 <p>Each role owns a vars struct. A value comes from the nearest of four layers.</p>
-<p class="status">Status: <strong>built</strong>: the four layers (<code>telepatch::vars</code>; the playbook's defaults are per playbook and typed: <code>Playbook::new(name, run).defaults(fn() -&gt; V)</code> with <code>V: Serialize</code> on that method only, serialized to TOML and merged as the third layer for that playbook alone), field names from a probing serde deserializer, errors naming the file and line at load, before any host is traced. <strong>designed</strong>: host and group vars from an inventory (T99)</p>
+<p class="status">Status: <strong>built</strong>: the four layers (<code>telepatch::vars</code>; the playbook's defaults are per playbook and typed: <code>Playbook::new(name, run).defaults(fn() -&gt; V)</code> with <code>V: Serialize</code> on that method only, serialized to TOML and merged as the third layer for that playbook alone), field names from a probing serde deserializer, errors naming the file and line at load, before any host is traced. Host and group vars from an inventory (<a href="#d-inventory">Inventory</a>: five places, the host's first, then its groups', the inventory's, the vars file, the defaults)</p>
 <div class="eyebrow">the roles</div>
 <pre><code>#[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1359,7 +1359,7 @@ $ echo $?
 <section class="prose" id="d-inventory">
 <h3>Inventory</h3>
 <p>Hosts, groups, and vars for each, in one file.</p>
-<p class="status">Status: <strong>designed</strong></p>
+<p class="status">Status: <strong>built</strong>: <code>telepatch::inventory</code>, <code>tp-basic run --inventory</code> and <code>--limit</code> (a group or host name, comma-separated or repeated; an unknown name is a usage error), <code>h.in_group(..)</code>. A host's name is its ssh destination and its name in the report, <code>user@host</code> or <code>ssh://user@host:port</code>. <code>--inventory</code> is exclusive with <code>--host</code> and <code>--local</code>; <code>--vars</code> still applies as the lowest place. A host's groups are those whose table lists it plus those it names, in the order the group tables appear; a later group beats an earlier one. Every <code>vars</code> in the file is checked against the playbook's vars before any host runs.</p>
 <div class="eyebrow">inventory.toml</div>
 <pre><code>[vars]                                  <span class="c"># every host</span>
 admin_users = ["bot"]

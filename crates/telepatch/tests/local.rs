@@ -18,6 +18,7 @@ fn target() -> Target {
 
 fn spec(name: &str, dir: &std::path::Path) -> HostSpec<PathBuf> {
     HostSpec {
+        groups: Vec::new(),
         name: name.into(),
         target: target(),
         vars: dir.to_path_buf(),
@@ -293,6 +294,7 @@ fn via_controller_downloads_on_the_controller_and_streams() {
     let (r, out) = go(
         &pb,
         vec![HostSpec {
+            groups: Vec::new(),
             name: "h".into(),
             target: target(),
             vars: Via {

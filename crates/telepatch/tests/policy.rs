@@ -177,6 +177,7 @@ fn the_run_report_lists_every_allowance() {
     let report = run(
         &Playbook::new("allowed", allowed_tmp_run),
         vec![HostSpec {
+            groups: Vec::new(),
             name: "local".into(),
             target: Target::Local(LocalTransport::new().uid(0)),
             vars: d.path().to_path_buf(),

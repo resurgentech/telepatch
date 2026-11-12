@@ -202,6 +202,7 @@ fn go(pb: &Playbook<Vars>, stub: &Stub, t: SshTransport) -> (Report, String) {
     let report = run(
         pb,
         vec![HostSpec {
+            groups: Vec::new(),
             name: "bot@h".into(),
             target: Target::Ssh(t),
             vars: Vars {
@@ -421,6 +422,7 @@ fn local_target_blocks_a_user_window_with_the_transport_limit() {
         let r = run(
             &pb,
             vec![HostSpec {
+                groups: Vec::new(),
                 name: "local".into(),
                 target: Target::Local(telepatch::transport::local::LocalTransport::new().uid(0)),
                 vars: Vars {

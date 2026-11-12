@@ -314,6 +314,7 @@ fn go(
     let report = telepatch::executor::run(
         &pb,
         vec![telepatch::executor::HostSpec {
+            groups: Vec::new(),
             name: "h".into(),
             target: telepatch::executor::Target::Local(
                 telepatch::transport::local::LocalTransport::new().uid(0),

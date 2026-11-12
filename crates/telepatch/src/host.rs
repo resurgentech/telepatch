@@ -100,6 +100,7 @@ pub struct Host<V> {
     pub os: Rc<Os>,
     /// Playbook variables.
     pub vars: Rc<V>,
+    groups: Rc<[String]>,
     trace: Rc<RefCell<Trace>>,
     resolver: Rc<RefCell<Resolver>>,
     run_as: RunAs,
@@ -111,6 +112,7 @@ impl<V> Clone for Host<V> {
             name: self.name.clone(),
             os: self.os.clone(),
             vars: self.vars.clone(),
+            groups: self.groups.clone(),
             trace: self.trace.clone(),
             resolver: self.resolver.clone(),
             run_as: self.run_as.clone(),
@@ -125,6 +127,7 @@ impl<V> Host<V> {
             name: name.into().into(),
             os: Rc::new(os),
             vars,
+            groups: Rc::from(Vec::new()),
             trace: Rc::new(RefCell::new(Trace::default())),
             resolver: Rc::new(RefCell::new(Resolver::default())),
             run_as: RunAs::root_shell(),
@@ -133,6 +136,18 @@ impl<V> Host<V> {
 
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    /// This host with the inventory groups it belongs to (see
+    /// [`crate::inventory`]). A host not from an inventory has none.
+    pub fn with_groups(mut self, groups: Vec<String>) -> Host<V> {
+        self.groups = groups.into();
+        self
+    }
+
+    /// Whether the inventory puts this host in group `name`.
+    pub fn in_group(&self, name: &str) -> bool {
+        self.groups.iter().any(|g| g == name)
     }
 
     /// The shell this handle's ops and facts run in.

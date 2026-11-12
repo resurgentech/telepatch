@@ -1,13 +1,18 @@
 //! The playbook runner: a playbook repo's own binary calls [`main`] with its
 //! playbooks. Subcommands: `list`, `plan <name> [--distro D] [--vars f]`,
-//! `run <name> (--local | --host <dest>...) [--ssh-key <path>]
-//! [--ssh-option K=V]... [--vars f] [--log f] [--check [--diff]]`.
+//! `run <name> (--local | --host <dest>... | --inventory <file> [--limit n,..])
+//! [--ssh-key <path>] [--ssh-option K=V]... [--vars f] [--log f]
+//! [--check [--diff]]`.
 //!
-//! `run` takes exactly one of `--local` (this machine) and `--host`
+//! `run` takes exactly one of `--local` (this machine), `--host`
 //! (repeatable; each `<dest>` goes to `ssh` verbatim, `user@host` or
-//! `ssh://user@host:port`, and is the host's name in the report). Hosts
-//! run in parallel, each with the same vars. `--ssh-key` and `--ssh-option`
-//! apply to every `--host` and need at least one.
+//! `ssh://user@host:port`, and is the host's name in the report) and
+//! `--inventory` (the hosts of an `inventory.toml`, see [`crate::inventory`];
+//! a host's name there is its `<dest>`; `--limit` narrows them to the named
+//! groups and hosts, an unknown name a usage error). Hosts run in parallel;
+//! with `--local` and `--host` each has the same vars, with `--inventory`
+//! its own, and `--vars` is the lowest place. `--ssh-key` and `--ssh-option`
+//! apply to every ssh host and need `--host` or `--inventory`.
 //!
 //! `--check` traces and prepares every host and applies nothing
 //! ([`crate::executor::run_check`]); `--diff` (only with `--check`) adds a
@@ -28,11 +33,13 @@ use serde::de::DeserializeOwned;
 
 use crate::executor::{CheckOpts, HostSpec, RunOpts, Stdout, Target, run, run_check};
 use crate::facts::os::Os;
+use crate::inventory::{InvHost, Inventory};
 use crate::role::Playbook;
 use crate::secret::SecretBackend;
 use crate::testing::{self, FixtureHost};
 use crate::transport::local::LocalTransport;
 use crate::transport::ssh::SshTransport;
+use crate::vars::VarLayer;
 
 #[derive(Parser)]
 #[command(about = "A telepatch playbook runner")]
@@ -56,7 +63,9 @@ enum Cmd {
         distro: Option<String>,
     },
     /// Apply the playbook to this machine or to hosts over SSH.
-    #[command(group(ArgGroup::new("target").required(true).args(["local", "host"])))]
+    #[command(group(
+        ArgGroup::new("target").required(true).args(["local", "host", "inventory"])
+    ))]
     Run {
         name: String,
         /// Apply to this machine (uid 0, else `sudo -n -H bash`).
@@ -67,6 +76,15 @@ enum Cmd {
         /// host's name in the report. Repeatable; hosts run in parallel.
         #[arg(long)]
         host: Vec<String>,
+        /// Run on the hosts of this `inventory.toml` (see
+        /// `telepatch::inventory`), each with its own vars and groups.
+        /// Not with `--local` or `--host`.
+        #[arg(long)]
+        inventory: Option<PathBuf>,
+        /// With `--inventory`: only these groups and hosts (comma-separated
+        /// or repeated). An unknown name is an error.
+        #[arg(long, value_delimiter = ',')]
+        limit: Vec<String>,
         /// Private key for every `--host`: `-i <path> -o IdentitiesOnly=yes`.
         /// Without it your ssh config and agent pick the key.
         #[arg(long, conflicts_with = "local")]
@@ -76,7 +94,8 @@ enum Cmd {
               value_parser = parse_ssh_option)]
         ssh_option: Vec<String>,
         /// TOML file deserialized into the playbook's vars (the same for
-        /// every host).
+        /// every host; with `--inventory` the lowest place, under the
+        /// inventory's).
         #[arg(long)]
         vars: Option<PathBuf>,
         /// Write JSONL events here.
@@ -224,6 +243,8 @@ fn dispatch<V: DeserializeOwned + Default + 'static>(
             vars,
             log,
             host: dests,
+            inventory,
+            limit,
             ssh_key,
             ssh_option,
             check,
@@ -234,11 +255,36 @@ fn dispatch<V: DeserializeOwned + Default + 'static>(
                 Ok(p) => p,
                 Err(m) => return err(m),
             };
+            if inventory.is_none() && !limit.is_empty() {
+                return err("--limit needs --inventory".into());
+            }
             // Vars are loaded once per host so `V` needs no `Clone`.
             let mut hosts = Vec::new();
-            if dests.is_empty() {
+            if let Some(path) = &inventory {
+                match inventory_hosts(pb, path, vars.as_deref(), &limit) {
+                    Ok(list) => {
+                        for (name, groups, vars) in list {
+                            let mut t = ssh();
+                            if let Some(k) = &ssh_key {
+                                t = t.identity(k);
+                            }
+                            for o in &ssh_option {
+                                t = t.option(o);
+                            }
+                            hosts.push(HostSpec {
+                                name,
+                                target: Target::Ssh(t),
+                                groups,
+                                vars,
+                            });
+                        }
+                    }
+                    Err(m) => return err(m),
+                }
+            } else if dests.is_empty() {
                 match crate::vars::load_file_for::<V>(pb, vars.as_deref()) {
                     Ok(vars) => hosts.push(HostSpec {
+                        groups: Vec::new(),
                         name: "local".into(),
                         target: Target::Local(local()),
                         vars,
@@ -259,6 +305,7 @@ fn dispatch<V: DeserializeOwned + Default + 'static>(
                     t = t.option(o);
                 }
                 hosts.push(HostSpec {
+                    groups: Vec::new(),
                     name: dest,
                     target: Target::Ssh(t),
                     vars,
@@ -282,6 +329,43 @@ fn dispatch<V: DeserializeOwned + Default + 'static>(
             (format!("\n{}", report.render()), report.exit_code())
         }
     }
+}
+
+/// The hosts of the inventory at `path` that `limit` leaves in (all with no
+/// limit), each as (name, groups, vars). Every `vars` of the file is checked
+/// first, so a bad key in a group the limit leaves out still stops the run.
+fn inventory_hosts<V: DeserializeOwned>(
+    pb: &Playbook<V>,
+    path: &std::path::Path,
+    vars: Option<&std::path::Path>,
+    limit: &[String],
+) -> Result<Vec<(String, Vec<String>, V)>, String> {
+    let inv = Inventory::load(path)?;
+    inv.check_vars::<V>()?;
+    let file = match vars {
+        None => None,
+        Some(p) => {
+            let text = std::fs::read_to_string(p)
+                .map_err(|e| format!("cannot read vars file {}: {e}", p.display()))?;
+            Some(VarLayer::parse(&p.display().to_string(), &text)?)
+        }
+    };
+    let defaults = pb.defaults_toml()?;
+    let picked: Vec<&InvHost> = if limit.is_empty() {
+        inv.hosts().iter().collect()
+    } else {
+        inv.limit(limit)?
+    };
+    if picked.is_empty() {
+        return Err(format!("inventory {} names no hosts", path.display()));
+    }
+    picked
+        .into_iter()
+        .map(|h| {
+            let v = inv.vars_for::<V>(h, file.as_ref(), &defaults)?;
+            Ok((h.name.clone(), h.groups.clone(), v))
+        })
+        .collect()
 }
 
 fn local_os() -> Result<Os, String> {

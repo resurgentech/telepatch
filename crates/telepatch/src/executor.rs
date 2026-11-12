@@ -180,10 +180,13 @@ impl Transport for Target {
     }
 }
 
-/// A host to run on: its name, how to reach it, the playbook variables.
+/// A host to run on: its name, how to reach it, the inventory groups it is
+/// in (`h.in_group(..)`; none for `--local` and `--host`), the playbook
+/// variables.
 pub struct HostSpec<V> {
     pub name: String,
     pub target: Target,
+    pub groups: Vec<String>,
     pub vars: V,
 }
 
@@ -2463,7 +2466,7 @@ async fn run_one<V: 'static>(
             return blocked(format!("reading os: {e}"));
         }
     };
-    let host = Host::new(&name, os, Rc::new(spec.vars));
+    let host = Host::new(&name, os, Rc::new(spec.vars)).with_groups(spec.groups);
     let pb = Playbook::new(pb_name, pb_run);
     let shells = HostShells {
         host: name.clone(),

@@ -34,6 +34,7 @@ fn go<V: 'static>(
     let report = run(
         &pb,
         vec![HostSpec {
+            groups: Vec::new(),
             name: "h".into(),
             target: target(),
             vars: v,

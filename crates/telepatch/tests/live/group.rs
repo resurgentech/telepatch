@@ -26,6 +26,7 @@ fn go(ctr: &Container) -> Report {
     run(
         &pb,
         vec![HostSpec {
+            groups: Vec::new(),
             name: "c".into(),
             target: Target::Docker(DockerTransport::new().container("c", &ctr.name)),
             vars: (),

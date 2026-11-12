@@ -31,6 +31,7 @@ fn check_vars<V: 'static>(pb: &Playbook<V>, vars: V, diff: bool) -> (Report, Str
     let report = run_check(
         pb,
         vec![HostSpec {
+            groups: Vec::new(),
             name: "h1".into(),
             target: Target::Local(LocalTransport::new().uid(0)),
             vars,

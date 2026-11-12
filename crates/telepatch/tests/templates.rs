@@ -226,6 +226,7 @@ fn run_vars(vars: Vars) -> (telepatch::report::Report, String) {
     let report = run(
         &pb,
         vec![HostSpec {
+            groups: Vec::new(),
             name: "h1".into(),
             target: Target::Local(LocalTransport::new().uid(0)),
             vars,

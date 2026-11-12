@@ -73,12 +73,28 @@ impl Sshd {
 
     /// Like [`Sshd::start`], with extra sshd arguments (`-o MaxSessions=1`).
     pub fn start_with(sshd_args: &str) -> Sshd {
+        Sshd::start_inner(sshd_args, None)
+    }
+
+    /// Like [`Sshd::start`], accepting the same key as `other` (copied into
+    /// this one's own temp dir), so one `--ssh-key` reaches both.
+    pub fn start_sharing_key(other: &Sshd) -> Sshd {
+        Sshd::start_inner("", Some(other))
+    }
+
+    fn start_inner(sshd_args: &str, share: Option<&Sshd>) -> Sshd {
         crate::container::require_docker_vm();
         let ep = Endpoint::from_env().unwrap_or_else(|e| panic!("{e}"));
         let keys = tempfile::tempdir().unwrap();
         let key = keys.path().join("id_tp");
         let wrong_key = keys.path().join("id_wrong");
-        keygen(&key);
+        match share {
+            Some(o) => {
+                std::fs::copy(&o.key, &key).unwrap();
+                std::fs::copy(o.key.with_extension("pub"), key.with_extension("pub")).unwrap();
+            }
+            None => keygen(&key),
+        }
         keygen(&wrong_key);
         let pubkey = std::fs::read_to_string(key.with_extension("pub")).unwrap();
         let name = format!(
@@ -145,6 +161,16 @@ impl Sshd {
 
     pub fn dest(&self, user: &str) -> String {
         format!("ssh://{user}@{}:{}", self.host, self.port)
+    }
+
+    /// `sh -c script` in the container as root (`docker exec`); its stdout.
+    pub fn exec(&self, script: &str) -> String {
+        let out = Command::new("docker")
+            .args(["exec", &self.name, "sh", "-c", script])
+            .stdin(Stdio::null())
+            .output()
+            .expect("docker exec");
+        String::from_utf8_lossy(&out.stdout).into_owned()
     }
 }
 

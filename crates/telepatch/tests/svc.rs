@@ -474,6 +474,7 @@ fn go_log(
     let report = run(
         pb,
         vec![HostSpec {
+            groups: Vec::new(),
             name: "h1".into(),
             target: Target::Local(
                 LocalTransport::new()

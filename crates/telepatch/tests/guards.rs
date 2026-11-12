@@ -25,6 +25,7 @@ fn local_spec(dir: &Path, path: Option<&str>) -> HostSpec<PathBuf> {
         t = t.env("PATH", p);
     }
     HostSpec {
+        groups: Vec::new(),
         name: "h1".into(),
         target: Target::Local(t),
         vars: dir.to_path_buf(),
@@ -427,6 +428,7 @@ fn svc_spec(d: &Path) -> HostSpec<PathBuf> {
     let run = d.join("run-systemd");
     std::fs::create_dir_all(&run).unwrap();
     HostSpec {
+        groups: Vec::new(),
         name: "h1".into(),
         target: Target::Local(
             LocalTransport::new()
@@ -743,6 +745,7 @@ fn ssh_go(pb: &Playbook<Vars>, stub: &Path) -> (Report, String) {
     go(
         pb,
         vec![HostSpec {
+            groups: Vec::new(),
             name: "bot@h".into(),
             target: Target::Ssh(t),
             vars: Vars {

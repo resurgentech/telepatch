@@ -377,6 +377,7 @@ if [ "$out" = - ]; then cat "$D/www/$n"; else cp "$D/www/$n" "$out"; fi"#
         let report = run(
             &pb,
             vec![HostSpec {
+                groups: Vec::new(),
                 name: "h1".into(),
                 target: Target::Local(
                     LocalTransport::new()
@@ -692,6 +693,7 @@ printf '{{\n  "url": "u",\n  "tag_name": "v4.5.6",\n  "name": "x"\n}}\n'
     let r = run(
         &pb,
         vec![HostSpec {
+            groups: Vec::new(),
             name: "h1".into(),
             target: Target::Local(
                 LocalTransport::new()
@@ -974,6 +976,7 @@ fn a_merged_member_s_allowance_is_listed_in_the_plan_and_the_report() {
     let r = run(
         &pb,
         vec![HostSpec {
+            groups: Vec::new(),
             name: "h1".into(),
             target: Target::Local(LocalTransport::new().uid(0).env(
                 "PATH",
@@ -1158,6 +1161,7 @@ esac
         let report = run(
             &pb,
             vec![HostSpec {
+                groups: Vec::new(),
                 name: "h1".into(),
                 target: Target::Local(
                     LocalTransport::new()

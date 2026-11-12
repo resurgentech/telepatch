@@ -35,6 +35,7 @@ fn go(ctr: &Container, v: &V) -> (Report, String) {
     let r = run(
         &pb,
         vec![HostSpec {
+            groups: Vec::new(),
             name: "c".into(),
             target: Target::Docker(DockerTransport::new().container("c", &ctr.name)),
             vars: v.clone(),

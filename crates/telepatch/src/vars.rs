@@ -1,4 +1,4 @@
-//! Vars per role: four layers merged at the TOML level, then deserialized
+//! Vars per role: layers merged at the TOML level, then deserialized
 //! into the playbook's `V`.
 //!
 //! `V` is a struct of role sections, each field a role's own vars struct.
@@ -10,6 +10,11 @@
 //! 3. the playbook's defaults ([`crate::Playbook::defaults`]: a typed value,
 //!    serialized to TOML of the same shape, for that playbook only);
 //! 4. the section struct's own `Default` (`#[serde(default)]`).
+//!
+//! With an inventory (see [`crate::inventory`]) the first two places repeat
+//! for each layer above the file, in priority order: the host's `vars`, its
+//! groups' (the last listed first), the inventory's `[vars]`, then the vars
+//! file; see [`load_layers`].
 //!
 //! Field names are learned by deserializing `V` from a probing
 //! [`serde::Deserializer`] that records the `fields` list each struct hands
@@ -74,16 +79,57 @@ pub fn load_for<V: DeserializeOwned>(
 
 /// Load `V` from vars `text` (called `source` in errors) and `defaults`.
 pub fn load<V: DeserializeOwned>(source: &str, text: &str, defaults: &str) -> Result<V, String> {
+    let file = VarLayer::parse(source, text)?;
+    load_layers(&[&file], defaults)
+}
+
+/// One place vars come from: a vars file, or the vars of an inventory's
+/// host, group or top level (see [`crate::inventory`]). Keys keep their file
+/// and line, so an error names where the value was written.
+pub struct VarLayer(Doc);
+
+impl VarLayer {
+    /// Parse a whole vars file (`source` names it in errors).
+    pub fn parse(source: &str, text: &str) -> Result<VarLayer, String> {
+        Doc::parse(source, text, "cannot parse vars file").map(VarLayer)
+    }
+
+    /// The keys of one table inside the file `text`, with their lines.
+    pub(crate) fn from_table(
+        source: &str,
+        text: &str,
+        spanned: &toml::de::DeTable<'_>,
+        values: &toml::Table,
+    ) -> VarLayer {
+        VarLayer(Doc::from_tables(source, text, spanned, values))
+    }
+
+    /// Unknown keys against the shape of `V`: the check [`load_layers`] runs.
+    pub fn check<V: DeserializeOwned>(&self) -> Result<(), String> {
+        self.0.check(&probe::<V>()?)
+    }
+}
+
+/// [`load`] over several layers, the first the highest priority: for each
+/// field the first layer with a value wins (within a layer a role's section
+/// beats a top-level key), then `defaults`, then the role's `Default`.
+pub fn load_layers<V: DeserializeOwned>(layers: &[&VarLayer], defaults: &str) -> Result<V, String> {
     let shape = probe::<V>()?;
-    let file = Doc::parse(source, text, "cannot parse vars file")?;
+    let source = layers
+        .first()
+        .map(|l| l.0.source.clone())
+        .unwrap_or_else(|| "vars".into());
+    let docs: Vec<&Doc> = layers.iter().map(|l| &l.0).collect();
     let defs = Doc::parse(
         "playbook defaults",
         defaults,
         "cannot parse playbook defaults",
     )?;
-    file.check(&shape)?;
+    for d in &docs {
+        d.check(&shape)?;
+    }
     defs.check(&shape)?;
-    let (merged, origins) = merge(&shape, &file, &defs);
+    let (merged, origins) = merge(&shape, &docs, &defs);
     let map_err = |e: toml::de::Error| {
         let line = e.span().map(|s| merged[..s.start].matches('\n').count());
         match line.and_then(|l| origins.iter().find(|(n, _)| *n == l)) {
@@ -151,7 +197,7 @@ struct Doc {
     entries: Vec<Entry>,
 }
 
-fn line_of(text: &str, at: usize) -> usize {
+pub(crate) fn line_of(text: &str, at: usize) -> usize {
     text[..at].matches('\n').count() + 1
 }
 
@@ -160,8 +206,19 @@ impl Doc {
         let fail = |e: &dyn std::fmt::Display| format!("{what} {source}: {e}");
         let spanned = toml::de::DeTable::parse(text).map_err(|e| fail(&e))?;
         let values: toml::Table = toml::from_str(text).map_err(|e| fail(&e))?;
+        Ok(Doc::from_tables(source, text, spanned.get_ref(), &values))
+    }
+
+    /// The entries of one table and of the tables directly below it. `text`
+    /// is the whole file the spans point into.
+    fn from_tables(
+        source: &str,
+        text: &str,
+        spanned: &toml::de::DeTable<'_>,
+        values: &toml::Table,
+    ) -> Doc {
         let mut entries = Vec::new();
-        for (k, v) in spanned.get_ref().iter() {
+        for (k, v) in spanned.iter() {
             let key = k.get_ref().to_string();
             let value = values
                 .get(&key)
@@ -190,10 +247,10 @@ impl Doc {
                 children,
             });
         }
-        Ok(Doc {
+        Doc {
             source: source.to_string(),
             entries,
-        })
+        }
     }
 
     fn top(&self, key: &str) -> Option<&Entry> {
@@ -314,12 +371,14 @@ fn top_field<'a>(shape: &Shape, d: &'a Doc, f: &str) -> Option<&'a Entry> {
         .filter(|e| !(e.value.is_table() && shape.is_struct(f)))
 }
 
-fn merge(shape: &Shape, file: &Doc, defs: &Doc) -> (String, Vec<(usize, Origin)>) {
+fn merge(shape: &Shape, layers: &[&Doc], defs: &Doc) -> (String, Vec<(usize, Origin)>) {
     let mut em = Emitter::default();
     // Pass-through sections first: they are top-level keys.
     for s in shape.sections.iter().filter(|s| s.fields.is_none()) {
-        if let Some((e, d)) = [file, defs]
-            .into_iter()
+        if let Some((e, d)) = layers
+            .iter()
+            .copied()
+            .chain([defs])
             .find_map(|d| d.top(s.name).map(|e| (e, d)))
         {
             em.value(s.name, e, d);
@@ -329,15 +388,11 @@ fn merge(shape: &Shape, file: &Doc, defs: &Doc) -> (String, Vec<(usize, Origin)>
         let Some(fields) = s.fields else { continue };
         em.line(&format!("[{}]", quote(s.name)));
         for f in fields {
-            let hit = [
-                in_section(file, s.name, f).map(|e| (e, file)),
-                top_field(shape, file, f).map(|e| (e, file)),
-                in_section(defs, s.name, f).map(|e| (e, defs)),
-                top_field(shape, defs, f).map(|e| (e, defs)),
-            ]
-            .into_iter()
-            .flatten()
-            .next();
+            let hit = layers.iter().copied().chain([defs]).find_map(|d| {
+                in_section(d, s.name, f)
+                    .or_else(|| top_field(shape, d, f))
+                    .map(|e| (e, d))
+            });
             if let Some((e, d)) = hit {
                 em.value(f, e, d);
             }

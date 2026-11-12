@@ -18,6 +18,7 @@ fn go(d: &Sshd, pb: &Playbook<()>) -> Report {
     let r = run(
         pb,
         vec![HostSpec {
+            groups: Vec::new(),
             name: d.dest("tp"),
             target: Target::Ssh(transport(&d.key)),
             vars: (),

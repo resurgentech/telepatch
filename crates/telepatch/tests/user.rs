@@ -420,6 +420,7 @@ fn go(pb: &Playbook<PathBuf>, d: &Path, log_path: Option<PathBuf>) -> (Report, S
     let report = run(
         pb,
         vec![HostSpec {
+            groups: Vec::new(),
             name: "h1".into(),
             target: Target::Local(LocalTransport::new().uid(0).env("PATH", &path)),
             vars: d.to_path_buf(),

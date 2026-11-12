@@ -536,6 +536,7 @@ fn go(pb: &Playbook<()>, d: &Path, bin: &Path, booted: bool) -> (Report, String)
     let report = run(
         pb,
         vec![HostSpec {
+            groups: Vec::new(),
             name: "h1".into(),
             target: Target::Local(
                 LocalTransport::new()
@@ -962,6 +963,7 @@ fn executor_two_units_then_a_svc_op_reload_once_before_it_and_do_not_flush() {
     let r1 = run(
         &pb,
         vec![HostSpec {
+            groups: Vec::new(),
             name: "h1".into(),
             target: Target::Local(
                 LocalTransport::new()

@@ -102,6 +102,7 @@ fn go(
     let r = run(
         &pb,
         vec![HostSpec {
+            groups: Vec::new(),
             name: "c".into(),
             target: Target::Docker(DockerTransport::new().container("c", &ctr.name)),
             vars: v.clone(),
@@ -332,6 +333,7 @@ fn go_b(ctr: &Container) -> (Report, String) {
     let r = run(
         &pb,
         vec![HostSpec {
+            groups: Vec::new(),
             name: "c".into(),
             target: Target::Docker(DockerTransport::new().container("c", &ctr.name)),
             vars: B,
@@ -644,6 +646,7 @@ fn fetch_after_the_op_that_installs_curl(image: &str) {
     let r = run(
         &pb,
         vec![HostSpec {
+            groups: Vec::new(),
             name: "c".into(),
             target: Target::Docker(DockerTransport::new().container("c", &ctr.name)),
             vars: T {
@@ -839,6 +842,7 @@ fn fetch_with_wget_only(image: &str, wget_pkg: Option<&str>, after: Option<&str>
         let r = run(
             &pb,
             vec![HostSpec {
+                groups: Vec::new(),
                 name: "c".into(),
                 target: Target::Docker(DockerTransport::new().container("c", &ctr.name)),
                 vars: T {
@@ -964,6 +968,7 @@ fn go_deb(ctr: &Container, name: &'static str, v: &DebVars) -> (Report, String) 
     let r = run(
         &pb,
         vec![HostSpec {
+            groups: Vec::new(),
             name: "c".into(),
             target: Target::Docker(DockerTransport::new().container("c", &ctr.name)),
             vars: v.clone(),

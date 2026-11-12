@@ -20,6 +20,10 @@ async fn greet(h: &Host<Vars>) -> Result<(), TraceError> {
     let f = h.vars.dir.join("greeting").to_str().unwrap().to_string();
     h.file(&f).content(format!("{}\n", h.vars.greeting));
     sh!(h, "echo hi");
+    if h.in_group("web") {
+        let w = h.vars.dir.join("web").to_str().unwrap().to_string();
+        h.file(&w).content("in web\n");
+    }
     Ok(())
 }
 
@@ -671,4 +675,221 @@ fn diff_alone_is_a_usage_error_and_check_takes_no_target_changes() {
     let (out, code) = go(&["run", "greet", "--check"]);
     assert_eq!(code, 2);
     assert!(out.contains("--local") && out.contains("--host"), "{out}");
+}
+
+// ---- run --inventory / --limit ----
+
+fn inventory_file(d: &std::path::Path, body: &str) -> String {
+    let p = d.join("inventory.toml");
+    std::fs::write(&p, body).unwrap();
+    p.to_str().unwrap().to_string()
+}
+
+/// Two hosts, `bot@one` in group `web` (and so in group `all` by the
+/// host's own `groups`), each with its own output directory.
+fn two_host_inventory(d: &std::path::Path) -> String {
+    let (one, two) = (d.join("one"), d.join("two"));
+    std::fs::create_dir_all(&one).unwrap();
+    std::fs::create_dir_all(&two).unwrap();
+    inventory_file(
+        d,
+        &format!(
+            "[groups.web]\nhosts = [\"bot@one\"]\nvars = {{ greeting = \"from web\" }}\n\
+             [groups.db]\nhosts = [\"bot@two\"]\n\
+             [hosts.\"bot@one\"]\nvars = {{ dir = {one:?} }}\n\
+             [hosts.\"bot@two\"]\nvars = {{ dir = {two:?} }}\n",
+            one = one.to_str().unwrap(),
+            two = two.to_str().unwrap(),
+        ),
+    )
+}
+
+fn read(d: &std::path::Path, rel: &str) -> Option<String> {
+    std::fs::read_to_string(d.join(rel)).ok()
+}
+
+#[test]
+fn run_inventory_gives_each_host_its_vars_and_groups() {
+    let d = tempfile::tempdir().unwrap();
+    let inv = two_host_inventory(d.path());
+    // the vars file is the lowest layer: greeting for hosts the group does not set.
+    let v = vars_file(d.path(), "greeting = \"base\"\ndir = \"/unused\"\n");
+    let stub = Stub::new();
+    let (out, code) = go_ssh(&stub, &["run", "greet", "--inventory", &inv, "--vars", &v]);
+    assert_eq!(code, 0, "{out}");
+    assert_eq!(
+        read(d.path(), "one/greeting").as_deref(),
+        Some("from web\n")
+    );
+    assert_eq!(read(d.path(), "two/greeting").as_deref(), Some("base\n"));
+    // in_group: only the host in `web` got the file
+    assert_eq!(read(d.path(), "one/web").as_deref(), Some("in web\n"));
+    assert_eq!(read(d.path(), "two/web"), None);
+    // the inventory's host name is the ssh destination and the report name
+    for h in ["bot@one", "bot@two"] {
+        assert!(
+            out.lines().any(|l| l.split_whitespace().next() == Some(h)),
+            "{h}: {out}"
+        );
+        assert!(
+            stub.argv().iter().any(|l| l.split(' ').any(|w| w == h)),
+            "{h}"
+        );
+    }
+}
+
+#[test]
+fn limit_takes_a_group_a_host_or_a_list() {
+    let d = tempfile::tempdir().unwrap();
+    let inv = two_host_inventory(d.path());
+    let v = vars_file(d.path(), "greeting = \"base\"\ndir = \"/unused\"\n");
+    for (limit, one, two) in [
+        ("web", true, false),
+        ("db", false, true),
+        ("bot@two", false, true),
+        ("web,bot@two", true, true),
+    ] {
+        let out_dirs = ["one/greeting", "two/greeting"];
+        for f in out_dirs {
+            let _ = std::fs::remove_file(d.path().join(f));
+        }
+        let stub = Stub::new();
+        let (out, code) = go_ssh(
+            &stub,
+            &[
+                "run",
+                "greet",
+                "--inventory",
+                &inv,
+                "--vars",
+                &v,
+                "--limit",
+                limit,
+            ],
+        );
+        assert_eq!(code, 0, "{limit}: {out}");
+        assert_eq!(
+            read(d.path(), "one/greeting").is_some(),
+            one,
+            "{limit}: {out}"
+        );
+        assert_eq!(
+            read(d.path(), "two/greeting").is_some(),
+            two,
+            "{limit}: {out}"
+        );
+    }
+}
+
+#[test]
+fn unknown_limit_name_is_a_usage_error_and_runs_nothing() {
+    let d = tempfile::tempdir().unwrap();
+    let inv = two_host_inventory(d.path());
+    let v = vars_file(d.path(), "greeting = \"base\"\ndir = \"/unused\"\n");
+    let stub = Stub::new();
+    let (out, code) = go_ssh(
+        &stub,
+        &[
+            "run",
+            "greet",
+            "--inventory",
+            &inv,
+            "--vars",
+            &v,
+            "--limit",
+            "wbe",
+        ],
+    );
+    assert_eq!(code, 2, "{out}");
+    assert!(
+        out.contains("unknown --limit name `wbe`") && out.contains("groups: web, db"),
+        "{out}"
+    );
+    assert!(stub.argv().is_empty());
+    assert_eq!(read(d.path(), "one/greeting"), None);
+}
+
+#[test]
+fn inventory_is_exclusive_with_host_and_local_and_limit_needs_it() {
+    let (out, code) = go(&["run", "greet", "--inventory", "i.toml", "--host", "a@b"]);
+    assert_eq!(code, 2);
+    assert!(out.contains("cannot be used with"), "{out}");
+    let (out, code) = go(&["run", "greet", "--inventory", "i.toml", "--local"]);
+    assert_eq!(code, 2);
+    assert!(out.contains("cannot be used with"), "{out}");
+    let (out, code) = go(&["run", "greet", "--local", "--limit", "web"]);
+    assert_eq!(code, 2);
+    assert!(out.contains("--inventory"), "{out}");
+}
+
+#[test]
+fn host_still_runs_one_off_without_an_inventory() {
+    let d = tempfile::tempdir().unwrap();
+    let v = host_vars(d.path());
+    let stub = Stub::new();
+    let (out, code) = go_ssh(&stub, &["run", "greet", "--host", "bot@one", "--vars", &v]);
+    assert_eq!(code, 0, "{out}");
+    // not in any group
+    assert_eq!(read(d.path(), "out/web"), None);
+}
+
+#[test]
+fn inventory_errors_name_file_and_line_and_stop_before_any_host() {
+    let d = tempfile::tempdir().unwrap();
+    let v = vars_file(d.path(), "greeting = \"base\"\ndir = \"/unused\"\n");
+    let stub = Stub::new();
+    // an unknown vars key in a group the --limit leaves out is still caught
+    let inv = inventory_file(
+        d.path(),
+        "[groups.a]\nhosts = [\"bot@one\"]\n[groups.b]\nhosts = [\"bot@two\"]\nvars = { nope = 1 }\n",
+    );
+    let (out, code) = go_ssh(
+        &stub,
+        &[
+            "run",
+            "greet",
+            "--inventory",
+            &inv,
+            "--vars",
+            &v,
+            "--limit",
+            "a",
+        ],
+    );
+    assert_eq!(code, 2, "{out}");
+    assert!(
+        out.starts_with(&format!("{inv}:5: unknown key `nope`")),
+        "{out}"
+    );
+    assert!(stub.argv().is_empty());
+    let (out, code) = go_ssh(&stub, &["run", "greet", "--inventory", "/no/such/inv.toml"]);
+    assert_eq!(code, 2);
+    assert!(
+        out.starts_with("cannot read inventory /no/such/inv.toml"),
+        "{out}"
+    );
+}
+
+#[test]
+fn check_works_over_an_inventory() {
+    let d = tempfile::tempdir().unwrap();
+    let inv = two_host_inventory(d.path());
+    let v = vars_file(d.path(), "greeting = \"base\"\ndir = \"/unused\"\n");
+    let stub = Stub::new();
+    let (out, code) = go_ssh(
+        &stub,
+        &[
+            "run",
+            "greet",
+            "--inventory",
+            &inv,
+            "--vars",
+            &v,
+            "--check",
+            "--limit",
+            "db",
+        ],
+    );
+    assert_eq!(code, 2, "{out}");
+    assert_eq!(read(d.path(), "two/greeting"), None);
 }

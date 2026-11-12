@@ -53,6 +53,7 @@ fn go(ctr: &Container, name: &'static str, f: fn(Host<()>) -> PlaybookFuture) ->
     run(
         &pb,
         vec![HostSpec {
+            groups: Vec::new(),
             name: "c".into(),
             target: Target::Docker(DockerTransport::new().container("c", &ctr.name)),
             vars: (),

@@ -64,6 +64,14 @@ test-live-ssh:
     bash ../tp_basic/scripts/lib/docker-guard.sh
     cargo test -p telepatch --test live -- --ignored --nocapture ssh_
 
+# Live: `run --inventory` over two sshd containers in the docker VM, each on
+# its own port of TP_DOCKER_VM_PORTS (named in one inventory as
+# ssh://tp@addr:port, a throwaway known-hosts file); a group var reaches one
+# only. Needs docker, ssh, ssh-keygen and the network for apt.
+test-live-inventory:
+    bash ../tp_basic/scripts/lib/docker-guard.sh
+    cargo test -p telepatch --test live -- --ignored --nocapture inventory::
+
 # Live: the group primitive (and, from T47, the user primitive) on
 # ubuntu:24.04 and rockylinux/rockylinux:10 via docker exec; second run
 # must change nothing. Needs docker.

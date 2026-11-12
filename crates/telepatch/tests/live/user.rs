@@ -35,6 +35,7 @@ fn go(ctr: &Container, hash: &str) -> Report {
     run(
         &pb,
         vec![HostSpec {
+            groups: Vec::new(),
             name: "c".into(),
             target: Target::Docker(DockerTransport::new().container("c", &ctr.name)),
             vars: hash.to_string(),

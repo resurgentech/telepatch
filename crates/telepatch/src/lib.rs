@@ -13,6 +13,7 @@ pub mod engine;
 pub mod executor;
 pub mod facts;
 pub mod host;
+pub mod inventory;
 pub mod key;
 pub mod local;
 pub mod ops;

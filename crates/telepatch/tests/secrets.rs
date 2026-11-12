@@ -149,6 +149,7 @@ echo "$name" > "$TP_D/created"
     let report = run(
         &pb,
         vec![HostSpec {
+            groups: Vec::new(),
             name: "h1".into(),
             target: Target::Local(
                 LocalTransport::new()

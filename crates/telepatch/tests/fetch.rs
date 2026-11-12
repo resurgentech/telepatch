@@ -327,6 +327,7 @@ if [ -f "$D/www/$n" ]; then cp "$D/www/$n" "$out"; else echo "wget: server retur
         let report = run(
             &pb,
             vec![HostSpec {
+                groups: Vec::new(),
                 name: "h1".into(),
                 target: Target::Local(
                     LocalTransport::new()
@@ -947,6 +948,7 @@ fn two_ops_on_one_fetch_download_it_once() {
     let r = run(
         &Playbook::new("two", pb),
         vec![HostSpec {
+            groups: Vec::new(),
             name: "h1".into(),
             target: Target::Local(
                 LocalTransport::new()
@@ -1131,6 +1133,7 @@ esac
         let report = run(
             &pb,
             vec![HostSpec {
+                groups: Vec::new(),
                 name: "h1".into(),
                 target: Target::Local(
                     LocalTransport::new()

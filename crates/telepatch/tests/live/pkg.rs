@@ -54,6 +54,7 @@ fn go(ctr: &Container) -> Report {
     run(
         &pb,
         vec![HostSpec {
+            groups: Vec::new(),
             name: "c".into(),
             target: Target::Docker(DockerTransport::new().container("c", &ctr.name)),
             vars: (),
@@ -120,6 +121,7 @@ fn go_versioned(ctr: &Container, pin: Option<&str>) -> Report {
     run(
         &pb,
         vec![HostSpec {
+            groups: Vec::new(),
             name: "c".into(),
             target: Target::Docker(DockerTransport::new().container("c", &ctr.name)),
             vars: Want {
@@ -296,6 +298,7 @@ fn go_pb(
     let report = run_pb(
         &pb,
         vec![HostSpec {
+            groups: Vec::new(),
             name: "c".into(),
             target: Target::Docker(DockerTransport::new().container("c", &ctr.name)),
             vars: (),
