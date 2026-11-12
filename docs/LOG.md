@@ -1054,3 +1054,18 @@ are appended, never edited in; a hook refuses rewrites.
   tp_basic `cargo test`, `just check-conversion`, `just
   test-oracle-selftest` green. No VM.
 - Commits: telepatch d87ffe9, tp_basic 0de5db5
+
+## 2026-11-11 — T90 telepatch-openbao
+
+- New crate `telepatch-openbao`: `backend()`, scheme `bao`, token from
+  `BAO_TOKEN` then `VAULT_TOKEN`, address from `BAO_ADDR` then
+  `VAULT_ADDR`, no token file. KV version per mount from
+  `/v1/sys/internal/ui/mounts/<path>`, then one read per path (`/data/`
+  for v2). A missing field lists names only. Skip-verify prints a
+  prepare warning. Token expiry comes from `auth/token/lookup-self`.
+- Stub HTTP tests on `127.0.0.1` only: v1, v2, missing path, missing
+  field, 403, no token, skip-verify, expired token. No real server.
+- `just lint` fails if `cargo tree -p telepatch` contains `ureq` or
+  `rustls`. Gate E green (`cargo test --workspace`, `just lint`,
+  tp_basic `cargo test`).
+- Commits: telepatch 44e98e3
