@@ -189,14 +189,14 @@ conventions the hand ports settled:
   understanding doc says `creates` has no tilde expansion (an earlier doc
   did), check the rendered plan: `[ -e ~/… ]` runs in `u`'s login shell,
   so the plan wins; record the correction in the doc's Review.
-- **Playbook entry.** A playbook is `Playbook { name, run }` where `run`
+- **Playbook entry.** A playbook is `Playbook::new(name, run)` where `run`
   is a plain fn returning a boxed future:
 
   ```rust
   fn entry(h: Host<Vars>) -> PlaybookFuture {
       Box::pin(async move { dev_common(&h).await?; my_role(&h).await })
   }
-  // in playbooks(): Playbook { name: "container/<playbook>", run: entry }
+  // in playbooks(): Playbook::new("container/<playbook>", entry)
   ```
 
   Outside `src/` (a test or trial module) the vars type is

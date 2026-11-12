@@ -194,20 +194,20 @@ The full design, including the parts not built yet, is in
 | `pkg` from the distro (apt, dnf, yum, pacman, apt build-dep) | Built; merged across roles; apt cache refreshed once when stale |
 | `pkg` from pip, cargo, rustup, mise and vendor installer scripts | Built, one `pkg` with the source chained; present, pinned or latest; latest resolved on the host by the source's own command |
 | One `pkg` with the source chained (`.pip()`, `.cargo()`, `.rustup()`, `.mise()`, `.yum()`, `.installer_script(..)`) | Built |
-| `pkg` chained `.cargo().locked()` and `.binary_release(..)`; pin, latest and absent on the distro manager; a package from a fetched file | Designed, not built |
+| `pkg` chained `.cargo().locked()` and `.binary_release(..)`; pin and latest on the distro manager; absent and a package from a fetched file | Built: `.cargo().locked()`, `.binary_release(..)`, pin and latest on the distro manager. Designed: absent, and a package from a fetched file |
 | `file` (content, line, line_re, dir, absent, mode, owner, validate) | Built |
 | `repo` (apt deb822, dnf), `user`, `group` | Built |
-| `sh!` with `unless`, `creates`, `changed_if`; `raw`; `barrier` | Built; the warning for `sh!` in a role body is designed |
+| `sh!` with `unless`, `creates`, `changed_if`; `raw`; `barrier` | Built, including the warning for `sh!` in a role body |
 | `as_user` | Built; a persistent login shell per user over SSH, a fresh login environment per op elsewhere |
 | Facts: `os`, `exists`, `bin_exists`, `bin_version` | Built; `os` from os-release across 15 distro releases |
 | Transports | Local (`bash`, `sudo -n -H bash`), `docker exec`, SSH (multiplexed, root and per-user shells) |
 | CLI (`list`, `plan`, `run --local`, `run --host …`), JSONL log, static musl binaries | Built |
-| Guards (`.when(op.changed())`) | Built as far as trace and plan; the executor refuses them at prepare. Designed: evaluation on the host, `.ok()`, `\|`/`&`/`!`, `.at_end()`, or-joined merges |
+| Guards (`.when(op.changed())`, `.ok()`, `\|`/`&`/`!`, `.at_end()`) | Built: evaluated on the host, skipped ops, or-joined merges |
 | `svc` (`.enabled()`, `.started()`) | Built; without a running systemd the enable is applied offline and the start is skipped; no `systemctl` skips the op |
-| `svc` `.disabled()`, `.masked()`, `.stopped()`, guarded `.restart()` and `.reload()`; `h.unit` | Designed, not built |
-| Policy errors (`.allow(Policy, reason)`), trace errors with a location | Designed, not built |
-| `fetch`, `git`, `local_file`/`local_dir`/`local`, author-defined resources, `wait_for` | Designed, not built |
-| `Secret` vars and the `telepatch-openbao` crate, askama templates, vars per role | Designed, not built |
+| `svc` `.disabled()`, `.masked()`, `.stopped()`, guarded `.restart()` and `.reload()`; `h.unit` | Built |
+| Policy errors (`.allow(Policy, reason)`), trace errors with a location | Built |
+| `fetch`, `git`, `local_file`/`local_dir`/`local`, author-defined resources, `wait_for` | `fetch` built (checksum cache, `Unverified`; `.via_controller()` designed). The rest designed |
+| `Secret` vars and the `telepatch-openbao` crate, askama templates, vars per role | Vars per role built (inventory host and group vars designed). Secrets and templates designed |
 | Typed facts (`user_info`, `stat`, `pkg_installed`, `check`) and `h.assert` | Designed, not built |
 | `--check`/`--diff`, inventory and `--limit`, `--serial`/`--max-fail`/`--only`, `.retry`/`.timeout`, reboot marks and the barrier | Designed, not built |
 | Role rollback (the undo log), reconnect, PTY | Designed, not built |
