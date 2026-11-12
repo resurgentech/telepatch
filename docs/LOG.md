@@ -1325,3 +1325,19 @@ are appended, never edited in; a hook refuses rewrites.
   - VM `tp-docker-20261112-202245` deleted and verified gone.
 - Gate green.
 - Commits: tp_basic 8cd9b69
+
+## 2026-11-12 — T97k the prepare summary uses the install check's own test
+
+- `pkg_probe` prints `present` (the Present install script's test) and
+  `removable` (the absent script's test) per name. The test text is
+  defined once in `ops/pkg.rs` and reused: `tp_apt_present`, rpm, and
+  pacman with its `-Qqg` group half.
+- A provided-only name is no longer "will install" (apt `libz-dev`) or
+  "will remove" (apt, dnf `mailx`, pacman `sh`). An installed pacman
+  group is no longer announced.
+- Rendered scripts are byte-identical; no plan snapshot moved in either
+  repo.
+- Four stubbed-manager tests, including script/probe agreement for apt,
+  dnf and pacman.
+- Gate E green. No VM.
+- Commits: telepatch 35d12ca
