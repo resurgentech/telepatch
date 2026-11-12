@@ -1531,10 +1531,7 @@ impl Executor for HostExec {
         window: usize,
         queries: &[FactQuery],
     ) -> Vec<Value> {
-        let default = |q: &FactQuery| match q.fact {
-            crate::facts::query::Fact::BinVersion(_) => Value::Absent,
-            _ => Value::Exists(false),
-        };
+        let default = |q: &FactQuery| q.fact.missing();
         let users: BTreeSet<String> = queries
             .iter()
             .filter_map(|q| match &q.run_as.principal {
@@ -1553,7 +1550,7 @@ impl Executor for HostExec {
             self.seq += 1;
             let node = OpNode {
                 spec: OpSpec::Raw {
-                    script: q.fact.probe(),
+                    script: q.fact.probe_for(&host.os),
                 },
                 run_as: q.run_as.clone(),
                 reads: Default::default(),
@@ -1629,7 +1626,7 @@ impl Executor for HostExec {
         // Prepare first: a window declined for its head (no downloader on
         // the host, and an op of the window installs one) is sent,
         // reported and recorded nowhere, so nothing below runs for it.
-        let prepared = if window.ops.is_empty() || self.halted {
+        let prepared = if self.halted || (window.ops.is_empty() && window.assertions.is_empty()) {
             None
         } else {
             // A fetch or a binary release stages under the run's

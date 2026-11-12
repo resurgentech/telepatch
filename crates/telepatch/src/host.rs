@@ -166,6 +166,14 @@ impl<V> Host<V> {
             .or_else(|| derived_errors(&t).into_iter().next())
     }
 
+    /// Block the host in prepare when `cond` is false, with `msg`, before
+    /// anything in the window is applied. A true condition records nothing.
+    pub fn assert(&self, cond: bool, msg: impl Into<String>) {
+        if !cond {
+            self.trace.borrow_mut().assertions.push(msg.into());
+        }
+    }
+
     /// Record a playbook bug found while tracing. The run fails with the
     /// first recorded error before anything is applied. The error takes
     /// the caller's site and the roles open now.

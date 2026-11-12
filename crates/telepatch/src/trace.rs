@@ -406,6 +406,9 @@ pub struct Trace {
     /// os family, ...). A non-empty list fails the run before anything is
     /// applied.
     pub errors: Vec<crate::host::TraceError>,
+    /// Failed `h.assert` messages, in trace order. Prepare blocks the host
+    /// with them before the window's ops run.
+    pub assertions: Vec<String>,
 }
 
 fn role_stack(nodes: &[Node]) -> Vec<String> {

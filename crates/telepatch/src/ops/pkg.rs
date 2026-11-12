@@ -1562,6 +1562,7 @@ mod tests {
                 members: Vec::new(),
             }],
             split: None,
+            assertions: Vec::new(),
         };
         let got = crate::ops::fetch::items(&window);
         let sum = "ab".repeat(32);

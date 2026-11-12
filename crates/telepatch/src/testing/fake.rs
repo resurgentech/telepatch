@@ -79,10 +79,7 @@ impl FakeExecutor {
         self.fixtures
             .get(&(q.run_as.clone(), q.fact.clone()))
             .cloned()
-            .unwrap_or(match q.fact {
-                Fact::BinVersion(_) => Value::Absent,
-                _ => Value::Exists(false),
-            })
+            .unwrap_or_else(|| q.fact.missing())
     }
 
     /// Number of reads that needed a round trip.
@@ -199,6 +196,9 @@ impl Executor for FakeExecutor {
     }
 
     async fn apply(&mut self, host: &HostInfo, window: &Window) -> Result<Applied, String> {
+        if !window.assertions.is_empty() {
+            return Err(window.assertions.join("\n"));
+        }
         if self.no_downloader
             && let Some(s) = &window.split
         {

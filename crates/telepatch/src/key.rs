@@ -103,6 +103,32 @@ fn same_git_file(a: &Key, b: &Key) -> bool {
     }
 }
 
+/// `user_info`: the account's home and shell. Empty strings when `exists`
+/// is false.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct UserInfo {
+    pub home: String,
+    pub shell: String,
+    pub exists: bool,
+}
+
+/// `stat`: octal mode from `stat -c %a` (`644`, `1777`), owner and size.
+/// `mode` and `owner` are empty and `size` is 0 when `exists` is false.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Stat {
+    pub mode: String,
+    pub owner: String,
+    pub size: u64,
+    pub exists: bool,
+}
+
+/// `check`: the command's exit status and its stdout.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Check {
+    pub rc: i32,
+    pub stdout: String,
+}
+
 /// What a postcondition guarantees, or a fact read returned.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Value {
@@ -111,6 +137,11 @@ pub enum Value {
     Text(String),
     /// The thing asked about does not exist (e.g. no such binary).
     Absent,
+    User(UserInfo),
+    Stat(Stat),
+    /// `pkg_installed`: `Some(version)` or `None`.
+    Pkg(Option<String>),
+    Check(Check),
 }
 
 impl fmt::Display for Value {
@@ -120,6 +151,19 @@ impl fmt::Display for Value {
             Value::Exists(b) => write!(f, "Exists({b})"),
             Value::Text(s) => write!(f, "{s:?}"),
             Value::Absent => f.write_str("Absent"),
+            Value::User(u) => write!(
+                f,
+                "user(exists={} home={} shell={})",
+                u.exists, u.home, u.shell
+            ),
+            Value::Stat(s) => write!(
+                f,
+                "stat(exists={} mode={} owner={} size={})",
+                s.exists, s.mode, s.owner, s.size
+            ),
+            Value::Pkg(Some(v)) => write!(f, "pkg({v})"),
+            Value::Pkg(None) => f.write_str("pkg(absent)"),
+            Value::Check(c) => write!(f, "check(rc={} stdout={:?})", c.rc, c.stdout),
         }
     }
 }

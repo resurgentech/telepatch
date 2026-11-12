@@ -1,4 +1,5 @@
-//! Fact futures: `h.exists(..)`, `h.bin_exists(..)`, `h.bin_version(..)`.
+//! Fact futures: `h.exists(..)`, `h.bin_exists(..)`, `h.bin_version(..)`,
+//! `h.user_info(..)`, `h.stat(..)`, `h.pkg_installed(..)`, `h.check(..)`.
 //! On poll they ask the resolver; an unanswerable read registers itself and
 //! returns `Pending` until the engine has read it.
 
@@ -8,9 +9,10 @@ use std::pin::Pin;
 use std::rc::Rc;
 use std::task::{Context, Poll};
 
+use crate::facts::os::Family;
 use crate::facts::query::{Fact, FactQuery};
-use crate::host::Host;
-use crate::key::Value;
+use crate::host::{Host, TraceError};
+use crate::key::{Check, Stat, UserInfo, Value};
 use crate::resolver::{Answer, Resolver};
 use crate::trace::{Node, Source, Trace};
 
@@ -89,6 +91,58 @@ impl<V> Host<V> {
         self.fact(Fact::bin_version(cmd), |v| match v {
             Value::Text(s) => Some(s),
             _ => None,
+        })
+    }
+
+    /// Home directory, login shell, and whether the account exists.
+    pub fn user_info(&self, name: &str) -> FactFuture<UserInfo> {
+        self.fact(Fact::user_info(name), |v| match v {
+            Value::User(u) => u,
+            _ => UserInfo {
+                home: String::new(),
+                shell: String::new(),
+                exists: false,
+            },
+        })
+    }
+
+    /// Mode, owner, size, and whether `path` exists.
+    pub fn stat(&self, path: &str) -> FactFuture<Stat> {
+        self.fact(Fact::stat(path), |v| match v {
+            Value::Stat(s) => s,
+            _ => Stat {
+                mode: String::new(),
+                owner: String::new(),
+                size: 0,
+                exists: false,
+            },
+        })
+    }
+
+    /// The installed version, or `None`. Apt, dnf and pacman only; another
+    /// family is a trace error.
+    #[track_caller]
+    pub fn pkg_installed(&self, name: &str) -> FactFuture<Option<String>> {
+        if let Family::Other(f) = &self.os.family {
+            self.record_error(TraceError::new(format!(
+                "pkg_installed(): no package manager known for os family {f:?}"
+            )));
+        }
+        self.fact(Fact::pkg_installed(name), |v| match v {
+            Value::Pkg(v) => v,
+            _ => None,
+        })
+    }
+
+    /// Run `cmd` with `bash -c` (no persistent shell changes). `rc` is its
+    /// exit status; `stdout` is its standard output.
+    pub fn check(&self, cmd: &str) -> FactFuture<Check> {
+        self.fact(Fact::check(cmd), |v| match v {
+            Value::Check(c) => c,
+            _ => Check {
+                rc: 1,
+                stdout: String::new(),
+            },
         })
     }
 }

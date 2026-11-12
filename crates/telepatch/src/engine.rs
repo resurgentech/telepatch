@@ -98,6 +98,8 @@ pub struct Window {
     /// Where the window splits when prepare finds neither `curl` nor
     /// `wget` on the host ([`split_candidate`]).
     pub split: Option<Split>,
+    /// Failed `h.assert` messages. Prepare returns these and applies nothing.
+    pub assertions: Vec<String>,
 }
 
 /// A window's split candidate: an op of the window installs a downloader
@@ -199,6 +201,7 @@ pub fn prepare_window(
         kind,
         ops,
         split,
+        assertions: Vec::new(),
     }
 }
 
@@ -302,6 +305,10 @@ impl<E: Executor> Engine<E> {
                 return Err(EngineError::Playbook(err));
             }
             self.drain_resolved(&info, &host, window);
+            // An assert that failed during this poll blocks before any
+            // pending op of this window is applied, including the writes a
+            // fact read would otherwise flush.
+            self.refuse_assertions(&info, &host, window).await?;
             match poll {
                 Poll::Ready(Err(e)) => return Err(EngineError::Playbook(e)),
                 Poll::Ready(Ok(())) => {
@@ -357,6 +364,35 @@ impl<E: Executor> Engine<E> {
                     window += 1;
                 }
             }
+        }
+    }
+
+    /// Hand failed assertions to prepare on an empty window and stop.
+    /// Taking them here means a later window does not report them again.
+    async fn refuse_assertions<V>(
+        &mut self,
+        info: &HostInfo,
+        host: &Host<V>,
+        window: usize,
+    ) -> Result<(), EngineError> {
+        let assertions = {
+            let mut t = host.trace_cell().borrow_mut();
+            std::mem::take(&mut t.assertions)
+        };
+        if assertions.is_empty() {
+            return Ok(());
+        }
+        let why = assertions.join("\n");
+        let w = Window {
+            number: window,
+            kind: WindowKind::Final,
+            ops: Vec::new(),
+            split: None,
+            assertions,
+        };
+        match self.executor.apply(info, &w).await {
+            Ok(_) => Err(EngineError::Exec(why)),
+            Err(e) => Err(EngineError::Exec(e)),
         }
     }
 

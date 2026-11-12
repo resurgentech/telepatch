@@ -617,6 +617,9 @@ pub async fn prepare_window<S: ShellSet>(
     users_ok: &mut BTreeSet<String>,
     seq: &mut usize,
 ) -> Result<Prepared, Refused> {
+    if !window.assertions.is_empty() {
+        return Err(window.assertions.join("\n").into());
+    }
     let users = users_in(window);
     let new_users: Vec<String> = users
         .iter()
@@ -1128,6 +1131,7 @@ mod tests {
                 op(2, OpSpec::Svc(started)),
             ],
             split: None,
+            assertions: Vec::new(),
         };
         assert!(svc_after_installers(&w));
         assert_eq!(svc_wants(&w).len(), 1, "a restart is not probed");
