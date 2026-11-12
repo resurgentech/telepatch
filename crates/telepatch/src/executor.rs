@@ -842,6 +842,8 @@ fn describe(op: &OpNode) -> String {
             };
             format!("unit {} {what}", u.rel())
         }
+        OpSpec::Git(g) if g.path.is_empty() => format!("git {}", g.url),
+        OpSpec::Git(g) => format!("git {}", g.path),
         OpSpec::File(f) if f.is_secret() => format!("file {} (secret)", f.path),
         OpSpec::File(f) => {
             use crate::ops::file::FileKind;
@@ -920,6 +922,9 @@ fn parse_result(kind: OpKind, t: &Trailer) -> Result<Parsed, String> {
         OpKind::Sh => t
             .typed::<ShellResult>()
             .map(|r| (r.rc, r.changed, r.skipped, None, false, String::new())),
+        OpKind::Git => t
+            .typed::<crate::trailer::GitResult>()
+            .map(|r| (r.rc, r.changed, false, None, false, String::new())),
     };
     r.map_err(|e| format!("unreadable result {:?}: {e}", t.json))
 }
@@ -1700,6 +1705,10 @@ impl Executor for HostExec {
                     self.sink
                         .line(&format!("== {} [prepare] {n} ==", self.name));
                 }
+                for n in &will.git_notes {
+                    self.sink
+                        .line(&format!("== {} [prepare] {n} ==", self.name));
+                }
                 if let Err(why) = self.stream_copies(&will.copies).await {
                     self.block(why.clone());
                     return Err(why);
@@ -1928,6 +1937,16 @@ impl Executor for HostExec {
                                     }
                                     if installed.is_some() {
                                         self.remember(w, o, changed, installed.as_deref());
+                                    }
+                                    if let crate::trace::OpSpec::Git(g) = &w.node.spec
+                                        && let Ok(gr) = trailer.typed::<crate::trailer::GitResult>()
+                                    {
+                                        self.report.git.push(crate::report::GitCheckout {
+                                            id: w.id.0,
+                                            path: g.path.clone(),
+                                            created: gr.created,
+                                            was_rev: gr.was_rev,
+                                        });
                                     }
                                     if started {
                                         for m in &w.members {

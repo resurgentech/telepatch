@@ -49,6 +49,8 @@ pub enum OpKind {
     Repo,
     Svc,
     Sh,
+    /// A git checkout: `created` and `was_rev` are the inverse.
+    Git,
 }
 
 /// A trailer's JSON payload, typed. Fields are all required.
@@ -154,6 +156,22 @@ impl OpResult for RepoResult {
 }
 impl OpResult for ShellResult {
     const KIND: OpKind = OpKind::Sh;
+}
+
+/// A git checkout. `created` is set when this run made the directory.
+/// `was_rev` is the HEAD from before the op moved it (empty when the
+/// checkout was created, or when the op could not read one).
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
+pub struct GitResult {
+    pub rc: i32,
+    pub changed: bool,
+    pub created: bool,
+    #[serde(default)]
+    pub was_rev: String,
+}
+
+impl OpResult for GitResult {
+    const KIND: OpKind = OpKind::Git;
 }
 
 /// One parsed trailer line.
@@ -271,6 +289,7 @@ pub fn guard_skip(kind: OpKind, id: usize, nonce: &str) -> String {
         OpKind::Pkg => r#"{"rc":0,"changed":false,"installed":[],"when":false}"#,
         OpKind::File | OpKind::Repo => r#"{"rc":0,"changed":false,"when":false}"#,
         OpKind::Group | OpKind::User => r#"{"rc":0,"changed":false,"created":false,"when":false}"#,
+        OpKind::Git => r#"{"rc":0,"changed":false,"created":false,"was_rev":"","when":false}"#,
         OpKind::Sh | OpKind::Svc => r#"{"rc":0,"changed":false,"skipped":true,"when":false}"#,
     };
     format!("printf '\\n__tp_{nonce} {id} %s\\n' '{json}'\n")
@@ -293,6 +312,7 @@ fn wrap_with(kind: OpKind, body: &str, id: usize, nonce: &str, record: bool) -> 
         OpKind::Pkg => r#"{"rc":%s,"changed":%s,"installed":[%s]}"#,
         OpKind::File | OpKind::Repo => r#"{"rc":%s,"changed":%s}"#,
         OpKind::Group | OpKind::User => r#"{"rc":%s,"changed":%s,"created":%s}"#,
+        OpKind::Git => r#"{"rc":%s,"changed":%s,"created":%s,"was_rev":"%s"}"#,
         OpKind::Sh => r#"{"rc":%s,"changed":%s,"skipped":%s}"#,
         OpKind::Svc => {
             r#"{"rc":%s,"changed":%s,"skipped":%s,"was_enabled":%s,"was_active":%s,"was_masked":%s,"started":%s,"reloads":"%s"}"#
@@ -302,6 +322,7 @@ fn wrap_with(kind: OpKind, body: &str, id: usize, nonce: &str, record: bool) -> 
         OpKind::Pkg => r#""$rc" "$__tp_c" "$__tp_i""#,
         OpKind::File | OpKind::Repo => r#""$rc" "$__tp_c""#,
         OpKind::Group | OpKind::User => r#""$rc" "$__tp_c" "$__tp_k""#,
+        OpKind::Git => r#""$rc" "$__tp_c" "$__tp_k" "$(__tp_esc "${tp_was-}")""#,
         OpKind::Sh => r#""$rc" "$__tp_c" "$__tp_s""#,
         OpKind::Svc => {
             r#""$rc" "$__tp_c" "$__tp_s" "${tp_was_e:-null}" "${tp_was_a:-null}" "${tp_was_m:-null}" "$__tp_st" "$(__tp_esc "${__tp_drn-}")""#
@@ -309,7 +330,7 @@ fn wrap_with(kind: OpKind, body: &str, id: usize, nonce: &str, record: bool) -> 
     };
     let mut o = String::from("(\n");
     o.push_str(PRELUDE);
-    if matches!(kind, OpKind::Group | OpKind::User) {
+    if matches!(kind, OpKind::Group | OpKind::User | OpKind::Git) {
         // Only a group or user op sets `created`; other kinds keep their bytes.
         o.push_str("  case \"$created\" in 1) __tp_k=true;; *) __tp_k=false;; esac\n");
     }

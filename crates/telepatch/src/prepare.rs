@@ -378,6 +378,8 @@ pub struct Prepared {
     pub copies: Vec<crate::local::CopyItem>,
     /// Prepare lines for copies whose sha256 differs.
     pub local_notes: Vec<String>,
+    /// Prepare lines for git checkouts that will clone, check out or update.
+    pub git_notes: Vec<String>,
 }
 
 /// Why prepare blocks a host. `why` is the reason the run prints.
@@ -471,7 +473,7 @@ pub fn svc_after_installers(window: &Window) -> bool {
             | OpSpec::Unit(_) => {
                 return true;
             }
-            OpSpec::Group(_) | OpSpec::User(_) | OpSpec::Repo(_) => {}
+            OpSpec::Group(_) | OpSpec::User(_) | OpSpec::Repo(_) | OpSpec::Git(_) => {}
         }
     }
     false
@@ -646,6 +648,28 @@ pub async fn prepare_window<S: ShellSet>(
     }
     for u in &users {
         shells.open_user(u).await?;
+    }
+
+    // Git: a different remote or a dirty tree blocks before this window
+    // downloads or changes anything. One probe per principal.
+    let git_groups = crate::ops::git::by_principal(window.ops.iter().filter_map(|op| {
+        let OpSpec::Git(g) = &op.node.spec else {
+            return None;
+        };
+        Some((&op.node.run_as.principal, g))
+    }));
+    let mut git_notes = Vec::new();
+    for (who, specs) in &git_groups {
+        let id = next();
+        let sh = shell_of(shells, who)?;
+        let (rc, out) = probe(sh, id, &crate::ops::git::probe_script(specs)).await?;
+        if rc != 0 {
+            return Err(format!("git probe failed: {out}").into());
+        }
+        match crate::ops::git::notes(specs, &out) {
+            Ok(lines) => git_notes.extend(lines),
+            Err(why) => return Err(why.into()),
+        }
     }
 
     // Controller copies: compare sha256 before any download writes the host.
@@ -882,6 +906,7 @@ pub async fn prepare_window<S: ShellSet>(
         fetches,
         copies,
         local_notes,
+        git_notes,
         ..Prepared::default()
     };
     for ((m, _names), id) in groups.iter().zip(pkg_ids) {

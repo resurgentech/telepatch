@@ -107,6 +107,17 @@ pub struct Removed {
     pub names: Vec<String>,
 }
 
+/// A git checkout this run created or moved. The inverse (T98) is to
+/// remove `path` when `created`, otherwise to check out `was_rev`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GitCheckout {
+    pub id: usize,
+    pub path: String,
+    pub created: bool,
+    /// HEAD before the op moved the checkout. Empty when `created`.
+    pub was_rev: String,
+}
+
 /// A non-distro package a window's op will change, from the prepare
 /// probe of its source. Only items that will change are listed.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -302,6 +313,8 @@ pub struct HostReport {
     pub will_remove: Vec<WillRemove>,
     /// Names absent pkg ops removed, in the order the ops finished.
     pub removed: Vec<Removed>,
+    /// Git checkouts this run created or moved, in the order the ops finished.
+    pub git: Vec<GitCheckout>,
     pub will_change: Vec<WillChange>,
     pub will_create: Vec<WillCreate>,
     /// Every download the host's file ops needed, in window order.
@@ -325,6 +338,7 @@ impl HostReport {
             will_install: Vec::new(),
             will_remove: Vec::new(),
             removed: Vec::new(),
+            git: Vec::new(),
             will_change: Vec::new(),
             will_create: Vec::new(),
             fetches: Vec::new(),

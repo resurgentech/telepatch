@@ -12,6 +12,8 @@ pub enum Key {
     Group(String),
     Svc(String),
     Repo(String),
+    /// A git checkout at this path.
+    Git(String),
     /// A command on `PATH`; see [`Key::overlaps`].
     Bin(String),
     /// Everything under one user's home directory, `home:<user>`; see
@@ -39,6 +41,9 @@ impl Key {
     }
     pub fn repo(n: impl Into<String>) -> Key {
         Key::Repo(n.into())
+    }
+    pub fn git(p: impl Into<String>) -> Key {
+        Key::Git(p.into())
     }
     pub fn bin(n: impl Into<String>) -> Key {
         Key::Bin(n.into())
@@ -69,6 +74,7 @@ impl Key {
             || (matches!(other, Key::Bin(_)) && creates_bin(self))
             || (matches!(self, Key::Home(_)) && in_home(other))
             || (matches!(other, Key::Home(_)) && in_home(self))
+            || same_git_file(self, other)
     }
 }
 
@@ -81,10 +87,19 @@ impl fmt::Display for Key {
             Key::Group(n) => write!(f, "group:{n}"),
             Key::Svc(n) => write!(f, "svc:{n}"),
             Key::Repo(n) => write!(f, "repo:{n}"),
+            Key::Git(n) => write!(f, "git:{n}"),
             Key::Bin(n) => write!(f, "bin:{n}"),
             Key::Home(u) => write!(f, "home:{u}"),
             Key::Any => f.write_str("*"),
         }
+    }
+}
+
+/// A checkout and a file op at the same path name one path.
+fn same_git_file(a: &Key, b: &Key) -> bool {
+    match (a, b) {
+        (Key::Git(p), Key::File(q)) | (Key::File(p), Key::Git(q)) => p == q,
+        _ => false,
     }
 }
 
@@ -122,6 +137,7 @@ mod tests {
             (Key::group("docker"), "group:docker"),
             (Key::svc("nginx"), "svc:nginx"),
             (Key::repo("hashicorp"), "repo:hashicorp"),
+            (Key::git("/srv/a"), "git:/srv/a"),
             (Key::bin("cargo"), "bin:cargo"),
             (Key::home("deploy"), "home:deploy"),
             (Key::Any, "*"),

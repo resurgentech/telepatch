@@ -88,6 +88,8 @@ pub enum OpSpec {
     Svc(crate::ops::svc::SvcSpec),
     /// A unit file or drop-in under `/etc/systemd/system` (`h.unit`).
     Unit(crate::ops::unit::UnitSpec),
+    /// A git checkout (`h.git`).
+    Git(crate::ops::git::GitSpec),
 }
 
 impl OpSpec {
@@ -102,6 +104,7 @@ impl OpSpec {
             OpSpec::Repo(_) => "repo",
             OpSpec::Svc(_) => "svc",
             OpSpec::Unit(_) => "unit",
+            OpSpec::Git(_) => "git",
         }
     }
 
@@ -118,6 +121,7 @@ impl OpSpec {
             OpSpec::Svc(_) => OpKind::Svc,
             // A unit is a file: its result is `rc` and `changed`.
             OpSpec::Unit(_) => OpKind::File,
+            OpSpec::Git(_) => OpKind::Git,
         }
     }
 
@@ -145,6 +149,7 @@ impl OpSpec {
             OpSpec::Repo(r) => r.render(),
             OpSpec::Svc(s) => s.render(),
             OpSpec::Unit(u) => u.render_mode(true),
+            OpSpec::Git(g) => g.render(),
         }
     }
 
@@ -159,6 +164,7 @@ impl OpSpec {
             OpSpec::Repo(r) => r.default_writes(),
             OpSpec::Svc(s) => BTreeSet::from([Key::svc(s.key_name())]),
             OpSpec::Unit(u) => u.default_writes(),
+            OpSpec::Git(g) => g.default_writes(),
         }
     }
 
@@ -177,6 +183,7 @@ impl OpSpec {
             OpSpec::Repo(r) => r.default_post(),
             OpSpec::Svc(s) => BTreeMap::from([(Key::svc(s.key_name()), Value::Exists(true))]),
             OpSpec::Unit(u) => u.default_post(),
+            OpSpec::Git(g) => g.default_post(),
         }
     }
 }
