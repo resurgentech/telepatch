@@ -127,6 +127,8 @@ impl OpSpec {
     pub fn script(&self, os: &Os) -> String {
         match self {
             OpSpec::User(u) => u.render(false),
+            OpSpec::File(f) => f.render_mode(false),
+            OpSpec::Unit(u) => u.render_mode(false),
             _ => self.exec_script(os),
         }
     }
@@ -138,11 +140,11 @@ impl OpSpec {
             OpSpec::Raw { script } => script.clone(),
             OpSpec::Shell(s) => crate::ops::shell::body(s),
             OpSpec::Pkg(p) => p.render(),
-            OpSpec::File(f) => f.render(),
+            OpSpec::File(f) => f.render_mode(true),
             OpSpec::Group(g) => g.render(),
             OpSpec::Repo(r) => r.render(),
             OpSpec::Svc(s) => s.render(),
-            OpSpec::Unit(u) => u.render(),
+            OpSpec::Unit(u) => u.render_mode(true),
         }
     }
 

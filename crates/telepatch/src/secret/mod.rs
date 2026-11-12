@@ -32,6 +32,86 @@ thread_local! {
     static LITERALS: RefCell<Option<Vec<String>>> = const { RefCell::new(None) };
     static TRACK: Cell<bool> = const { Cell::new(false) };
     static STORE: RefCell<Store> = RefCell::new(Store::default());
+    static RENDER: RefCell<RenderState> = const { RefCell::new(RenderState::new()) };
+    static CAPTURED: RefCell<Vec<Secret>> = const { RefCell::new(Vec::new()) };
+}
+
+#[derive(Clone)]
+struct RenderState {
+    reveal: bool,
+    capture: bool,
+    unresolved: bool,
+    touched: u32,
+}
+
+impl RenderState {
+    const fn new() -> RenderState {
+        RenderState {
+            reveal: false,
+            capture: false,
+            unresolved: false,
+            touched: 0,
+        }
+    }
+}
+
+/// What a template render observed about [`Secret`] formatting.
+pub(crate) struct RenderOut {
+    pub secret: bool,
+    pub unresolved: bool,
+    pub secrets: Vec<Secret>,
+}
+
+struct RenderGuard {
+    prev: RenderState,
+    prev_cap: Option<Vec<Secret>>,
+}
+
+impl Drop for RenderGuard {
+    fn drop(&mut self) {
+        RENDER.with(|st| *st.borrow_mut() = self.prev.clone());
+        if let Some(cap) = self.prev_cap.take() {
+            CAPTURED.with(|c| *c.borrow_mut() = cap);
+        }
+    }
+}
+
+/// Run `f` while [`Secret`]'s `Display` either prints `<secret>` or, when
+/// `reveal` is set, the resolved value. `capture` records every secret the
+/// render formatted. State is restored afterwards, including on panic.
+pub(crate) fn with_render<R>(reveal: bool, capture: bool, f: impl FnOnce() -> R) -> (R, RenderOut) {
+    let prev = RENDER.with(|st| {
+        let mut cur = st.borrow_mut();
+        let prev = cur.clone();
+        *cur = RenderState {
+            reveal,
+            capture,
+            unresolved: false,
+            touched: 0,
+        };
+        prev
+    });
+    let prev_cap = if capture {
+        Some(CAPTURED.with(|c| std::mem::take(&mut *c.borrow_mut())))
+    } else {
+        None
+    };
+    let guard = RenderGuard { prev, prev_cap };
+    let result = f();
+    let out = RENDER.with(|st| {
+        let st = st.borrow();
+        RenderOut {
+            secret: st.touched > 0,
+            unresolved: st.unresolved,
+            secrets: if capture {
+                CAPTURED.with(|c| std::mem::take(&mut *c.borrow_mut()))
+            } else {
+                Vec::new()
+            },
+        }
+    });
+    drop(guard);
+    (result, out)
 }
 
 #[derive(Default)]
@@ -277,6 +357,21 @@ impl Secret {
         }
     }
 
+    /// Literal, resolved, or a reference already in the prepare cache.
+    fn revealed(&self) -> Option<String> {
+        if let Some(v) = self.plain() {
+            return Some(v.to_string());
+        }
+        let r = self.unresolved()?;
+        let key = cache_key(r);
+        STORE.with(|s| {
+            s.borrow()
+                .cache
+                .get(&key)
+                .and_then(|res| res.as_ref().ok().map(|v| v.expose().to_string()))
+        })
+    }
+
     pub(crate) fn var_name(&self) -> &str {
         match &self.kind {
             Kind::Literal { var, .. } => var,
@@ -330,9 +425,42 @@ impl Eq for Secret {}
 
 impl fmt::Display for Secret {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Outside a template render this stays `<secret>`. Inside one,
+        // [`with_render`] decides whether the value is printed.
+        let (reveal, capture) = RENDER.with(|st| {
+            let st = st.borrow();
+            (st.reveal, st.capture)
+        });
+        RENDER.with(|st| {
+            let mut st = st.borrow_mut();
+            st.touched = st.touched.saturating_add(1);
+        });
+        if capture {
+            CAPTURED.with(|c| c.borrow_mut().push(self.clone()));
+        }
+        if reveal {
+            if let Some(v) = self.revealed() {
+                return f.write_str(&v);
+            }
+            RENDER.with(|st| st.borrow_mut().unresolved = true);
+        }
         f.write_str("<secret>")
     }
 }
+
+impl askama::FastWritable for Secret {
+    fn write_into(
+        &self,
+        dest: &mut dyn std::fmt::Write,
+        _values: &dyn askama::Values,
+    ) -> askama::Result<()> {
+        dest.write_fmt(format_args!("{self}"))?;
+        Ok(())
+    }
+}
+
+/// A secret's text is the value the file should hold, not an escaped form.
+impl askama::filters::HtmlSafe for Secret {}
 
 impl fmt::Debug for Secret {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -465,23 +593,56 @@ fn call_scheme(scheme: &str, refs: &[SecretRef]) -> Vec<Result<SecretValue, Secr
     results
 }
 
+enum JobWhere {
+    /// A user password: applied onto the op, and rejected when it is not one line.
+    User,
+    /// A template field: the value stays in the cache and is read at render.
+    Template,
+}
+
+struct Job {
+    index: usize,
+    role: String,
+    secret: Secret,
+    reference: SecretRef,
+    where_: JobWhere,
+}
+
 /// Resolve every secret reference in `ops`. One backend call per scheme for
 /// the refs not already read in this run; backends read each path once per call.
+/// User passwords are written back onto the op. Template secrets stay
+/// references; [`Secret`]'s render reads them from the cache.
 pub(crate) fn resolve_ops(ops: &mut [WindowOp]) -> Result<(), String> {
-    let mut jobs: Vec<(usize, String, SecretRef)> = Vec::new();
+    let mut jobs: Vec<Job> = Vec::new();
     for (i, op) in ops.iter().enumerate() {
-        let Some(secret) = user_secret(&op.node.spec) else {
-            continue;
-        };
-        let Some(r) = secret.unresolved().cloned() else {
-            continue;
-        };
         let role = op
             .members
             .first()
             .map(|m| m.role.clone())
             .unwrap_or_default();
-        jobs.push((i, role, r));
+        if let Some(secret) = user_secret(&op.node.spec)
+            && let Some(r) = secret.unresolved().cloned()
+        {
+            jobs.push(Job {
+                index: i,
+                role: role.clone(),
+                secret: secret.clone(),
+                reference: r,
+                where_: JobWhere::User,
+            });
+        }
+        for secret in template_secrets(&op.node.spec) {
+            let Some(r) = secret.unresolved().cloned() else {
+                continue;
+            };
+            jobs.push(Job {
+                index: i,
+                role: role.clone(),
+                secret,
+                reference: r,
+                where_: JobWhere::Template,
+            });
+        }
     }
     if jobs.is_empty() {
         return Ok(());
@@ -489,17 +650,20 @@ pub(crate) fn resolve_ops(ops: &mut [WindowOp]) -> Result<(), String> {
 
     let mut raw: Vec<Option<Result<SecretValue, String>>> = vec![None; jobs.len()];
     let mut missing: HashMap<String, Vec<usize>> = HashMap::new();
-    for (n, (_, _, r)) in jobs.iter().enumerate() {
-        let key = cache_key(r);
+    for (n, job) in jobs.iter().enumerate() {
+        let key = cache_key(&job.reference);
         let hit = STORE.with(|s| s.borrow().cache.get(&key).cloned());
         if let Some(hit) = hit {
             raw[n] = Some(hit);
         } else {
-            missing.entry(r.scheme.clone()).or_default().push(n);
+            missing
+                .entry(job.reference.scheme.clone())
+                .or_default()
+                .push(n);
         }
     }
     for (scheme, idxs) in missing {
-        let batch: Vec<SecretRef> = idxs.iter().map(|n| jobs[*n].2.clone()).collect();
+        let batch: Vec<SecretRef> = idxs.iter().map(|n| jobs[*n].reference.clone()).collect();
         let got = call_scheme(&scheme, &batch);
         if got.len() != batch.len() {
             return Err(format!(
@@ -510,34 +674,46 @@ pub(crate) fn resolve_ops(ops: &mut [WindowOp]) -> Result<(), String> {
         }
         for (n, res) in idxs.into_iter().zip(got) {
             let stored = res.map_err(|e| e.to_string());
-            let key = cache_key(&jobs[n].2);
+            let key = cache_key(&jobs[n].reference);
             STORE.with(|s| s.borrow_mut().cache.insert(key, stored.clone()));
             raw[n] = Some(stored);
         }
     }
 
-    for (n, (i, role, r)) in jobs.iter().enumerate() {
+    for (n, job) in jobs.iter().enumerate() {
         match raw[n].take().unwrap() {
             Err(msg) => {
-                let secret = user_secret(&ops[*i].node.spec).unwrap();
-                let var = var_label(secret, r);
-                return Err(format!("secret {var}: {msg} (role {})", role_label(role)));
+                let var = var_label(&job.secret, &job.reference);
+                return Err(format!(
+                    "secret {var}: {msg} (role {})",
+                    role_label(&job.role)
+                ));
             }
             Ok(value) => {
-                if value.expose().contains(['\n', '\r', '\0']) {
-                    let secret = user_secret(&ops[*i].node.spec).unwrap();
-                    let var = var_label(secret, r);
-                    return Err(format!(
-                        "secret {var}: password_hash must be a single line (role {})",
-                        role_label(role)
-                    ));
+                if matches!(job.where_, JobWhere::User) {
+                    if value.expose().contains(['\n', '\r', '\0']) {
+                        let var = var_label(&job.secret, &job.reference);
+                        return Err(format!(
+                            "secret {var}: password_hash must be a single line (role {})",
+                            role_label(&job.role)
+                        ));
+                    }
+                    let secret = user_secret_mut(&mut ops[job.index].node.spec).unwrap();
+                    secret.resolve_with(value);
                 }
-                let secret = user_secret_mut(&mut ops[*i].node.spec).unwrap();
-                secret.resolve_with(value);
             }
         }
     }
     Ok(())
+}
+
+fn template_secrets(spec: &OpSpec) -> Vec<Secret> {
+    let content = match spec {
+        OpSpec::File(f) => f.content.as_ref(),
+        OpSpec::Unit(u) => u.content.as_ref(),
+        _ => None,
+    };
+    content.map(|c| c.secret_refs()).unwrap_or_default()
 }
 
 fn user_secret(spec: &OpSpec) -> Option<&Secret> {

@@ -11,6 +11,7 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 
 use crate::host::{Host, OpHandle, TraceError};
+use crate::ops::content::{self, Content, ScriptBody};
 use crate::ops::fetch::{Fetched, FileSrc};
 use crate::sh::quote;
 use crate::trace::OpSpec;
@@ -34,7 +35,7 @@ pub enum LineOp {
 pub struct FileSpec {
     pub path: String,
     pub kind: FileKind,
-    pub content: Option<Vec<u8>>,
+    pub content: Option<Content>,
     pub lines: Vec<LineOp>,
     pub mode: Option<u32>,
     /// `user`, `user:group` or `:group`.
@@ -82,8 +83,23 @@ impl FileSpec {
         quote(p)
     }
 
+    /// True when the body is a template that formatted a [`crate::Secret`].
+    pub(crate) fn is_secret(&self) -> bool {
+        self.content.as_ref().is_some_and(|c| c.is_secret())
+    }
+
     pub fn render(&self) -> String {
+        self.render_mode(false)
+    }
+
+    /// `reveal` puts secret values into the body. Without it a secret file
+    /// carries `# (secret)` and not the rendered text.
+    pub(crate) fn render_mode(&self, reveal: bool) -> String {
+        let body = self.content.as_ref().map(|c| c.script_body(reveal));
         let mut o = format!("rc=0; changed=0\ntp_p={}\n", self.path_word());
+        if matches!(body, Some(ScriptBody::Hidden)) {
+            o.push_str("# (secret)\n");
+        }
         match self.kind {
             FileKind::Absent => {
                 o.push_str(
@@ -101,9 +117,9 @@ impl FileSpec {
             }
             FileKind::File => match &self.validate {
                 Some(v) if self.content.is_some() || !self.lines.is_empty() => {
-                    self.render_validated(&mut o, v)
+                    self.render_validated(&mut o, v, body.as_ref())
                 }
-                _ => self.render_file(&mut o),
+                _ => self.render_file(&mut o, body.as_ref()),
             },
         }
         if let Some(m) = self.mode {
@@ -139,18 +155,22 @@ impl FileSpec {
     /// the final mode and owner, checked, then moved over the target. The
     /// target is never written at any other mode, and is untouched when the
     /// check fails.
-    fn render_validated(&self, o: &mut String, validate: &str) {
+    fn render_validated(&self, o: &mut String, validate: &str, body: Option<&ScriptBody>) {
         o.push_str(
             "if [ -d \"$tp_p\" ]; then echo \"telepatch: $tp_p is a directory\" >&2; rc=1; fi\n",
         );
         o.push_str(
             "if [ \"$rc\" -eq 0 ]; then\n  tp_c=$(mktemp \"$tp_p.tpXXXXXX\") || rc=$?\nfi\nif [ \"$rc\" -eq 0 ]; then\n",
         );
-        match &self.content {
-            Some(c) => o.push_str(&format!(
+        match body {
+            Some(ScriptBody::Bytes(c)) => o.push_str(&format!(
                 "  tp_b={}\n  printf %s \"$tp_b\" | base64 -d > \"$tp_c\" || rc=$?\n",
                 quote(&STANDARD.encode(c))
             )),
+            Some(ScriptBody::Hidden) => {}
+            Some(ScriptBody::Broken) => {
+                o.push_str("  echo 'telepatch: secret was not resolved' >&2; rc=1\n")
+            }
             None => {
                 o.push_str("  if [ -f \"$tp_p\" ]; then cat \"$tp_p\" > \"$tp_c\" || rc=$?; fi\n")
             }
@@ -187,7 +207,7 @@ impl FileSpec {
         );
     }
 
-    fn render_file(&self, o: &mut String) {
+    fn render_file(&self, o: &mut String, body: Option<&ScriptBody>) {
         o.push_str(
             "if [ -d \"$tp_p\" ]; then echo \"telepatch: $tp_p is a directory\" >&2; rc=1; fi\n",
         );
@@ -196,11 +216,16 @@ impl FileSpec {
                 "if [ \"$rc\" -eq 0 ] && [ ! -e \"$tp_p\" ]; then\n  (umask 022; : > \"$tp_p\")\n  rc=$?\n  if [ \"$rc\" -eq 0 ]; then changed=1; fi\nfi\n",
             );
         }
-        if let Some(c) = &self.content {
-            o.push_str(&format!(
+        match body {
+            Some(ScriptBody::Bytes(c)) => o.push_str(&format!(
                 "tp_b={}\nif [ \"$rc\" -eq 0 ] && ! {{ [ -f \"$tp_p\" ] && [ \"$(printf %s \"$tp_b\" | base64 -d | sha256sum | cut -d' ' -f1)\" = \"$(sha256sum < \"$tp_p\" | cut -d' ' -f1)\" ]; }}; then\n  tp_t=$(mktemp \"$tp_p.tpXXXXXX\") || rc=$?\n  if [ \"$rc\" -eq 0 ]; then\n    if printf %s \"$tp_b\" | base64 -d > \"$tp_t\"; then\n      if [ -e \"$tp_p\" ]; then\n        chmod --reference=\"$tp_p\" \"$tp_t\"; chown --reference=\"$tp_p\" \"$tp_t\" 2>/dev/null\n      else\n        chmod 644 \"$tp_t\"\n      fi\n      mv -f \"$tp_t\" \"$tp_p\"; rc=$?\n    else\n      rc=$?\n    fi\n    if [ \"$rc\" -eq 0 ]; then changed=1; else rm -f \"$tp_t\"; fi\n  fi\nfi\n",
                 quote(&STANDARD.encode(c))
-            ));
+            )),
+            Some(ScriptBody::Hidden) => {}
+            Some(ScriptBody::Broken) => {
+                o.push_str("echo 'telepatch: secret was not resolved' >&2\nrc=1\n")
+            }
+            None => {}
         }
         self.render_lines(o);
     }
@@ -428,11 +453,11 @@ impl FileHandle {
     }
     /// Ensure exactly these bytes.
     #[track_caller]
-    pub fn content(&self, bytes: impl AsRef<[u8]>) -> Self {
+    pub fn content<K>(&self, body: impl content::FileContent<K>) -> Self {
         if self.exclusive(".content()") {
             return self.clone();
         }
-        let b = bytes.as_ref().to_vec();
+        let b = body.into_content();
         self.spec(|s| s.content = Some(b))
     }
     /// Check the candidate before it replaces the target. `cmd` is shell

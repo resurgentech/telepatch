@@ -45,6 +45,7 @@ use base64::engine::general_purpose::STANDARD;
 use crate::TraceError;
 use crate::host::{Host, OpHandle};
 use crate::key::Key;
+use crate::ops::content;
 use crate::ops::file::{FileKind, FileSpec};
 use crate::sh::quote;
 use crate::trace::{Node, NodeId, OpSpec, Principal, Trace};
@@ -52,55 +53,7 @@ use crate::trace::{Node, NodeId, OpSpec, Principal, Trace};
 /// Where units the run owns are written.
 pub const UNIT_DIR: &str = "/etc/systemd/system";
 
-/// What `.content(..)` takes: bytes now (`&str`, `String`, `&[u8]`,
-/// `Vec<u8>`, `&[u8; N]`). A template value converts into it later (T89),
-/// so `impl Into<Content>` callers keep compiling.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Content {
-    bytes: Vec<u8>,
-}
-
-impl Content {
-    pub fn bytes(&self) -> &[u8] {
-        &self.bytes
-    }
-}
-
-impl From<Vec<u8>> for Content {
-    fn from(bytes: Vec<u8>) -> Content {
-        Content { bytes }
-    }
-}
-impl From<&[u8]> for Content {
-    fn from(b: &[u8]) -> Content {
-        b.to_vec().into()
-    }
-}
-impl<const N: usize> From<&[u8; N]> for Content {
-    fn from(b: &[u8; N]) -> Content {
-        b.to_vec().into()
-    }
-}
-impl From<&Vec<u8>> for Content {
-    fn from(b: &Vec<u8>) -> Content {
-        b.clone().into()
-    }
-}
-impl From<&str> for Content {
-    fn from(s: &str) -> Content {
-        s.as_bytes().into()
-    }
-}
-impl From<String> for Content {
-    fn from(s: String) -> Content {
-        s.into_bytes().into()
-    }
-}
-impl From<&String> for Content {
-    fn from(s: &String) -> Content {
-        s.as_bytes().into()
-    }
-}
+pub use crate::ops::content::Content;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UnitSpec {
@@ -163,12 +116,10 @@ impl UnitSpec {
             f.kind = FileKind::Absent;
             return f;
         }
-        f.content = Some(
-            self.content
-                .as_ref()
-                .map(|c| c.bytes.clone())
-                .unwrap_or_default(),
-        );
+        f.content = Some(match &self.content {
+            Some(c) => c.clone(),
+            None => Content::from(""),
+        });
         f.mode = self.mode;
         f.validate = Some(self.verify());
         f
@@ -236,6 +187,10 @@ impl UnitSpec {
     /// `/etc/systemd/system`), the target's directory made, then the file
     /// op's body aimed at the target there.
     pub fn render(&self) -> String {
+        self.render_mode(false)
+    }
+
+    pub(crate) fn render_mode(&self, reveal: bool) -> String {
         let mut o = String::from("tp_ud=\"${TP_UNIT_DIR:-/etc/systemd/system}\"\n");
         if !self.absent {
             let dir = match &self.drop_in {
@@ -244,7 +199,7 @@ impl UnitSpec {
             };
             o.push_str(&format!("[ -d {dir} ] || (umask 022; mkdir -p -- {dir})\n"));
         }
-        let body = self.file_spec().render();
+        let body = self.file_spec().render_mode(reveal);
         let from = format!("tp_p={}\n", quote(&self.path()));
         let to = format!("tp_p=\"$tp_ud\"/{}\n", quote(&self.rel()));
         debug_assert!(body.contains(&from), "file body: {body}");
@@ -283,11 +238,10 @@ impl UnitHandle {
         self.clone()
     }
 
-    /// Ensure the unit file holds exactly this: bytes now, a template
-    /// value after T89.
+    /// Ensure the unit file holds exactly these bytes, or this template.
     #[track_caller]
-    pub fn content(&self, content: impl Into<Content>) -> Self {
-        let c = content.into();
+    pub fn content<K>(&self, content: impl content::FileContent<K>) -> Self {
+        let c = content.into_content();
         self.spec(|s| s.content = Some(c))
     }
 
@@ -295,7 +249,7 @@ impl UnitHandle {
     /// `name` has it) holding exactly `text`. The op is the drop-in, not
     /// the unit file.
     #[track_caller]
-    pub fn drop_in(&self, name: &str, text: impl Into<Content>) -> Self {
+    pub fn drop_in<K>(&self, name: &str, text: impl content::FileContent<K>) -> Self {
         if !segment_ok(name) {
             self.0.record_error(TraceError::new(format!(
                 "unit drop_in({name:?}): not a drop-in name"
@@ -307,7 +261,7 @@ impl UnitHandle {
         } else {
             format!("{name}.conf")
         };
-        let c = text.into();
+        let c = text.into_content();
         self.spec(|s| {
             s.drop_in = Some(conf);
             s.content = Some(c);
@@ -386,11 +340,16 @@ pub fn probe(specs: &[&UnitSpec]) -> String {
             s.push_str(&format!("else echo \"{i} present\"\nfi\n"));
             continue;
         }
-        let bytes = u
+        let Some(bytes) = u
             .content
             .as_ref()
-            .map(|c| c.bytes.clone())
-            .unwrap_or_default();
+            .map(|c| c.host_bytes())
+            .unwrap_or(Some(Vec::new()))
+        else {
+            s.push_str("else echo 'telepatch: secret was not resolved' >&2; echo \"");
+            s.push_str(&format!("{i} differs\"\nfi\n"));
+            continue;
+        };
         let mut same = format!(
             "[ -f \"$tp_p\" ] && [ \"$(printf %s {} | base64 -d | sha256sum | cut -d' ' -f1)\" = \"$(sha256sum < \"$tp_p\" | cut -d' ' -f1)\" ]",
             quote(&STANDARD.encode(bytes))

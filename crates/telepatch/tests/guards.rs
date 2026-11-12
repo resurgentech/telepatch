@@ -849,7 +849,12 @@ fn builders_return_an_owned_handle_so_a_chain_binds() {
     let _typed: &telepatch::ops::svc::SvcHandle = &late;
 
     match node(&h, daemon.id()).spec {
-        OpSpec::File(f) => assert_eq!(f.content.as_deref(), Some(&b"{}\n"[..])),
+        OpSpec::File(f) => {
+            assert_eq!(
+                f.content.as_ref().and_then(|c| c.as_bytes()),
+                Some(&b"{}\n"[..])
+            )
+        }
         s => panic!("{s:?}"),
     }
     match node(&h, unit.id()).spec {
@@ -895,7 +900,10 @@ fn builders_return_an_owned_handle_so_a_chain_binds() {
     match node(&h, f.id()).spec {
         OpSpec::File(v) => {
             assert_eq!(v.mode, Some(0o600));
-            assert_eq!(v.content.as_deref(), Some(&b"y"[..]));
+            assert_eq!(
+                v.content.as_ref().and_then(|c| c.as_bytes()),
+                Some(&b"y"[..])
+            );
         }
         x => panic!("{x:?}"),
     }

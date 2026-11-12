@@ -686,8 +686,12 @@ fn subject(w: &WindowOp, m: &crate::engine::Member) -> String {
             };
             format!("{} {}", p.kind(), names.join(" "))
         }
+        OpSpec::File(f) if f.is_secret() => format!("file {} (secret)", f.path),
         OpSpec::File(f) => format!("file {}", f.path),
         OpSpec::Svc(s) => format!("svc {}", s.key_name()),
+        OpSpec::Unit(u) if u.content.as_ref().is_some_and(|c| c.is_secret()) => {
+            format!("unit {} (secret)", u.rel())
+        }
         OpSpec::Unit(u) => format!("unit {}", u.rel()),
         _ => describe(&w.node),
     }
@@ -824,6 +828,9 @@ fn describe(op: &OpNode) -> String {
             Some(a) => format!("svc {} {}", s.unit, a.name()),
             None => format!("svc {}", s.unit),
         },
+        OpSpec::Unit(u) if u.content.as_ref().is_some_and(|c| c.is_secret()) => {
+            format!("unit {} (secret)", u.rel())
+        }
         OpSpec::Unit(u) => {
             let what = match (&u.drop_in, u.absent) {
                 (_, true) => "absent",
@@ -832,6 +839,7 @@ fn describe(op: &OpNode) -> String {
             };
             format!("unit {} {what}", u.rel())
         }
+        OpSpec::File(f) if f.is_secret() => format!("file {} (secret)", f.path),
         OpSpec::File(f) => {
             use crate::ops::file::FileKind;
             let what = match f.kind {
