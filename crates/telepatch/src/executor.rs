@@ -844,6 +844,7 @@ fn describe(op: &OpNode) -> String {
         }
         OpSpec::Git(g) if g.path.is_empty() => format!("git {}", g.url),
         OpSpec::Git(g) => format!("git {}", g.path),
+        OpSpec::Resource(r) => format!("{} {}", r.kind, r.name),
         OpSpec::File(f) if f.is_secret() => format!("file {} (secret)", f.path),
         OpSpec::File(f) => {
             use crate::ops::file::FileKind;
@@ -924,6 +925,9 @@ fn parse_result(kind: OpKind, t: &Trailer) -> Result<Parsed, String> {
             .map(|r| (r.rc, r.changed, r.skipped, None, false, String::new())),
         OpKind::Git => t
             .typed::<crate::trailer::GitResult>()
+            .map(|r| (r.rc, r.changed, false, None, false, String::new())),
+        OpKind::Resource => t
+            .typed::<crate::trailer::ResourceResult>()
             .map(|r| (r.rc, r.changed, false, None, false, String::new())),
     };
     r.map_err(|e| format!("unreadable result {:?}: {e}", t.json))
@@ -1616,7 +1620,6 @@ impl Executor for HostExec {
             self.block(why.clone());
             return Err(why);
         }
-        let window = &window;
         let kind = match window.kind {
             WindowKind::NonMutating => "non-mutating",
             WindowKind::ImplicitBarrier => "implicit barrier",
@@ -1636,26 +1639,30 @@ impl Executor for HostExec {
                 matches!(&o.node.spec, OpSpec::Pkg(p)
                     if matches!(p.source, crate::ops::pkg::Source::BinaryRelease(_)))
             });
-            if binary_release || !crate::ops::fetch::items(window).is_empty() {
+            if binary_release || !crate::ops::fetch::items(&window).is_empty() {
                 self.fetch_staged = true;
             }
             // Prepare: nothing is sent to be applied until all of it passes.
             let prepared = prepare::prepare_window(
                 &mut self.shells,
-                window,
+                &window,
                 &host.os,
                 &mut self.users_ok,
                 &mut self.seq,
             )
             .await;
             if let (Err(r), Some(s)) = (&prepared, &window.split)
-                && splits_at(window, s, &r.no_downloader)
+                && splits_at(&window, s, &r.no_downloader)
             {
-                self.split(window, s);
+                self.split(&window, s);
                 return Ok(Applied::Head(s.at + 1));
+            }
+            if let Ok(will) = &prepared {
+                crate::resource::mark_skipped(&mut window, &will.resource_skip);
             }
             Some(prepared)
         };
+        let window = &window;
         self.sink.event(
             json!({"ev":"window","host":self.name,"n":window.number,"kind":kind,
             "ops": window.ops.iter().map(|o| o.id.0).collect::<Vec<_>>()}),
@@ -1703,6 +1710,10 @@ impl Executor for HostExec {
                         .line(&format!("== {} [prepare] {n} ==", self.name));
                 }
                 for n in &will.git_notes {
+                    self.sink
+                        .line(&format!("== {} [prepare] {n} ==", self.name));
+                }
+                for n in &will.resource_notes {
                     self.sink
                         .line(&format!("== {} [prepare] {n} ==", self.name));
                 }
@@ -1943,6 +1954,14 @@ impl Executor for HostExec {
                                             path: g.path.clone(),
                                             created: gr.created,
                                             was_rev: gr.was_rev,
+                                        });
+                                    }
+                                    if let crate::trace::OpSpec::Resource(rs) = &w.node.spec {
+                                        self.report.resources.push(crate::report::ResourceRecord {
+                                            id: w.id.0,
+                                            kind: rs.kind.to_string(),
+                                            name: rs.name.clone(),
+                                            irreversible: rs.inverse.is_none(),
                                         });
                                     }
                                     if started {

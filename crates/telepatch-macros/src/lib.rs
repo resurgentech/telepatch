@@ -1,5 +1,5 @@
-//! Procedural macros for telepatch (`sh!`, `#[role]`). Re-exported by the
-//! `telepatch` crate; depend on that instead of this one.
+//! Procedural macros for telepatch (`sh!`, `cmd!`, `#[role]`). Re-exported
+//! by the `telepatch` crate; depend on that instead of this one.
 
 use proc_macro::TokenStream;
 use proc_macro2::{Span, TokenStream as TokenStream2};
@@ -143,6 +143,122 @@ fn opt(l: &Option<LitStr>) -> syn::Result<TokenStream2> {
             quote! { ::std::option::Option::Some(#e) }
         }
         None => quote! { ::std::option::Option::None },
+    })
+}
+
+struct CmdInput {
+    fmt: LitStr,
+    args: Vec<Expr>,
+}
+
+impl Parse for CmdInput {
+    fn parse(input: ParseStream) -> syn::Result<Self> {
+        let fmt = string_lit(input.parse()?, "the cmd! command")?;
+        let mut args = Vec::new();
+        while input.parse::<Option<Token![,]>>()?.is_some() {
+            if input.is_empty() {
+                break;
+            }
+            args.push(input.parse()?);
+        }
+        Ok(CmdInput { fmt, args })
+    }
+}
+
+/// `cmd!("cmd {var}")` or `cmd!("cmd {}", expr)`.
+///
+/// Expands to a `Script`, not an op. `{var}` quotes an in-scope identifier
+/// the way `sh!` does; `{}` quotes the next argument; `{{` and `}}` are
+/// literal braces.
+#[proc_macro]
+pub fn cmd(input: TokenStream) -> TokenStream {
+    let input = syn::parse_macro_input!(input as CmdInput);
+    expand_cmd(&input.fmt, &input.args)
+        .unwrap_or_else(|e| e.to_compile_error())
+        .into()
+}
+
+fn expand_cmd(fmt: &LitStr, args: &[Expr]) -> syn::Result<TokenStream2> {
+    let src = fmt.value();
+    let mut parts: Vec<TokenStream2> = Vec::new();
+    let mut literal = String::new();
+    let mut arg_i = 0usize;
+    let mut chars = src.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '{' if chars.peek() == Some(&'{') => {
+                chars.next();
+                literal.push('{');
+            }
+            '}' if chars.peek() == Some(&'}') => {
+                chars.next();
+                literal.push('}');
+            }
+            '{' => {
+                if !literal.is_empty() {
+                    let s = std::mem::take(&mut literal);
+                    parts.push(quote! { __tp_cmd.push_str(#s); });
+                }
+                let mut name = String::new();
+                loop {
+                    match chars.next() {
+                        Some('}') => break,
+                        Some(ch) => name.push(ch),
+                        None => {
+                            return Err(syn::Error::new(
+                                fmt.span(),
+                                "unclosed `{` in cmd! string (write `{{` for a literal brace)",
+                            ));
+                        }
+                    }
+                }
+                let quoted = if name.is_empty() {
+                    let Some(expr) = args.get(arg_i) else {
+                        return Err(syn::Error::new(
+                            fmt.span(),
+                            "`{}` has no argument (write `{{` for a literal brace)",
+                        ));
+                    };
+                    arg_i += 1;
+                    quote! { &::telepatch::sh::quote(&::std::string::ToString::to_string(&#expr)) }
+                } else {
+                    let ident = syn::parse_str::<Ident>(&name).map_err(|_| {
+                        syn::Error::new(
+                            fmt.span(),
+                            format!(
+                                "unsupported placeholder `{{{name}}}`: use `{{}}` with an argument, or `{{identifier}}`"
+                            ),
+                        )
+                    })?;
+                    let ident = Ident::new(&ident.to_string(), fmt.span());
+                    quote! { &::telepatch::sh::quote(&::std::string::ToString::to_string(&#ident)) }
+                };
+                parts.push(quote! { __tp_cmd.push_str(#quoted); });
+            }
+            '}' => {
+                return Err(syn::Error::new(
+                    fmt.span(),
+                    "unmatched `}` in cmd! string (write `}}` for a literal brace)",
+                ));
+            }
+            c => literal.push(c),
+        }
+    }
+    if arg_i != args.len() {
+        return Err(syn::Error::new(
+            fmt.span(),
+            "cmd! has more arguments than `{}` placeholders",
+        ));
+    }
+    if !literal.is_empty() {
+        parts.push(quote! { __tp_cmd.push_str(#literal); });
+    }
+    Ok(quote! {
+        ::telepatch::resource::Script::new({
+            let mut __tp_cmd = ::std::string::String::new();
+            #(#parts)*
+            __tp_cmd
+        })
     })
 }
 

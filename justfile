@@ -114,6 +114,13 @@ test-live-git:
     bash ../tp_basic/scripts/lib/docker-guard.sh
     cargo test -p telepatch --test live -- --ignored --nocapture git_
 
+# Live: the Terminfo resource on ubuntu:24.04. Run 1 compiles an entry with
+# tic; run 2 changes nothing. Needs docker and the network (apt install
+# ncurses-bin).
+test-live-resource:
+    bash ../tp_basic/scripts/lib/docker-guard.sh
+    cargo test -p telepatch --test live -- --ignored --nocapture resource_
+
 # Live: OpenBao dev server in a plain debian:13 container on the docker VM.
 # Inherited BAO_* and VAULT_* are dropped here; the test sets its own.
 # Nothing reads .env. Needs docker (the VM's daemon) and the network.

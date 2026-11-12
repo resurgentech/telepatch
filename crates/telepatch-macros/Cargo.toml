@@ -1,6 +1,6 @@
 [package]
 name = "telepatch-macros"
-description = "sh! and #[role] for telepatch"
+description = "sh!, cmd! and #[role] for telepatch"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

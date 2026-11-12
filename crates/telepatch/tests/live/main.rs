@@ -4,7 +4,7 @@
 //! run with `just test-live-os`, `just test-live-pkg`, `just test-live-mise`,
 //! `just test-live-user`, `just test-live-repo`, `just test-live-svc`,
 //! `just test-live-unit`, `just test-live-fetch`, `just test-live-git`,
-//! `just test-live-ssh`.
+//! `just test-live-resource`, `just test-live-ssh`.
 
 mod container;
 mod fetch;
@@ -13,6 +13,7 @@ mod group;
 mod mise;
 mod pkg;
 mod repo;
+mod resource;
 mod ssh_exec;
 mod sshd;
 mod svc;

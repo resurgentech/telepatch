@@ -13,7 +13,8 @@
 //!    [`Graph::rustup_hoist_is_safe`] instead: only the moving op's
 //!    effects are checked, and of those only what it adds to the earlier
 //!    op. Then guarded
-//!    ops with an equal spec (any kind), `RunAs` and `allow_fail` are folded
+//!    ops with an equal spec (any kind except a resource, which never
+//!    merges), `RunAs` and `allow_fail` are folded
 //!    (svc units compared by key, so a restart of `docker` and one of
 //!    `docker.service` are equal; a restart and a reload are not)
 //!    into the latest one, their guards or-joined, when
@@ -142,6 +143,11 @@ struct SameKey {
 
 fn same_key(item: &Item) -> Option<SameKey> {
     let Item::Op(w) = item else { return None };
+    // A resource keeps its own probe and plan. Equal guarded resources
+    // stay two ops.
+    if matches!(w.node.spec, OpSpec::Resource(_)) {
+        return None;
+    }
     w.node.guard.as_ref()?;
     // `svc("docker")` and `svc("docker.service")` are one unit: compare
     // svc specs by key name (the merged op keeps the later spelling).

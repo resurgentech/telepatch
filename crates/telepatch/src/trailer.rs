@@ -51,6 +51,9 @@ pub enum OpKind {
     Sh,
     /// A git checkout: `created` and `was_rev` are the inverse.
     Git,
+    /// An author-defined resource: `rc` and `changed`. Irreversibility is
+    /// known from the trace (no inverse script), not from this payload.
+    Resource,
 }
 
 /// A trailer's JSON payload, typed. Fields are all required.
@@ -174,6 +177,19 @@ impl OpResult for GitResult {
     const KIND: OpKind = OpKind::Git;
 }
 
+/// A resource op. The same JSON shape as a file: whether it ran and
+/// whether the apply changed the host. The inverse, when the resource
+/// defined one, stays on the trace; this result does not carry it.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct ResourceResult {
+    pub rc: i32,
+    pub changed: bool,
+}
+
+impl OpResult for ResourceResult {
+    const KIND: OpKind = OpKind::Resource;
+}
+
 /// One parsed trailer line.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Trailer {
@@ -287,7 +303,9 @@ pub fn guard_skip(kind: OpKind, id: usize, nonce: &str) -> String {
     );
     let json = match kind {
         OpKind::Pkg => r#"{"rc":0,"changed":false,"installed":[],"when":false}"#,
-        OpKind::File | OpKind::Repo => r#"{"rc":0,"changed":false,"when":false}"#,
+        OpKind::File | OpKind::Repo | OpKind::Resource => {
+            r#"{"rc":0,"changed":false,"when":false}"#
+        }
         OpKind::Group | OpKind::User => r#"{"rc":0,"changed":false,"created":false,"when":false}"#,
         OpKind::Git => r#"{"rc":0,"changed":false,"created":false,"was_rev":"","when":false}"#,
         OpKind::Sh | OpKind::Svc => r#"{"rc":0,"changed":false,"skipped":true,"when":false}"#,
@@ -310,7 +328,7 @@ fn wrap_with(kind: OpKind, body: &str, id: usize, nonce: &str, record: bool) -> 
     );
     let json = match kind {
         OpKind::Pkg => r#"{"rc":%s,"changed":%s,"installed":[%s]}"#,
-        OpKind::File | OpKind::Repo => r#"{"rc":%s,"changed":%s}"#,
+        OpKind::File | OpKind::Repo | OpKind::Resource => r#"{"rc":%s,"changed":%s}"#,
         OpKind::Group | OpKind::User => r#"{"rc":%s,"changed":%s,"created":%s}"#,
         OpKind::Git => r#"{"rc":%s,"changed":%s,"created":%s,"was_rev":"%s"}"#,
         OpKind::Sh => r#"{"rc":%s,"changed":%s,"skipped":%s}"#,
@@ -320,7 +338,7 @@ fn wrap_with(kind: OpKind, body: &str, id: usize, nonce: &str, record: bool) -> 
     };
     let args = match kind {
         OpKind::Pkg => r#""$rc" "$__tp_c" "$__tp_i""#,
-        OpKind::File | OpKind::Repo => r#""$rc" "$__tp_c""#,
+        OpKind::File | OpKind::Repo | OpKind::Resource => r#""$rc" "$__tp_c""#,
         OpKind::Group | OpKind::User => r#""$rc" "$__tp_c" "$__tp_k""#,
         OpKind::Git => r#""$rc" "$__tp_c" "$__tp_k" "$(__tp_esc "${tp_was-}")""#,
         OpKind::Sh => r#""$rc" "$__tp_c" "$__tp_s""#,

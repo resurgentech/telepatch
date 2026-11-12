@@ -6,6 +6,8 @@
 //! host appends a node to that host's [`Trace`] and returns an [`OpHandle`]
 //! whose builder methods edit the node in place. Nothing executes.
 
+extern crate self as telepatch;
+
 pub mod cli;
 pub mod engine;
 pub mod executor;
@@ -21,6 +23,7 @@ pub mod pool;
 pub mod prepare;
 pub mod report;
 pub mod resolver;
+pub mod resource;
 pub mod role;
 pub mod secret;
 pub mod sh;
@@ -34,6 +37,7 @@ pub use host::{Host, OpHandle, Scope, TraceError};
 pub use key::{Key, Value};
 pub use local::{local, local_dir, local_file};
 pub use policy::{Allowance, Policy};
+pub use resource::{Change, Probe, Probed, Resource, Script, Terminfo, plan_against};
 pub use role::{Playbook, PlaybookFuture, RoleGuard};
 pub use secret::{Secret, SecretBackend, SecretError, SecretRef, SecretValue};
 pub use telepatch_macros::*;

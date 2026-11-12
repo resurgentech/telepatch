@@ -380,6 +380,10 @@ pub struct Prepared {
     pub local_notes: Vec<String>,
     /// Prepare lines for git checkouts that will clone, check out or update.
     pub git_notes: Vec<String>,
+    /// Prepare lines for resources that will change (`kind name: will verb`).
+    pub resource_notes: Vec<String>,
+    /// Resource ops whose plan is no change. The executor sends `:` for them.
+    pub resource_skip: Vec<NodeId>,
 }
 
 /// Why prepare blocks a host. `why` is the reason the run prints.
@@ -470,7 +474,8 @@ pub fn svc_after_installers(window: &Window) -> bool {
             | OpSpec::Shell(_)
             | OpSpec::Raw { .. }
             | OpSpec::File(_)
-            | OpSpec::Unit(_) => {
+            | OpSpec::Unit(_)
+            | OpSpec::Resource(_) => {
                 return true;
             }
             OpSpec::Group(_) | OpSpec::User(_) | OpSpec::Repo(_) | OpSpec::Git(_) => {}
@@ -497,7 +502,11 @@ pub fn unit_after_installers(window: &Window) -> bool {
     for op in &window.ops {
         match &op.node.spec {
             OpSpec::Unit(_) => return false,
-            OpSpec::Pkg(_) | OpSpec::Shell(_) | OpSpec::Raw { .. } | OpSpec::File(_) => {
+            OpSpec::Pkg(_)
+            | OpSpec::Shell(_)
+            | OpSpec::Raw { .. }
+            | OpSpec::File(_)
+            | OpSpec::Resource(_) => {
                 return true;
             }
             _ => {}
@@ -672,6 +681,32 @@ pub async fn prepare_window<S: ShellSet>(
         match crate::ops::git::notes(specs, &out) {
             Ok(lines) => git_notes.extend(lines),
             Err(why) => return Err(why.into()),
+        }
+    }
+
+    // Resources: probe before any download or copy. A failed probe blocks
+    // the host with nothing in this window applied. `missing_is_none` is
+    // not a failure.
+    let mut resource_notes = Vec::new();
+    let mut resource_skip = Vec::new();
+    for job in crate::resource::jobs(window) {
+        let id = next();
+        let sh = shell_of(shells, &job.who)?;
+        let (rc, out) = probe(sh, id, &job.script).await?;
+        if rc != 0 {
+            return Err(
+                format!("resource {} {}: probe failed (rc {rc})", job.kind, job.name).into(),
+            );
+        }
+        let Some(spec) = window.ops.iter().find_map(|op| match &op.node.spec {
+            OpSpec::Resource(r) if op.id == job.id => Some(r),
+            _ => None,
+        }) else {
+            continue;
+        };
+        match crate::resource::decide(spec, &out)? {
+            crate::resource::Decision::Skip => resource_skip.push(job.id),
+            crate::resource::Decision::Will(note) => resource_notes.push(note),
         }
     }
 
@@ -910,6 +945,8 @@ pub async fn prepare_window<S: ShellSet>(
         copies,
         local_notes,
         git_notes,
+        resource_notes,
+        resource_skip,
         ..Prepared::default()
     };
     for ((m, _names), id) in groups.iter().zip(pkg_ids) {

@@ -21,6 +21,11 @@ pub enum Key {
     Home(String),
     /// Everything:the effects of this op cannot be enumerated.
     Any,
+    /// An author-defined resource, `kind:name`.
+    Custom {
+        kind: String,
+        name: String,
+    },
 }
 
 impl Key {
@@ -50,6 +55,12 @@ impl Key {
     }
     pub fn home(user: impl Into<String>) -> Key {
         Key::Home(user.into())
+    }
+    pub fn custom(kind: impl Into<String>, name: impl Into<String>) -> Key {
+        Key::Custom {
+            kind: kind.into(),
+            name: name.into(),
+        }
     }
 
     /// `*` overlaps everything; otherwise keys overlap when equal. Paths are
@@ -91,6 +102,7 @@ impl fmt::Display for Key {
             Key::Bin(n) => write!(f, "bin:{n}"),
             Key::Home(u) => write!(f, "home:{u}"),
             Key::Any => f.write_str("*"),
+            Key::Custom { kind, name } => write!(f, "{kind}:{name}"),
         }
     }
 }

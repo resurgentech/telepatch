@@ -118,6 +118,15 @@ pub struct GitCheckout {
     pub was_rev: String,
 }
 
+/// A resource op that finished. `irreversible` when it defined no inverse.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResourceRecord {
+    pub id: usize,
+    pub kind: String,
+    pub name: String,
+    pub irreversible: bool,
+}
+
 /// A non-distro package a window's op will change, from the prepare
 /// probe of its source. Only items that will change are listed.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -315,6 +324,9 @@ pub struct HostReport {
     pub removed: Vec<Removed>,
     /// Git checkouts this run created or moved, in the order the ops finished.
     pub git: Vec<GitCheckout>,
+    /// Resource ops that finished (rc 0), including one whose plan was no
+    /// change. `irreversible` is set when the resource defined no inverse.
+    pub resources: Vec<ResourceRecord>,
     pub will_change: Vec<WillChange>,
     pub will_create: Vec<WillCreate>,
     /// Every download the host's file ops needed, in window order.
@@ -339,6 +351,7 @@ impl HostReport {
             will_remove: Vec::new(),
             removed: Vec::new(),
             git: Vec::new(),
+            resources: Vec::new(),
             will_change: Vec::new(),
             will_create: Vec::new(),
             fetches: Vec::new(),
