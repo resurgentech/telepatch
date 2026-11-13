@@ -1480,3 +1480,23 @@ are appended, never edited in; a hook refuses rewrites.
 - 12 tests in `tests/op_kill.rs`. Gate E green. 42 telepatch snapshots
   re-accepted (wrapper lines only); none moved in tp_basic.
 - Commits: telepatch 540ceac
+
+## 2026-11-12 — T101 `.timeout`: the controller's watchdog
+
+- `.timeout(d)` on every op (zero is a trace error; a second call
+  replaces the first) and per-kind defaults: pkg 30 min; sh, raw,
+  resource, git 10 min; file, repo 5 min; svc 2 min; unit, group, user
+  1 min. Part of the merge keys; the plan shows only an explicit limit.
+- Enforced by the controller, not on the host: `Watch` over the shell
+  (clock from the start line, or from when the op becomes current), a
+  root second shell opened once per host on first expiry, TERM to the
+  op's process group once a second for 5 s, then KILL; the kill script
+  goes through the second shell's stdin. Reported `FAILED (timed out
+  after d)`; PID gone with no trailer is `ended without a result`; no
+  start line drops the shell (`op never started`); a host with no
+  second shell is dropped (`no second shell to stop it`).
+- `Shell::abandon`/`abort` in the pool. Note amended (controller clock,
+  `set -m`, start line, repeated TERM, Run controls). Live ssh case
+  written, run by T104.
+- Gate E green: 816 passed; tp_basic unchanged.
+- Commits: telepatch dd71572
