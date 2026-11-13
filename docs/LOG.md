@@ -1448,3 +1448,16 @@ are appended, never edited in; a hook refuses rewrites.
   HEAD. Nothing popped or dropped; T113 drops the stash.
 - The T100 entry committed alone on a clean tree. Gate green.
 - Commits: telepatch 736458c
+
+## 2026-11-12 — T111 No script on a command line
+
+- The `as_user` login bash (`env -i … bash -l /dev/fd/9
+  9<<'__tp_S_<nonce>_<id>'`) and the `h.check` probe (`bash /dev/fd/9
+  9<<'__tp_C_<digest>_<n>'`) read their script from a quoted here-doc,
+  not argv: no 128 KiB cap, nothing in `/proc/*/cmdline`. A script
+  line equal to the delimiter is `RenderError::ScriptHasDelimiter`.
+- `tests/no_argv.rs`: 200 KiB file byte-exact (plain, `as_user`) and a
+  cmdline sweep (plain, `as_user`, check). Second audit pass found no
+  third production site.
+- Gate E green; no snapshot moved in either repo.
+- Commits: telepatch 8ba9bb2
