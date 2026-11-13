@@ -1715,3 +1715,18 @@ are appended, never edited in; a hook refuses rewrites.
 - Gate B green: tp_basic 52 passed, plan snapshots unchanged, lint,
   check-conversion and oracle self-tests ok.
 - Commits: tp_basic 4c4ac61
+
+## 2026-11-13 — T125 The flaky `op_kill::a_termed_op_still_prints_its_trailer_with_rc_143`
+
+- Engine at fault (the step's rule): `Watch::seen` stopped at a
+  signalled op's trailer while group members remained. Now the trailer
+  is held and TERM/KILL continue until the killer reports the group
+  gone; later ops' events are replayed after the result, in order.
+- Engine test `limits::a_child_that_outlives_the_ops_trailer_is_still_killed_after_the_grace`
+  (executor_local.rs): RED stopped at 1.03 s with the child alive.
+- The test's own race fixed too: `term_until_end` TERMs until the group
+  is gone; the op starts `sleep 300 &` before `echo up`.
+- RED under load: 1 failure in 65 runs (8 parallel, 16 CPU burners).
+  GREEN: 1000 runs, 0 failures; `cargo test --workspace` 5x green
+  (1007 passed each); lint, tp_basic test+lint, check-sandbox ok.
+- Commits: telepatch 4c502d0
