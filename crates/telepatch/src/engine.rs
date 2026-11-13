@@ -380,6 +380,19 @@ impl<E: Executor> Engine<E> {
             name: host.name().to_string(),
             os: host.os.clone(),
         };
+        // The name is an owner in cache usage records (T122): a trace error
+        // before anything is traced or applied.
+        if !crate::ops::fetch::valid_playbook_name(playbook.name) {
+            return Err(EngineError::Playbook(crate::host::TraceError {
+                message: format!(
+                    "playbook name {:?} must not be empty or hold a tab, a comma or a newline: it owns what it caches",
+                    playbook.name
+                ),
+                roles: Vec::new(),
+                site: None,
+                policy: None,
+            }));
+        }
         let mut fut = (playbook.run)(host.clone());
         let mut cx = Context::from_waker(Waker::noop());
         let mut window = 1;

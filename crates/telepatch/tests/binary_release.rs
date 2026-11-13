@@ -591,16 +591,19 @@ fn a_tarball_with_a_json_sum_and_latest_text_installs_settles_and_upgrades() {
     assert_eq!(ls(&e.p("out")), ["go"]);
     e.assert_clean();
 
-    // a pin back to the cached 1.27.2: the json is read, the tarball is not
+    // a pin back to 1.27.2: the run that settled on 1.27.3 no longer fetched the 1.27.2 tarball, so it was removed (T122) and is fetched again
     let (r4, out4) = e.go(&e.go_v(Want::Pin("1.27.2".into())));
     assert_eq!(status(&r4), &HostStatus::Changed, "{out4}\n{}", r4.render());
     assert!(
         out4.contains(
-            "== h1 [prepare] pkg[binary_release] go: 1.27.3 installed, 1.27.2 wanted; cached =="
+            "== h1 [prepare] pkg[binary_release] go: 1.27.3 installed, 1.27.2 wanted; fetched, sha256 ok =="
         ),
         "{out4}"
     );
-    assert_eq!(e.log(), "curl http://fake/dl.json\n");
+    assert_eq!(
+        e.log(),
+        "curl http://fake/dl.json\ncurl http://fake/go1.27.2.linux-amd64.tar.gz\n"
+    );
     assert_eq!(
         run_bin(&e.p("out/go/bin/go"), "version"),
         "go version go1.27.2 linux/amd64"

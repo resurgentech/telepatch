@@ -410,6 +410,8 @@ struct HostShells {
     /// `(sum, dir)` of every cache entry this run's prepare found or put in a
     /// cache directory (T121), for the end-of-run usage record.
     cache_uses: BTreeSet<(String, String)>,
+    /// The sums every prepared window's fetch ops name (T122).
+    fetched_sums: BTreeSet<String>,
 }
 
 impl HostShells {
@@ -1132,6 +1134,10 @@ impl prepare::ShellSet for HostShells {
 
     fn note_cache_uses(&mut self, out: &str) {
         self.cache_uses.extend(crate::ops::fetch::parse_uses(out));
+    }
+
+    fn note_fetch_sums(&mut self, sums: Vec<String>) {
+        self.fetched_sums.extend(sums);
     }
 
     fn watched_shell(&mut self, who: &RunAs) -> Option<(&mut Shell, &mut Killer)> {
@@ -2867,13 +2873,45 @@ impl HostExec {
     /// is opened for it (unlike the cleanup): a missed record is accepted,
     /// a removal made without this run's uses is not. A `--check` run does
     /// not run it: it changes nothing on the host.
-    async fn record_cache_usage(&mut self) {
+    ///
+    /// T122: the probe also merges `playbook` into the owners of what the
+    /// run used and, when the run is entitled, removes what the playbook no
+    /// longer fetches. `unentitled` is the reason it is not ("Cache
+    /// ownership" in the note): `None` when the run is a real, unrestricted
+    /// one that the engine ended `Ok`; the host's own outcome and the record
+    /// lock are judged here.
+    async fn record_cache_usage(&mut self, playbook: &str, unentitled: Option<String>) {
+        let valid = crate::ops::fetch::valid_playbook_name(playbook);
+        let mut why = unentitled;
+        if why.is_none() {
+            match &self.verdict {
+                None | Some(HostStatus::Ok) | Some(HostStatus::Changed) => {}
+                Some(s) => why = Some(format!("the host ended {}", s.label())),
+            }
+        }
+        if why.is_none() && !valid {
+            why = Some("the playbook name cannot be recorded".to_string());
+        }
         if self.check.is_some() {
+            // A check changes nothing on the host, so no probe is sent.
+            if let Some(w) = why {
+                self.say(format!("cache: ownership not checked ({w})"));
+            }
             return;
         }
         let uses: Vec<(String, String)> = self.shells.cache_uses.iter().cloned().collect();
-        let script = crate::ops::fetch::usage_script(&uses);
+        let own = crate::ops::fetch::Ownership {
+            playbook: valid.then(|| playbook.to_string()),
+            fetched: self.shells.fetched_sums.clone(),
+            entitled: why.is_none(),
+        };
+        let script = crate::ops::fetch::usage_script(&uses, &own);
         self.seq += 1;
+        let mut said_why = false;
+        if let Some(w) = &why {
+            self.say(format!("cache: ownership not checked ({w})"));
+            said_why = true;
+        }
         match prepare::probe(&mut self.shells.root, self.seq, &script).await {
             Ok((_, out)) => {
                 for l in out
@@ -2882,10 +2920,28 @@ impl HostExec {
                 {
                     self.say(l.to_string());
                 }
+                // A directory whose record could not be locked or read removed
+                // nothing for ownership either: said once.
+                if !said_why
+                    && out.lines().any(|l| {
+                        l.starts_with("telepatch: cache")
+                            && (l.contains("not recorded") || l.contains("unreadable"))
+                    })
+                {
+                    self.say(
+                        "cache: ownership not checked (a cache usage record was not held)"
+                            .to_string(),
+                    );
+                }
             }
-            Err(why) => self.say(format!(
-                "telepatch: cache usage not recorded: no root shell ({why})"
-            )),
+            Err(why) => {
+                self.say(format!(
+                    "telepatch: cache usage not recorded: no root shell ({why})"
+                ));
+                if !said_why {
+                    self.say("cache: ownership not checked (no root shell)".to_string());
+                }
+            }
         }
     }
 
@@ -4045,12 +4101,25 @@ async fn run_one<V: 'static>(
         sink: sink.clone(),
         killer: Killer::new(target_rc, name.clone()),
         cache_uses: BTreeSet::new(),
+        fetched_sums: BTreeSet::new(),
     };
     let mut exec = HostExec::new(&name, shells, sink.clone(), check);
     exec.set_reboot(reboot.0, reboot.1, pb_name);
     let mut engine = Engine::new(exec);
     let res = engine.run_host(&pb, host).await;
-    engine.executor.record_cache_usage().await;
+    let unentitled = if check.is_some() {
+        Some("--check".to_string())
+    } else if !only.is_empty() {
+        Some("--only".to_string())
+    } else {
+        res.as_ref()
+            .err()
+            .map(|_| "the run did not trace and prepare every window".to_string())
+    };
+    engine
+        .executor
+        .record_cache_usage(pb_name, unentitled)
+        .await;
     engine.executor.cleanup_stage().await;
     let (mut rep, shells) = engine.executor.finish(res);
     rep.not_selected = probe.not_selected_roles();

@@ -866,7 +866,12 @@ fn unpack_without_strip_keeps_the_top_directory_and_a_new_sum_or_strip_replaces(
         std::fs::read_to_string(target.join("README")).unwrap(),
         "version two\n"
     );
-    assert_eq!(e.cache().len(), 2, "both archives are cached by sum");
+    // The playbook no longer fetches the first archive (T122): only the new sum stays.
+    assert_eq!(
+        e.cache(),
+        std::slice::from_ref(&sum2),
+        "the old archive is removed, the new one cached"
+    );
     e.assert_clean();
 }
 

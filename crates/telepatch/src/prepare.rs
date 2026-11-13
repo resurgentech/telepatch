@@ -589,6 +589,9 @@ pub trait ShellSet {
     /// Prepare's fetch output: the cache directories it found items in or put
     /// them into (`fuse` lines), for the end-of-run usage record (T121).
     fn note_cache_uses(&mut self, _out: &str) {}
+    /// The sums the window's fetch ops name: part of the whole trace's set F
+    /// for cache ownership (T122), whether or not a cache served them.
+    fn note_fetch_sums(&mut self, _sums: Vec<String>) {}
 }
 
 fn shell_of<'a, S: ShellSet>(shells: &'a mut S, who: &RunAs) -> Result<&'a mut Shell, String> {
@@ -802,6 +805,7 @@ pub async fn prepare_window<S: ShellSet>(
     // Downloads, one script for the window, on the root shell; before any
     // probe is sent, since a failure here blocks the host.
     let fetch_items = crate::ops::fetch::items(window);
+    shells.note_fetch_sums(fetch_items.iter().filter_map(|i| i.sum.clone()).collect());
     let mut fetches = Vec::new();
     // A missing downloader blocks only once prepare has seen every
     // download of the window: the engine may split it instead.

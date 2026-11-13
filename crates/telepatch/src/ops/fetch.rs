@@ -66,6 +66,7 @@
 //! changes.
 
 use std::borrow::Borrow;
+use std::collections::BTreeSet;
 use std::time::Duration;
 
 use crate::engine::Window;
@@ -261,6 +262,25 @@ pub(crate) fn parse_uses(out: &str) -> Vec<(String, String)> {
         .collect()
 }
 
+/// What the end-of-run probe knows of ownership (T122).
+#[derive(Debug, Clone, Default)]
+pub struct Ownership {
+    /// The playbook's name, an owner of what the run used; `None` (a name
+    /// [`valid_playbook_name`] refuses) records no owner.
+    pub playbook: Option<String>,
+    /// F: every sum the whole trace fetched on this host.
+    pub fetched: BTreeSet<String>,
+    /// The run may say the playbook no longer fetches what is not in F
+    /// ("Cache ownership" in the note).
+    pub entitled: bool,
+}
+
+/// A playbook name the owners field of a usage record can hold: not empty,
+/// and no tab, comma or newline.
+pub fn valid_playbook_name(name: &str) -> bool {
+    !name.is_empty() && !name.contains(['\t', ',', '\n'])
+}
+
 /// The end-of-run cache script (T121), one probe on the root shell, after
 /// the last window and before the stage is removed: for every directory the
 /// registry `<main>/../caches` lists, plus the main cache and every
@@ -277,7 +297,7 @@ pub(crate) fn parse_uses(out: &str) -> Vec<(String, String)> {
 /// not touched). Without `flock` nothing is written, and it says so.
 /// Output: `cache <dir>: removed n items (x MB) unused for 90 days`, and
 /// `telepatch: ..` warnings. The clock is `TP_CACHE_NOW` (epoch seconds).
-pub fn usage_script(uses: &[(String, String)]) -> String {
+pub fn usage_script(uses: &[(String, String)], own: &Ownership) -> String {
     let mut s = String::from("(\numask 022\n");
     s.push_str(crate::sandbox::SBX);
     s.push_str("tp_u=(");
@@ -285,17 +305,36 @@ pub fn usage_script(uses: &[(String, String)]) -> String {
         s.push(' ');
         s.push_str(&quote(&format!("{sum} {dir}")));
     }
-    s.push_str(" )\n");
+    s.push_str(" )\ntp_f=(");
+    for sum in &own.fetched {
+        s.push(' ');
+        s.push_str(&quote(sum));
+    }
+    s.push_str(" )\ntp_pb=");
+    s.push_str(&quote(own.playbook.as_deref().unwrap_or("")));
+    s.push_str(if own.entitled && own.playbook.is_some() {
+        "\ntp_ent=1\n"
+    } else {
+        "\ntp_ent=0\n"
+    });
     s.push_str(USAGE);
     s.push_str("tp_cu\n)\n");
     s
 }
 
 const USAGE: &str = r#"tp_hex() { [ ${#1} -eq 64 ] && case $1 in *[!0123456789abcdef]*) return 1;; esac; }
+tp_oadd() { case ",$1," in *",$2,"*) printf '%s' "$1";; *) printf '%s' "${1:+$1,}$2";; esac; }
+tp_odel() {
+  local x r=
+  local -a a
+  IFS=, read -ra a <<<"$1"
+  for x in "${a[@]}"; do [ "$x" = "$2" ] || r=${r:+$r,}$x; done
+  printf '%s' "$r"
+}
 tp_cd1() {
   local d=$1 now=$2 rec lk tmp f s t o n u line body bad=0 cnt=0 bytes=0 sz mb rest
-  local -A last own present
-  local -a expired=()
+  local -A last own present fset
+  local -a expired=() disowned=()
   rec=$d/.telepatch-usage; lk=$d/.telepatch-usage.lock; tmp=$d/.telepatch-usage.tmp.$$
   tp_sbx "$rec" "$lk" "$tmp" || return 2
   [ -d "$d" ] || return 1
@@ -334,8 +373,15 @@ tp_cd1() {
     [ "${u#* }" = "$d" ] || continue
     s=${u%% *}
     tp_hex "$s" || continue
-    if [ -f "$d/$s" ] && [ ! -L "$d/$s" ]; then last[$s]=$now; fi
+    if [ -f "$d/$s" ] && [ ! -L "$d/$s" ]; then
+      last[$s]=$now
+      [ -z "$tp_pb" ] || own[$s]=$(tp_oadd "${own[$s]-}" "$tp_pb")
+    fi
   done
+  if [ "$tp_ent" = 1 ] && [ "$bad" = 0 ]; then
+    for u in "${tp_f[@]}"; do fset[$u]=1; done
+    for u in "${tp_u[@]}"; do fset[${u%% *}]=1; done
+  fi
   for f in "$d"/*; do
     s=${f##*/}
     tp_hex "$s" || continue
@@ -348,6 +394,13 @@ tp_cd1() {
     for s in $(printf '%s\n' "${!present[@]}" | sort); do
       t=${last[$s]}
       if [ $((now - t)) -gt 7776000 ]; then expired+=("$s"); continue; fi
+      if [ "$tp_ent" = 1 ] && [ "$bad" = 0 ] && [ -z "${fset[$s]-}" ]; then
+        case ",${own[$s]-}," in
+          *",$tp_pb,"*)
+            own[$s]=$(tp_odel "${own[$s]}" "$tp_pb")
+            if [ -z "${own[$s]}" ]; then disowned+=("$s"); continue; fi;;
+        esac
+      fi
       printf '%s\t%s\t%s\n' "$s" "$t" "${own[$s]-}"
     done
   } > "$tmp" 2>/dev/null || { rm -f -- "$tmp"; exec 9>&-; echo "telepatch: cache $d: usage not recorded: cannot write $tmp"; return 2; }
@@ -362,6 +415,15 @@ tp_cd1() {
     mb=$((bytes/1048576)).$(( (bytes%1048576)*10/1048576 ))
     echo "cache $d: removed $cnt items ($mb MB) unused for 90 days"
   fi
+  for s in "${disowned[@]}"; do
+    f=$d/$s
+    [ -f "$f" ] && [ ! -L "$f" ] || continue
+    sz=$(stat -c %s -- "$f" 2>/dev/null || echo 0)
+    if rm -f -- "$f" 2>/dev/null && [ ! -e "$f" ]; then
+      mb=$((sz/1048576)).$(( (sz%1048576)*10/1048576 ))
+      echo "cache $d: removed ${s:0:12} ($mb MB): no longer fetched by $tp_pb"
+    fi
+  done
   exec 9>&-
   return 0
 }
