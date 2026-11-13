@@ -393,22 +393,27 @@ pub struct CheckInfo {
     /// Trace ops seen (up to the stop, if any).
     pub ops: usize,
     /// Findings that say something will change: one per printed
-    /// `will ...` line, not per op.
+    /// `will ...` line, not per op. Sets the exit status.
     pub pending: usize,
     /// `sh` ops whose own test (`unless`, `creates`, `changed_if`) decides
     /// at run time: not checked.
     pub unchecked: usize,
+    /// Trace ops (merged-pkg members one each) with a pending finding.
+    pub will_ops: usize,
+    /// Trace ops prepare probed and found settled.
+    pub ok_ops: usize,
     pub coverage: Vec<Coverage>,
     pub stopped: Option<CheckStop>,
 }
 
 impl CheckInfo {
-    /// `3 will change, 12 ops, 0 blocked`.
+    /// `4 will change, 41 ok, 0 blocked`: trace ops, not findings. Ops
+    /// decided at run time are in neither count.
     pub fn summary(&self, blocked: bool) -> String {
         format!(
-            "{} will change, {} ops, {} blocked",
-            self.pending,
-            self.ops,
+            "{} will change, {} ok, {} blocked",
+            self.will_ops,
+            self.ok_ops,
             usize::from(blocked)
         )
     }

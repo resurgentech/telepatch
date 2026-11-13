@@ -518,6 +518,160 @@ fn ops_for_a_user_an_earlier_window_creates_are_not_probed_and_say_so() {
     assert!(!d.path().join("later.conf").exists());
 }
 
+// ---- the note's counts (T109) ----
+
+#[role]
+async fn three(h: &Host<PathBuf>) -> Result<(), TraceError> {
+    h.file(&p(h, "a.conf")).content("a\n");
+    h.file(&p(h, "b.conf")).content("b\n");
+    h.file(&p(h, "c.conf")).content("c\n");
+    Ok(())
+}
+
+fn three_entry(h: Host<PathBuf>) -> PlaybookFuture {
+    Box::pin(async move { three(&h).await })
+}
+
+#[test]
+fn the_header_counts_ops_that_change_and_ops_that_are_ok() {
+    let d = tempfile::tempdir().unwrap();
+    std::fs::write(d.path().join("a.conf"), "a\n").unwrap();
+    std::fs::write(d.path().join("b.conf"), "b\n").unwrap();
+    let (report, out) = check(&Playbook::new("three", three_entry), d.path(), false);
+    assert!(
+        out.contains("[prepare] 1 will change, 2 ok, 0 blocked =="),
+        "{out}"
+    );
+    assert_eq!(report.exit_code(), 2, "{out}");
+    let info = report.hosts[0].check.as_ref().unwrap();
+    assert_eq!((info.will_ops, info.ok_ops), (1, 2), "{out}");
+}
+
+#[role]
+async fn merged(h: &Host<PathBuf>) -> Result<(), TraceError> {
+    h.pkg(["bash"]);
+    h.pkg(["tpcheck-no-such-package-a"]);
+    h.pkg(["tpcheck-no-such-package-b"]);
+    Ok(())
+}
+
+fn merged_entry(h: Host<PathBuf>) -> PlaybookFuture {
+    Box::pin(async move { merged(&h).await })
+}
+
+#[test]
+fn a_merged_pkg_op_counts_each_member_once() {
+    let d = tempfile::tempdir().unwrap();
+    let (_, out) = check(&Playbook::new("m", merged_entry), d.path(), false);
+    assert!(out.contains("tpcheck-no-such-package-a"), "{out}");
+    assert!(
+        out.contains("[prepare] 2 will change, 1 ok, 0 blocked =="),
+        "{out}"
+    );
+}
+
+#[role]
+async fn undecided(h: &Host<PathBuf>) -> Result<(), TraceError> {
+    h.file(&p(h, "new.conf")).content("n\n");
+    let never = p(h, "never-made");
+    sh!(h, "echo hi", creates = "{never}");
+    Ok(())
+}
+
+fn undecided_entry(h: Host<PathBuf>) -> PlaybookFuture {
+    Box::pin(async move { undecided(&h).await })
+}
+
+#[test]
+fn an_sh_with_its_own_test_is_in_neither_count() {
+    let d = tempfile::tempdir().unwrap();
+    let (_, out) = check(&Playbook::new("u", undecided_entry), d.path(), false);
+    assert!(out.contains("its own test decides at run time"), "{out}");
+    assert!(
+        out.contains("[prepare] 1 will change, 0 ok, 0 blocked =="),
+        "{out}"
+    );
+}
+
+#[role]
+async fn two_windows(h: &Host<PathBuf>) -> Result<(), TraceError> {
+    h.file(&p(h, "first.conf")).content("first\n");
+    h.file(&p(h, "last.conf")).content("last\n").at_end();
+    Ok(())
+}
+
+fn two_windows_entry(h: Host<PathBuf>) -> PlaybookFuture {
+    Box::pin(async move { two_windows(&h).await })
+}
+
+#[test]
+fn a_file_probe_after_an_earlier_window_changed_says_so() {
+    let d = tempfile::tempdir().unwrap();
+    let (_, out) = check(&Playbook::new("w", two_windows_entry), d.path(), false);
+    let line = out
+        .lines()
+        .find(|l| l.contains("last.conf: will create"))
+        .unwrap_or_else(|| panic!("{out}"));
+    assert!(
+        line.contains("(as the host is now; the earlier windows' changes may differ)"),
+        "{out}"
+    );
+    let first = out
+        .lines()
+        .find(|l| l.contains("first.conf: will create"))
+        .unwrap_or_else(|| panic!("{out}"));
+    assert!(!first.contains("as the host is now"), "{out}");
+    assert!(
+        out.contains("[prepare] 2 will change, 0 ok, 0 blocked =="),
+        "{out}"
+    );
+}
+
+#[test]
+fn a_settled_file_after_an_earlier_window_is_in_neither_count() {
+    let d = tempfile::tempdir().unwrap();
+    std::fs::write(d.path().join("last.conf"), "last\n").unwrap();
+    let (_, out) = check(&Playbook::new("w", two_windows_entry), d.path(), false);
+    assert!(
+        out.contains("[prepare] 1 will change, 0 ok, 0 blocked =="),
+        "{out}"
+    );
+}
+
+#[role]
+async fn same_path(h: &Host<PathBuf>) -> Result<(), TraceError> {
+    let f = p(h, "one.conf");
+    h.file(&f).content("base\n");
+    h.file(&f).line("A=1");
+    h.file(&p(h, "other.conf")).content("o\n");
+    Ok(())
+}
+
+fn same_path_entry(h: Host<PathBuf>) -> PlaybookFuture {
+    Box::pin(async move { same_path(&h).await })
+}
+
+#[test]
+fn a_file_op_after_another_on_the_same_path_says_so() {
+    let d = tempfile::tempdir().unwrap();
+    let (_, out) = check(&Playbook::new("s", same_path_entry), d.path(), false);
+    let lines: Vec<&str> = out
+        .lines()
+        .filter(|l| l.contains("one.conf: will"))
+        .collect();
+    assert_eq!(lines.len(), 2, "{out}");
+    assert!(!lines[0].contains("as the host is now"), "{out}");
+    assert!(
+        lines[1].contains("(as the host is now; this window's earlier ops may differ)"),
+        "{out}"
+    );
+    let other = out
+        .lines()
+        .find(|l| l.contains("other.conf: will"))
+        .unwrap_or_else(|| panic!("{out}"));
+    assert!(!other.contains("as the host is now"), "{out}");
+}
+
 // ---- implicit barriers ----
 
 #[test]

@@ -152,10 +152,21 @@
 //! a unified diff under `--diff` (none for a secret file). A window runs
 //! against the host as it is, so what an earlier window would change is
 //! not there: ops for a user an earlier window creates are not probed and
-//! a `svc` or `unit` probe says it is decided at run time. At an implicit
-//! barrier the engine stops ([`Executor::check_only`]). Each host ends with
-//! `[prepare] N will change, M ops, B blocked` and a `[coverage]` line per
-//! role.
+//! a `svc` or `unit` probe says it is decided at run time. A file line
+//! says `(as the host is now; ...)` when its probe may differ from what
+//! apply sees: after any earlier window found a change (`the earlier
+//! windows' changes may differ`), or after an earlier op of its window
+//! whose declared writes name the same path or a parent directory
+//! (`this window's earlier ops may differ`; a `*` write does not count).
+//! At an implicit barrier the engine stops ([`Executor::check_only`]).
+//! Each host ends with `[prepare] N will change, K ok, B blocked` and a
+//! `[coverage]` line per role. N and K count trace ops, as `[coverage]`
+//! does (a merged pkg op once per member): N the ops with a pending
+//! finding, K the ops prepare probed and found settled. Ops decided at
+//! run time (an `sh` with its own test, a guarded op not settled by the
+//! check, an op whose line says it is decided at run time, an annotated
+//! file that is settled) are in neither. The exit status follows the
+//! findings, not N.
 //!
 //! # Stream
 //!
@@ -1134,7 +1145,28 @@ struct CheckState {
     first_change: Option<usize>,
     /// A window was split for a missing downloader: its head installs one.
     downloader_pending: bool,
+    /// Trace ops (members) already tallied into `will_ops` / `ok_ops`.
+    tallied: BTreeSet<NodeId>,
+    /// What prepare says per member of the window being checked, for the
+    /// kinds it probes itself (not files and `sh`, which
+    /// [`Executor::check_window_end`] adds). `None`: decided at run time,
+    /// or not probed.
+    states: HashMap<NodeId, Option<OpState>>,
 }
+
+/// What a check found for one trace op.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OpState {
+    /// A finding says it will change.
+    Will,
+    /// Prepare probed it and found it settled.
+    Ok,
+}
+
+/// The note on a file line whose probe may not match what apply sees.
+const AS_NOW_EARLIER_WINDOWS: &str =
+    "(as the host is now; the earlier windows' changes may differ)";
+const AS_NOW_THIS_WINDOW: &str = "(as the host is now; this window's earlier ops may differ)";
 
 /// What a guard can know about a reported op.
 #[derive(Debug, Clone, Copy, Default)]
@@ -1772,6 +1804,8 @@ impl HostExec {
             future_users: BTreeMap::new(),
             first_change: None,
             downloader_pending: false,
+            tallied: BTreeSet::new(),
+            states: HashMap::new(),
         });
         HostExec {
             name: name.to_string(),
@@ -2046,6 +2080,7 @@ impl HostExec {
     /// What prepare found for a window, for the check's summary, and the
     /// users its `user` ops will create.
     fn check_note_prepared(&mut self, window: &Window, will: &crate::prepare::Prepared) {
+        self.check_states(window, will);
         let Some(ck) = &mut self.check else {
             return;
         };
@@ -2069,15 +2104,173 @@ impl HostExec {
         }
     }
 
+    /// The note a file op's line carries when what it probed may differ
+    /// from what apply sees: an earlier window found a change, or an
+    /// earlier op of this window declares a write to the path or to a
+    /// parent directory of it (a `*` write does not count; nor does a
+    /// package's files, which no key names).
+    fn file_annotation(&self, window: &Window, idx: usize) -> Option<&'static str> {
+        let OpSpec::File(f) = &window.ops[idx].node.spec else {
+            return None;
+        };
+        if self.check_earlier(window.number) {
+            return Some(AS_NOW_EARLIER_WINDOWS);
+        }
+        let covers = |k: &str| {
+            k == f.path
+                || f.path
+                    .strip_prefix(k.trim_end_matches('/'))
+                    .is_some_and(|rest| rest.starts_with('/'))
+        };
+        window.ops[..idx]
+            .iter()
+            .any(|e| {
+                e.node
+                    .writes
+                    .iter()
+                    .any(|k| matches!(k, crate::key::Key::File(p) if covers(p)))
+            })
+            .then_some(AS_NOW_THIS_WINDOW)
+    }
+
+    /// `will` for the ops prepare probes itself, per member.
+    fn check_states(&mut self, window: &Window, will: &crate::prepare::Prepared) {
+        let mut states: HashMap<NodeId, Option<OpState>> = HashMap::new();
+        let counting = |kind: &str, name: &str| {
+            will.will_create
+                .iter()
+                .any(|c| c.kind == kind && c.name == name && create_counts(c))
+        };
+        let runtime = |kind: &str, name: &str| {
+            will.will_create.iter().any(|c| {
+                c.kind == kind
+                    && c.name == name
+                    && c.detail
+                        .as_deref()
+                        .is_some_and(|d| d.contains("decided at run time"))
+            })
+        };
+        for (i, w) in window.ops.iter().enumerate() {
+            let guarded = w.node.guard.is_some();
+            for m in &w.members {
+                let hit_names = |names: &[String]| {
+                    names.iter().any(|n| {
+                        will.will_install.iter().any(|i| i.names.contains(n))
+                            || will.will_remove.iter().any(|r| r.names.contains(n))
+                            || will.will_change.iter().any(|c| c.name == *n)
+                    })
+                };
+                // `Some(true)`: a finding; `Some(false)`: probed, settled;
+                // `None`: not decided here.
+                let found: Option<bool> = match &w.node.spec {
+                    OpSpec::Pkg(p) => {
+                        let names = if m.pkg_names.is_empty() {
+                            &p.names
+                        } else {
+                            &m.pkg_names
+                        };
+                        if hit_names(names) {
+                            Some(true)
+                        } else if p.mode == PkgMode::BuildDep
+                            || names.iter().any(|n| n.starts_with('@'))
+                        {
+                            None
+                        } else {
+                            Some(false)
+                        }
+                    }
+                    OpSpec::Group(g) => Some(counting("group", &g.name)),
+                    OpSpec::User(u) => Some(
+                        counting("user", &u.name)
+                            || counting("user", &format!("{} <secret>", u.name)),
+                    ),
+                    OpSpec::Repo(r) => Some(counting("repo", &r.name)),
+                    OpSpec::Unit(u) => {
+                        let n = u.rel();
+                        if counting("unit", &n) {
+                            Some(true)
+                        } else if runtime("unit", &n) {
+                            None
+                        } else {
+                            Some(false)
+                        }
+                    }
+                    OpSpec::Svc(s) => {
+                        let n = s.key_name();
+                        if counting("svc", &n) {
+                            Some(true)
+                        } else if runtime("svc", &n) || s.action().is_some() {
+                            None
+                        } else {
+                            Some(false)
+                        }
+                    }
+                    OpSpec::Git(g) => {
+                        let pre = format!("git {}:", g.path);
+                        Some(will.git_notes.iter().any(|n| n.starts_with(&pre)))
+                    }
+                    OpSpec::Resource(_) => Some(!will.resource_skip.contains(&w.id)),
+                    OpSpec::File(f) if f.local.is_some() => {
+                        let pre = format!("file {}:", f.path);
+                        if will.local_notes.iter().any(|n| n.starts_with(&pre)) {
+                            Some(true)
+                        } else if self.file_annotation(window, i).is_some() {
+                            None
+                        } else {
+                            Some(false)
+                        }
+                    }
+                    _ => None,
+                };
+                let state = match found {
+                    Some(true) => Some(OpState::Will),
+                    Some(false) if !guarded => Some(OpState::Ok),
+                    _ => None,
+                };
+                states.insert(m.id, state);
+            }
+        }
+        if let Some(ck) = &mut self.check {
+            ck.states = states;
+        }
+    }
+
+    /// Put a local file's note on its prepare line when its probe may
+    /// differ from what apply sees.
+    fn annotate_local(&self, window: &Window, note: &str) -> String {
+        for (i, w) in window.ops.iter().enumerate() {
+            if let OpSpec::File(f) = &w.node.spec
+                && f.local.is_some()
+                && note.starts_with(&format!("file {}:", f.path))
+                && let Some(a) = self.file_annotation(window, i)
+            {
+                return format!("{note} {a}");
+            }
+        }
+        note.to_string()
+    }
+
     /// The end of a window of a check: the file lines (and diffs), then
     /// the `sh` ops prepare cannot decide and the guarded ops.
     fn check_window_end(&mut self, window: &Window, files: Vec<prepare::FileFinding>) {
         let name = self.name.clone();
         let mut pending = 0;
+        let mut states: HashMap<NodeId, Option<OpState>> = HashMap::new();
         for f in files {
-            let Some(detail) = f.detail.clone() else {
+            let idx = window.ops.iter().position(|o| o.id == f.id);
+            let note = idx.and_then(|i| self.file_annotation(window, i));
+            let state = match (&f.detail, note) {
+                (Some(_), _) => Some(OpState::Will),
+                (None, None) => Some(OpState::Ok),
+                (None, Some(_)) => None,
+            };
+            states.insert(f.id, state);
+            let Some(mut detail) = f.detail.clone() else {
                 continue;
             };
+            if let Some(n) = note {
+                detail = format!("{detail} {n}");
+            }
             pending += 1;
             let c = crate::report::WillCreate {
                 window: window.number,
@@ -2123,6 +2316,7 @@ impl HostExec {
                         s.unless.is_none() && s.creates.is_none() && s.changed_if.is_none();
                     let d = describe(&w.node);
                     let cmd = d.strip_prefix("sh ").unwrap_or(&d).to_string();
+                    states.insert(w.id, always.then_some(OpState::Will));
                     let (verb, c) = if always {
                         pending += 1;
                         ("will run", "will run")
@@ -2148,6 +2342,22 @@ impl HostExec {
             }
         }
         if let Some(ck) = &mut self.check {
+            for w in &window.ops {
+                for m in &w.members {
+                    if !ck.tallied.insert(m.id) {
+                        continue;
+                    }
+                    let st = states
+                        .get(&w.id)
+                        .copied()
+                        .unwrap_or_else(|| ck.states.get(&m.id).copied().flatten());
+                    match st {
+                        Some(OpState::Will) => ck.info.will_ops += 1,
+                        Some(OpState::Ok) => ck.info.ok_ops += 1,
+                        None => {}
+                    }
+                }
+            }
             ck.info.pending += pending;
             ck.info.unchecked += unchecked;
             if pending > 0 && ck.first_change.is_none() {
@@ -2668,6 +2878,7 @@ impl HostExec {
             }
             self.sink.event(json!({"ev":"check","host":name,
                 "pending":info.pending,"ops":info.ops,"unchecked":info.unchecked,
+                "will_ops":info.will_ops,"ok_ops":info.ok_ops,
                 "coverage":info.coverage.iter().map(|c| c.line()).collect::<Vec<_>>(),
                 "stopped":info.stopped.as_ref().map(CheckStop::line)}));
             rep.check = Some(info);
@@ -2702,22 +2913,25 @@ fn splits_at(window: &Window, s: &Split, no_downloader: &[NodeId]) -> bool {
         })
 }
 
+/// Does a `will_create` finding say something will change? Not: the
+/// daemon-reload that follows a unit, `no systemctl: skipped`, a restart
+/// that waits on a change already counted.
+fn create_counts(c: &crate::report::WillCreate) -> bool {
+    match c.kind.as_str() {
+        "systemd" => false,
+        "svc" => {
+            let d = c.detail.as_deref().unwrap_or("");
+            d != "no systemctl: skipped" && !d.contains(" if ")
+        }
+        _ => true,
+    }
+}
+
 /// How many findings of a window's prepare say something will change.
 /// Not counted: `no systemctl: skipped`, a restart that waits on a change
 /// already counted, and the daemon-reload that follows a unit.
 fn will_pending(w: &crate::prepare::Prepared) -> usize {
-    let creates = w
-        .will_create
-        .iter()
-        .filter(|c| match c.kind.as_str() {
-            "systemd" => false,
-            "svc" => {
-                let d = c.detail.as_deref().unwrap_or("");
-                d != "no systemctl: skipped" && !d.contains(" if ")
-            }
-            _ => true,
-        })
-        .count();
+    let creates = w.will_create.iter().filter(|c| create_counts(c)).count();
     w.will_install.len()
         + w.will_remove.len()
         + w.will_change.len()
@@ -3039,6 +3253,7 @@ impl Executor for HostExec {
                     self.report.will_remove.push(w);
                 }
                 for n in &will.local_notes {
+                    let n = self.annotate_local(window, n);
                     self.sink
                         .line(&format!("== {} [prepare] {n} ==", self.name));
                 }
