@@ -455,7 +455,7 @@ async fn user_shell_runs_sudo_iu_and_renders_as_user_ops() {
         ["bot@h".to_string(), format!("sudo -n -iu '{me}' bash")],
         "{chan:?}"
     );
-    // An as_user op is accepted and wrapped in a fresh login shell.
+    // An as_user op for the shell's own user is accepted and runs in it.
     let h = Host::new("t", os(), std::rc::Rc::new(()));
     h.as_user(&me).raw("echo hi");
     h.as_user("someone-else").raw("true");

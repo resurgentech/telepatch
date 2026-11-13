@@ -24,9 +24,12 @@ pub enum Principal {
 }
 
 /// Where an op runs. Ops issued on `h` run in the plain root shell
-/// (`login: false`). Ops issued through `h.as_user(u)` run in a fresh login
-/// environment of `u` (`login: true`), including `as_user("root")`: no
-/// privilege change, but the login environment.
+/// (`login: false`). Ops issued through `h.as_user(u)` run in `u`'s
+/// persistent login shell (`login: true`), one per user per host, opened on
+/// first use and fed over stdin like every other shell. That includes
+/// `as_user("root")`: no privilege change, but root's login environment
+/// (its profile read once, when the shell opens), in a shell of its own
+/// beside the plain root shell.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct RunAs {
     pub principal: Principal,
@@ -94,6 +97,10 @@ pub enum OpSpec {
     Resource(crate::resource::ResourceSpec),
     /// Wait for a condition on the host (`h.wait_for`).
     Wait(crate::ops::wait::Wait),
+    /// `h.as_user(u).relogin()`: no host effect; marks `u`'s login shell
+    /// stale at its place in the trace (rule 6, [`OpNode::stales`]). The
+    /// name is the user (`"root"` for `as_user("root")`).
+    Relogin(String),
 }
 
 impl OpSpec {
@@ -123,7 +130,7 @@ impl OpSpec {
             OpSpec::Group(_) | OpSpec::Svc(_) | OpSpec::Git(_) => true,
             OpSpec::Resource(r) => r.inverse.is_some(),
             // Changes nothing, so there is nothing to undo: not a hole.
-            OpSpec::Wait(_) => true,
+            OpSpec::Wait(_) | OpSpec::Relogin(_) => true,
             OpSpec::Raw { .. }
             | OpSpec::Shell(_)
             | OpSpec::File(_)
@@ -147,6 +154,7 @@ impl OpSpec {
             OpSpec::Git(_) => "git",
             OpSpec::Resource(r) => r.kind,
             OpSpec::Wait(_) => "wait",
+            OpSpec::Relogin(_) => "relogin",
         }
     }
 
@@ -154,7 +162,9 @@ impl OpSpec {
     pub fn op_kind(&self) -> crate::trailer::OpKind {
         use crate::trailer::OpKind;
         match self {
-            OpSpec::Raw { .. } | OpSpec::Shell(_) | OpSpec::Wait(_) => OpKind::Sh,
+            OpSpec::Raw { .. } | OpSpec::Shell(_) | OpSpec::Wait(_) | OpSpec::Relogin(_) => {
+                OpKind::Sh
+            }
             OpSpec::Pkg(_) => OpKind::Pkg,
             OpSpec::File(_) => OpKind::File,
             OpSpec::Group(_) => OpKind::Group,
@@ -177,6 +187,7 @@ impl OpSpec {
             OpSpec::File(f) => f.render_mode(false),
             OpSpec::Unit(u) => u.render_mode(false),
             OpSpec::Wait(w) => format!("wait_for {}", w.describe()),
+            OpSpec::Relogin(u) => format!("relogin {u}"),
             _ => self.exec_script(os),
         }
     }
@@ -198,6 +209,9 @@ impl OpSpec {
             // The body keeps its own deadline, which only the op's node
             // knows ([`crate::trailer`] renders it with the node's).
             OpSpec::Wait(w) => w.render(crate::ops::wait::DEFAULT_WAIT),
+            // Nothing to run: the controller marks the shell stale when
+            // the op's result arrives.
+            OpSpec::Relogin(_) => "rc=0; changed=0; skipped=0\n".to_string(),
         }
     }
 
@@ -216,7 +230,7 @@ impl OpSpec {
             }
             OpSpec::File(_) | OpSpec::Repo(_) => 5 * MIN,
             OpSpec::Svc(_) => 2 * MIN,
-            OpSpec::Unit(_) | OpSpec::Group(_) | OpSpec::User(_) => MIN,
+            OpSpec::Unit(_) | OpSpec::Group(_) | OpSpec::User(_) | OpSpec::Relogin(_) => MIN,
             OpSpec::Wait(_) => return crate::ops::wait::DEFAULT_WAIT,
         })
     }
@@ -234,7 +248,7 @@ impl OpSpec {
             OpSpec::Unit(u) => u.default_writes(),
             OpSpec::Git(g) => g.default_writes(),
             OpSpec::Resource(r) => BTreeSet::from([r.key.clone()]),
-            OpSpec::Wait(_) => BTreeSet::new(),
+            OpSpec::Wait(_) | OpSpec::Relogin(_) => BTreeSet::new(),
         }
     }
 
@@ -254,7 +268,7 @@ impl OpSpec {
             OpSpec::Svc(s) => BTreeMap::from([(Key::svc(s.key_name()), Value::Exists(true))]),
             OpSpec::Unit(u) => u.default_post(),
             OpSpec::Git(g) => g.default_post(),
-            OpSpec::Resource(_) | OpSpec::Wait(_) => BTreeMap::new(),
+            OpSpec::Resource(_) | OpSpec::Wait(_) | OpSpec::Relogin(_) => BTreeMap::new(),
         }
     }
 }
@@ -433,6 +447,192 @@ pub struct OpNode {
     /// controller, up to `n` more times, before it counts as failed. The
     /// op ends its pipelined run.
     pub retry: u32,
+}
+
+/// Which login shells a changed op stales ([`OpNode::stales`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StaleScope {
+    /// One user's login shell (`"root"` for `as_user("root")`).
+    User(String),
+    /// Every login shell on the host.
+    Every,
+}
+
+impl StaleScope {
+    /// Does this scope reach the login shell of `user`?
+    pub fn hits(&self, user: &str) -> bool {
+        match self {
+            StaleScope::Every => true,
+            StaleScope::User(u) => u == user,
+        }
+    }
+}
+
+/// What an op does to login shells, decided from its spec, `run_as` and
+/// write keys alone ([`OpNode::stales`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Stales {
+    pub scope: StaleScope,
+    /// The rule's short name, as the stream line says it: `user op`,
+    /// `pkg source`, `distro pkg`, `profile write`, `sh writes *`,
+    /// `relogin`.
+    pub rule: &'static str,
+    /// The shells go stale whether or not the op changed something
+    /// (`relogin()` only); every other rule applies to a changed op.
+    pub always: bool,
+}
+
+/// The login name of a principal: `"root"` for root.
+pub fn login_name(p: &Principal) -> &str {
+    match p {
+        Principal::Root => "root",
+        Principal::User(u) => u,
+    }
+}
+
+/// The files a login shell reads in its user's home, and the directory of
+/// `environment.d` drop-ins.
+const HOME_PROFILE_FILES: [&str; 4] = [".profile", ".bash_profile", ".bash_login", ".bashrc"];
+const HOME_ENV_DIR: &str = ".config/environment.d/";
+
+/// The user and home-relative rest of a path under a user's home: `~/x`
+/// (the op's own principal), `~u/x`, an absolute path under a home in
+/// `homes`, else under `/root` or `/home/<u>`.
+fn home_path<'a>(
+    path: &'a str,
+    own: &'a str,
+    homes: &'a BTreeMap<String, String>,
+) -> Option<(&'a str, &'a str)> {
+    if let Some(t) = path.strip_prefix('~') {
+        let (user, rest) = t.split_once('/')?;
+        return Some((if user.is_empty() { own } else { user }, rest));
+    }
+    for (u, h) in homes {
+        if let Some(rest) = path
+            .strip_prefix(h.as_str())
+            .and_then(|r| r.strip_prefix('/'))
+            .filter(|_| !h.is_empty())
+        {
+            return Some((u, rest));
+        }
+    }
+    if let Some(rest) = path.strip_prefix("/root/") {
+        return Some(("root", rest));
+    }
+    let t = path.strip_prefix("/home/")?;
+    let (user, rest) = t.split_once('/')?;
+    Some((user, rest))
+}
+
+/// Rule 4: a write to a profile path stales every login shell (the
+/// system files) or its user's (the files in a home).
+fn profile_scope(path: &str, own: &str, homes: &BTreeMap<String, String>) -> Option<StaleScope> {
+    let system = matches!(
+        path,
+        "/etc/profile" | "/etc/bash.bashrc" | "/etc/environment"
+    ) || path
+        .strip_prefix("/etc/profile.d/")
+        .is_some_and(|r| !r.is_empty());
+    if system {
+        return Some(StaleScope::Every);
+    }
+    let (user, rest) = home_path(path, own, homes)?;
+    let profile = HOME_PROFILE_FILES.contains(&rest)
+        || rest
+            .strip_prefix(HOME_ENV_DIR)
+            .is_some_and(|r| !r.is_empty());
+    (profile && !user.is_empty()).then(|| StaleScope::User(user.to_string()))
+}
+
+impl OpNode {
+    /// What this op does to login shells when it changes something (T114,
+    /// rules 1-6), decided from the spec, `run_as` and write keys; `None`
+    /// when it stales none. A login shell read the profile once, at open:
+    ///
+    /// 1. a `user` op stales that user's shell (a `group` op would for its
+    ///    members, but a group spec names none);
+    /// 2. a `pkg` op with a non-distro source (pip, cargo, mise, rustup,
+    ///    script, binary release) stales its principal's shell; run as
+    ///    root, every shell, since the source can drop a file in
+    ///    `/etc/profile.d`;
+    /// 3. a distro `pkg` op stales every shell, whoever runs it;
+    /// 4. any op whose write keys include a profile path: `/etc/profile`,
+    ///    `/etc/profile.d/*`, `/etc/bash.bashrc`, `/etc/environment` stale
+    ///    every shell; `~u/.profile`, `.bash_profile`, `.bash_login`,
+    ///    `.bashrc` and `.config/environment.d/*` stale `u`'s. `~` is the
+    ///    op's own principal; an absolute path counts when it is under a
+    ///    home in `homes` (the homes the executor learned), else under
+    ///    `/root` or `/home/<u>`. Narrowed `sh`, raw and resource writes
+    ///    follow this rule;
+    /// 5. an `sh`, raw or resource op that writes `*` stales every shell;
+    /// 6. `relogin()` stales its user's shell, changed or not.
+    ///
+    /// When several rules apply the broadest wins; two different users'
+    /// profiles in one op's writes stale every shell.
+    pub fn stales(&self, homes: &BTreeMap<String, String>) -> Option<Stales> {
+        use crate::ops::pkg::Source;
+        let own = login_name(&self.run_as.principal);
+        let mut found: Vec<(StaleScope, &'static str)> = Vec::new();
+        match &self.spec {
+            OpSpec::Relogin(u) => {
+                return Some(Stales {
+                    scope: StaleScope::User(u.clone()),
+                    rule: "relogin",
+                    always: true,
+                });
+            }
+            OpSpec::User(u) => found.push((StaleScope::User(u.name.clone()), "user op")),
+            OpSpec::Pkg(p) => match p.source {
+                Source::Distro(_) => found.push((StaleScope::Every, "distro pkg")),
+                _ => found.push((
+                    match &self.run_as.principal {
+                        Principal::Root => StaleScope::Every,
+                        Principal::User(u) => StaleScope::User(u.clone()),
+                    },
+                    "pkg source",
+                )),
+            },
+            _ => {}
+        }
+        if matches!(
+            self.spec,
+            OpSpec::Raw { .. } | OpSpec::Shell(_) | OpSpec::Resource(_)
+        ) && self.writes.contains(&Key::Any)
+        {
+            found.push((StaleScope::Every, "sh writes *"));
+        }
+        for k in &self.writes {
+            if let Key::File(path) = k
+                && let Some(s) = profile_scope(path, own, homes)
+            {
+                found.push((s, "profile write"));
+            }
+        }
+        let first = found.first()?.clone();
+        let every = found.iter().find(|(s, _)| *s == StaleScope::Every);
+        let (scope, rule) = match every {
+            Some(e) => e.clone(),
+            // Different users: no single user's shell holds them all.
+            None if found.iter().any(|(s, _)| *s != first.0) => (StaleScope::Every, first.1),
+            None => first,
+        };
+        Some(Stales {
+            scope,
+            rule,
+            always: false,
+        })
+    }
+
+    /// Can this op, if it changes, stale the login shell it runs in
+    /// ([`OpNode::stales`], decided before it runs)? Such an op ends its
+    /// pipelined run: nothing queued behind it may run in the old
+    /// environment. An op of the plain root shell has no login shell.
+    pub fn stales_own_shell(&self, homes: &BTreeMap<String, String>) -> bool {
+        self.run_as.login
+            && self
+                .stales(homes)
+                .is_some_and(|s| s.scope.hits(login_name(&self.run_as.principal)))
+    }
 }
 
 /// What the controller adds to a `wait_for`'s own deadline.
@@ -722,6 +922,242 @@ mod limit_tests {
         });
         sh.timeout = Some(secs(7));
         assert_eq!(sh.enforced_timeout(), secs(7));
+    }
+
+    // ---- staleness: which login shells a changed op stales (T114) ----
+
+    fn run_as(mut n: OpNode, who: RunAs) -> OpNode {
+        n.run_as = who;
+        n
+    }
+
+    fn pkg_from(source: crate::ops::pkg::Source, who: RunAs) -> OpNode {
+        let mut spec = PkgSpec::from_source(source, vec!["x".into()]);
+        if let Principal::User(u) = &who.principal {
+            spec.user = u.clone();
+        }
+        run_as(node(OpSpec::Pkg(spec)), who)
+    }
+
+    fn st(n: &OpNode) -> Option<(StaleScope, &'static str)> {
+        n.stales(&BTreeMap::new()).map(|s| (s.scope, s.rule))
+    }
+
+    fn user_scope(u: &str) -> StaleScope {
+        StaleScope::User(u.to_string())
+    }
+
+    #[test]
+    fn rule_1_a_user_op_stales_that_users_shell() {
+        let n = node(OpSpec::User(crate::ops::user::UserSpec::new("alice")));
+        assert_eq!(st(&n), Some((user_scope("alice"), "user op")));
+        // Whoever runs it.
+        let n = run_as(n, RunAs::login("root"));
+        assert_eq!(st(&n), Some((user_scope("alice"), "user op")));
+        let n = node(OpSpec::User(crate::ops::user::UserSpec::new("root")));
+        assert_eq!(st(&n), Some((user_scope("root"), "user op")));
+    }
+
+    #[test]
+    fn rule_1_a_group_op_names_no_members_so_it_stales_nothing() {
+        let n = node(OpSpec::Group(crate::ops::group::GroupSpec::new("docker")));
+        assert_eq!(st(&n), None);
+    }
+
+    #[test]
+    fn rule_2_a_non_distro_source_stales_the_users_shell_or_every_shell_as_root() {
+        use crate::ops::pkg::Source;
+        let alice = RunAs::login("alice");
+        for src in [Source::Pip, Source::Cargo { locked: false }, Source::Mise] {
+            assert_eq!(
+                st(&pkg_from(src.clone(), alice.clone())),
+                Some((user_scope("alice"), "pkg source")),
+                "{src:?}"
+            );
+            for root in [RunAs::root_shell(), RunAs::login("root")] {
+                assert_eq!(
+                    st(&pkg_from(src.clone(), root)),
+                    Some((StaleScope::Every, "pkg source")),
+                    "{src:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn rule_3_a_distro_pkg_stales_every_shell_whoever_runs_it() {
+        use crate::ops::pkg::Source;
+        let d = || Source::Distro(Manager::Apt);
+        for who in [
+            RunAs::root_shell(),
+            RunAs::login("root"),
+            RunAs::login("alice"),
+        ] {
+            assert_eq!(
+                st(&pkg_from(d(), who)),
+                Some((StaleScope::Every, "distro pkg"))
+            );
+        }
+    }
+
+    #[test]
+    fn rule_4_profile_paths_stale_every_shell_or_the_owners() {
+        let file = |path: &str, who: RunAs| {
+            run_as(
+                node(OpSpec::File(crate::ops::file::FileSpec::new(path))),
+                who,
+            )
+        };
+        let root = RunAs::login("root");
+        for p in [
+            "/etc/profile",
+            "/etc/profile.d/mise.sh",
+            "/etc/bash.bashrc",
+            "/etc/environment",
+        ] {
+            assert_eq!(
+                st(&file(p, root.clone())),
+                Some((StaleScope::Every, "profile write")),
+                "{p}"
+            );
+        }
+        // `~` is the principal's home, `~u` is u's.
+        for p in [
+            "~/.profile",
+            "~/.bash_profile",
+            "~/.bash_login",
+            "~/.bashrc",
+            "~/.config/environment.d/10-x.conf",
+        ] {
+            assert_eq!(
+                st(&file(p, RunAs::login("alice"))),
+                Some((user_scope("alice"), "profile write")),
+                "{p}"
+            );
+            assert_eq!(
+                st(&file(p, root.clone())),
+                Some((user_scope("root"), "profile write")),
+                "{p}"
+            );
+        }
+        assert_eq!(
+            st(&file("~bob/.bashrc", root.clone())),
+            Some((user_scope("bob"), "profile write"))
+        );
+        // An absolute path in a known home, and the default homes.
+        assert_eq!(
+            st(&file("/home/carol/.profile", root.clone())),
+            Some((user_scope("carol"), "profile write"))
+        );
+        assert_eq!(
+            st(&file("/root/.bash_profile", RunAs::root_shell())),
+            Some((user_scope("root"), "profile write"))
+        );
+        let homes = BTreeMap::from([("root".to_string(), "/var/root".to_string())]);
+        let n = file("/var/root/.bashrc", RunAs::root_shell());
+        assert_eq!(
+            n.stales(&homes).map(|s| (s.scope, s.rule)),
+            Some((user_scope("root"), "profile write"))
+        );
+        assert_eq!(st(&n), None, "unknown home: not a profile path");
+        // Not profile paths.
+        for p in [
+            "/etc/profile.d",
+            "/etc/profiled/x",
+            "/etc/hosts",
+            "~/.vimrc",
+            "~/notes/.bashrc",
+            "/home/carol/.config/other/x",
+            "/tmp/.bashrc",
+        ] {
+            assert_eq!(st(&file(p, root.clone())), None, "{p}");
+        }
+    }
+
+    #[test]
+    fn rule_4_a_narrowed_sh_follows_its_write_keys_and_a_unit_is_a_file() {
+        let mut n = run_as(
+            node(OpSpec::Raw {
+                script: "true".into(),
+            }),
+            RunAs::login("alice"),
+        );
+        n.writes = BTreeSet::from([Key::file("~/.bashrc"), Key::file("/tmp/y")]);
+        assert_eq!(st(&n), Some((user_scope("alice"), "profile write")));
+        n.writes = BTreeSet::from([Key::file("/etc/profile.d/x.sh")]);
+        assert_eq!(st(&n), Some((StaleScope::Every, "profile write")));
+        n.writes = BTreeSet::from([Key::file("/tmp/y"), Key::pkg("x")]);
+        assert_eq!(st(&n), None);
+        // The broadest of several wins.
+        n.writes = BTreeSet::from([Key::file("~/.bashrc"), Key::file("/etc/environment")]);
+        assert_eq!(st(&n), Some((StaleScope::Every, "profile write")));
+        let unit = node(OpSpec::Unit(crate::ops::unit::UnitSpec::new("a.service")));
+        assert_eq!(st(&unit), None);
+    }
+
+    #[test]
+    fn rule_5_an_sh_raw_or_resource_op_that_writes_star_stales_every_shell() {
+        let raw = node(OpSpec::Raw {
+            script: "true".into(),
+        });
+        assert!(raw.writes.contains(&Key::Any));
+        for who in [RunAs::root_shell(), RunAs::login("alice")] {
+            assert_eq!(
+                st(&run_as(raw.clone(), who)),
+                Some((StaleScope::Every, "sh writes *"))
+            );
+        }
+        // Narrowed to something that is no profile: nothing.
+        let mut narrowed = raw;
+        narrowed.writes = BTreeSet::from([Key::file("/tmp/y")]);
+        assert_eq!(st(&narrowed), None);
+        // No writes at all: nothing.
+        narrowed.writes.clear();
+        assert_eq!(st(&narrowed), None);
+    }
+
+    #[test]
+    fn rule_6_relogin_stales_its_user_and_always() {
+        let n = run_as(node(OpSpec::Relogin("alice".into())), RunAs::login("alice"));
+        let s = n.stales(&BTreeMap::new()).unwrap();
+        assert_eq!(
+            (s.scope, s.rule, s.always),
+            (user_scope("alice"), "relogin", true)
+        );
+        // The others stale only when they changed.
+        let u = node(OpSpec::User(crate::ops::user::UserSpec::new("alice")));
+        assert!(!u.stales(&BTreeMap::new()).unwrap().always);
+    }
+
+    #[test]
+    fn an_op_that_stales_nothing_and_the_scope_arithmetic() {
+        let svc = node(OpSpec::Svc(crate::ops::svc::SvcSpec::new("docker")));
+        assert_eq!(st(&svc), None);
+        let git = node(OpSpec::Git(crate::ops::git::GitSpec::new("u")));
+        assert_eq!(st(&git), None);
+        let w = node(OpSpec::Wait(crate::ops::wait::Wait::Tcp(1)));
+        assert_eq!(st(&w), None);
+        assert!(StaleScope::Every.hits("anyone"));
+        assert!(user_scope("a").hits("a"));
+        assert!(!user_scope("a").hits("b"));
+    }
+
+    #[test]
+    fn an_op_stales_its_own_shell_when_the_scope_reaches_its_login_shell() {
+        let homes = BTreeMap::new();
+        let user_op = node(OpSpec::User(crate::ops::user::UserSpec::new("alice")));
+        // Run in alice's own login shell: its own. In root's: not its own.
+        assert!(run_as(user_op.clone(), RunAs::login("alice")).stales_own_shell(&homes));
+        assert!(!run_as(user_op.clone(), RunAs::login("root")).stales_own_shell(&homes));
+        assert!(!run_as(user_op, RunAs::root_shell()).stales_own_shell(&homes));
+        // Every login shell includes the op's own; the plain root shell has none.
+        let raw = node(OpSpec::Raw {
+            script: "true".into(),
+        });
+        assert!(run_as(raw.clone(), RunAs::login("alice")).stales_own_shell(&homes));
+        assert!(!run_as(raw, RunAs::root_shell()).stales_own_shell(&homes));
+        let re = run_as(node(OpSpec::Relogin("alice".into())), RunAs::login("alice"));
+        assert!(re.stales_own_shell(&homes));
     }
 
     #[test]

@@ -16,16 +16,33 @@
 //!
 //! # Principals
 //!
-//! The host keeps the root shell plus one shell per user, opened the first
-//! time a window's ops or a fact read address that user (after the
-//! `getent` check; on SSH `sudo -n -iu u bash`, a refusal blocks the host).
-//! An op goes to its `run_as.principal`'s shell: `Root` (including
-//! `as_user("root")`) to the root shell, `User(u)` to `u`'s. Local and
-//! docker open no user shells: a window that needs one is blocked with the
-//! transport's limit. Consecutive ops of one principal form a run; a run
-//! is pipelined and collected in full before the next run is sent, so a
-//! change of principal waits for the previous shell (every switch is
-//! treated as a dependency edge).
+//! The host keeps the root shell plus one persistent login shell per user
+//! (`as_user(u)`, root included), opened once, the first time a window's
+//! ops or a fact read address that user. Shells are keyed by [`RunAs`]
+//! (principal and login), not by principal: a plain op (`login: false`)
+//! goes to the root shell, an `as_user(u)` op to `u`'s login shell. An op
+//! sent to a login shell is a plain `( ... )` subshell like any other:
+//! there is no per-op `bash`, `env -i` or here-doc.
+//!
+//! - `User(u)`: after the `getent` check, over SSH the channel `sudo -n
+//!   -iu u bash` (a refusal blocks the host). Local and docker open no
+//!   such shell: a window that needs one is blocked with the transport's
+//!   limit.
+//! - `as_user("root")` (root, the shell's own user; under a local
+//!   transport with `uid(0)` also the test user): one more root shell of
+//!   the transport, into which `exec env -i HOME=.. USER=.. LOGNAME=..
+//!   SHELL=.. PATH=.. bash -l` is typed (the values from `getent passwd`
+//!   read in that shell: short arguments, no script) and a hello, as
+//!   `Shell::exec` does for `sudo -n -H bash`. It has root's login
+//!   environment and nothing of the plain root shell's. A missing passwd
+//!   entry refuses to open it, and blocks the host.
+//!
+//! Consecutive ops with one [`RunAs`] form a run; a run is pipelined and
+//! collected in full before the next run is sent, so a change of shell
+//! waits for the previous one (every switch is treated as a dependency
+//! edge). The window flag `__tp_dr` and a guard's source outcome are
+//! variables of one shell; across runs they are carried as constants the
+//! executor knows from the collected trailers (see below).
 //!
 //! # Failure gating
 //!
@@ -59,7 +76,7 @@
 //!   for a merged `pkg` op a member's `changed` is whether one of its own
 //!   names is in `installed`). `ok` is the op's exit status being 0.
 //! - a constant, `true` / `false`, when the source was already reported
-//!   (an earlier run, another principal, an earlier window): runs are
+//!   (an earlier run, another shell, an earlier window): runs are
 //!   collected in full before the next is sent, so the outcome is known.
 //!
 //! A failed source (an `allow_fail` op) is neither `ok` nor `changed`; a
@@ -89,7 +106,7 @@
 //! # Units and daemon-reload
 //!
 //! A `unit` op (`h.unit`) is always sent as a guard source, so its
-//! `changed` reaches the parent shell; when it changed, the root shell's
+//! `changed` reaches the parent shell; when it changed, the shell's
 //! window flag `__tp_dr` is set to `1` (beside `__tp_halt`). Every `svc` op
 //! after a unit op in the same window is rendered with
 //! [`crate::ops::svc::SvcSpec::render_exec_reload`]: with the flag set and
@@ -98,11 +115,20 @@
 //! So any number of changed units cost one reload, before the next `svc`
 //! op in the window (unit, unit, svc: one reload, before the svc op).
 //!
+//! The flag is a variable of one shell, and the window's ops may run in
+//! several (the root shell, the login shells). It is carried across them
+//! the way a guard's outcome is: a run is collected before the next is
+//! sent, so the executor knows from the reported outcomes whether a unit
+//! changed and no `svc` op that ran came after it, and sets `__tp_dr` to
+//! `1` or `0` in the next run's shell before the run's first op, when
+//! the run has an `svc` op that carries the reload. Within a run the
+//! shell's own variable does the work.
+//!
 //! The flag never outlives its window. When a unit changed and no `svc` op
 //! ran after it in the window (none follows, or its guard skipped it), the
 //! executor ends the window with the flush: one more op on the root shell,
-//! in the halt gate, that runs `systemctl daemon-reload` when the flag is
-//! set and systemd runs, then clears the flag. A reload that ran, wherever
+//! in the halt gate, that sets the flag (the executor knows it is due),
+//! runs `systemctl daemon-reload` when systemd runs, then clears the flag. A reload that ran, wherever
 //! it ran, is one stream line (`   systemd daemon-reload: <reason>`), one
 //! `daemon_reload` event (`reason`, `op`) and one
 //! [`crate::report::DaemonReload`]. It is not an op, so it is not counted
@@ -160,7 +186,7 @@ use crate::report::{
     CheckInfo, CheckStop, Coverage, FileDiff, HostReport, HostStatus, OpRecord, Outcome, Report,
 };
 use crate::role::Playbook;
-use crate::trace::{Guard, NodeId, OpNode, OpSpec, Principal};
+use crate::trace::{Guard, NodeId, OpNode, OpSpec, Principal, RunAs};
 use crate::trailer::{OpKind, Trailer, wrap};
 use crate::transport::docker::DockerTransport;
 use crate::transport::local::LocalTransport;
@@ -339,23 +365,32 @@ struct Live {
     tail: Vec<u8>,
 }
 
-/// A host's open shells: the root shell, one per user opened so far, and
-/// the target that opens more.
+/// A host's open shells: the root shell, one login shell per user opened
+/// so far (keyed by user name, `"root"` for `as_user("root")`), and the
+/// target that opens more.
 struct HostShells {
     host: String,
     target: Rc<Target>,
     root: Shell,
-    users: BTreeMap<String, Shell>,
+    logins: BTreeMap<String, Shell>,
+    /// Open login shells marked stale (T114): user name -> the rule that
+    /// staled it and the op it came after. A stale shell is closed and
+    /// reopened, lazily, by the next [`HostShells::open_login`] for it.
+    stale: BTreeMap<String, (&'static str, usize)>,
+    /// Homes learned from `getent passwd` (root's, when its login shell
+    /// opens), for matching an absolute profile path to its user.
+    homes: BTreeMap<String, String>,
+    sink: Rc<Sink>,
     /// The second shell that stops an op, opened when the first timeout
     /// fires ([`Killer`]).
     killer: Killer,
 }
 
 impl HostShells {
-    /// Close the user shells, then the root shell, then the second shell,
+    /// Close the login shells, then the root shell, then the second shell,
     /// then the transport's connections (SSH).
     async fn close(self) {
-        for (_, sh) in self.users {
+        for (_, sh) in self.logins {
             sh.close().await;
         }
         self.root.close().await;
@@ -370,7 +405,7 @@ impl HostShells {
     /// cannot run anything more. (`close` still works afterwards.)
     async fn drop_connections(&mut self) {
         self.root.abort();
-        for sh in self.users.values_mut() {
+        for sh in self.logins.values_mut() {
             sh.abort();
         }
         if let Some(k) = self.killer.shell.as_mut() {
@@ -379,12 +414,36 @@ impl HostShells {
         close_target(&self.target).await;
     }
 
-    /// `who`'s shell and the second shell, for the watchdog.
-    fn watched(&mut self, who: &Principal) -> Option<(&mut Shell, &mut Killer)> {
-        let sh = match who {
-            Principal::Root => Some(&mut self.root),
-            Principal::User(u) => self.users.get_mut(u),
-        }?;
+    /// Mark the open login shells `scope` reaches stale, after op `after`
+    /// (a shell not open reads the new profile when it opens; one already
+    /// stale keeps its first reason).
+    fn mark_stale(&mut self, scope: &crate::trace::StaleScope, rule: &'static str, after: usize) {
+        for name in self.logins.keys() {
+            if scope.hits(name) {
+                self.stale.entry(name.clone()).or_insert((rule, after));
+            }
+        }
+    }
+
+    /// The shell `who`'s ops run in: the root shell for a plain op, else
+    /// the login shell of `who`'s user.
+    fn shell_of(&mut self, who: &RunAs) -> Option<&mut Shell> {
+        match (&who.principal, who.login) {
+            (_, false) => Some(&mut self.root),
+            (Principal::Root, true) => self.logins.get_mut(ROOT),
+            (Principal::User(u), true) => self.logins.get_mut(u),
+        }
+    }
+
+    /// `who`'s shell and the second shell, for the watchdog. The second
+    /// shell is always a root shell: it signals the op's group from
+    /// outside, whichever login shell holds the op.
+    fn watched(&mut self, who: &RunAs) -> Option<(&mut Shell, &mut Killer)> {
+        let sh = match (&who.principal, who.login) {
+            (_, false) => &mut self.root,
+            (Principal::Root, true) => self.logins.get_mut(ROOT)?,
+            (Principal::User(u), true) => self.logins.get_mut(u)?,
+        };
         Some((sh, &mut self.killer))
     }
 }
@@ -422,7 +481,7 @@ impl KillBounds {
     };
 }
 
-/// The second shell: opened the way `open_user` opens one (a root shell of
+/// The second shell: opened as the root login shell is (a root shell of
 /// the same target, so the same PID namespace), once, when the first
 /// timeout fires, then reused.
 pub struct Killer {
@@ -536,7 +595,7 @@ impl Killer {
         }
     }
 
-    /// The second shell, opened on first use the way `open_user` opens one
+    /// The second shell, opened on first use as a root shell
     /// (a root shell of the same target, so the same PID namespace, where
     /// root can signal any principal's op).
     async fn shell(&mut self) -> Result<&mut Shell, String> {
@@ -894,37 +953,125 @@ fn refusal(target: &Target, host: &str, who: &Principal, limit: Option<Limit>) -
     }
 }
 
-impl prepare::ShellSet for HostShells {
-    fn shell(&mut self, who: &Principal) -> Option<&mut Shell> {
-        match who {
-            Principal::Root => Some(&mut self.root),
-            Principal::User(u) => self.users.get_mut(u),
+/// The path the login shell of `as_user("root")` starts with, under
+/// `env -i`: a profile may add to it, as at a terminal.
+const LOGIN_PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
+
+/// The login name `as_user("root")` is.
+const ROOT: &str = "root";
+
+/// Open root's login shell: one more root shell of the transport, then
+/// `exec env -i HOME=.. USER=.. LOGNAME=.. SHELL=.. PATH=.. bash -l` typed
+/// into it, the values read from `getent passwd` in that same shell. The
+/// arguments are short and no script is on a command line. `Err` says why
+/// (a missing passwd entry is a refusal, said so).
+async fn open_root_login(target: &Target, host: &str) -> Result<(Shell, String), String> {
+    let who = Principal::Root;
+    let mut s = target.open(host, &who, 1).await;
+    if s.got.is_empty() {
+        return Err(refusal(target, host, &who, s.limit));
+    }
+    let mut sh = s.got.remove(0);
+    for extra in s.got {
+        extra.close().await;
+    }
+    // One id, on a shell that has run nothing yet.
+    let got = prepare::probe(&mut sh, 1, &format!("getent passwd {ROOT}")).await;
+    let fields = match got {
+        Ok((0, out)) => out
+            .lines()
+            .map(|l| l.split(':').collect::<Vec<_>>())
+            .find(|f| f.len() >= 7 && f[0] == ROOT)
+            .map(|f| (f[5].to_string(), f[6].to_string())),
+        Ok(_) => None,
+        Err(e) => {
+            sh.close().await;
+            return Err(format!("could not open the login shell for {ROOT}: {e}"));
         }
+    };
+    let Some((home, login_shell)) = fields.filter(|(h, _)| !h.is_empty()) else {
+        sh.close().await;
+        return Err(format!(
+            "no passwd entry for {ROOT}: cannot open its login shell (as_user(\"{ROOT}\"))"
+        ));
+    };
+    let q = crate::sh::quote;
+    let command = format!(
+        "env -i HOME={} USER={ROOT} LOGNAME={ROOT} SHELL={} PATH={LOGIN_PATH} bash -l",
+        q(&home),
+        q(&login_shell),
+    );
+    if let Err(e) = sh.exec(&command, ROOT).await {
+        sh.close().await;
+        return Err(format!("could not start the login shell for {ROOT}: {e}"));
+    }
+    Ok((sh, home))
+}
+
+impl prepare::ShellSet for HostShells {
+    fn shell(&mut self, who: &RunAs) -> Option<&mut Shell> {
+        self.shell_of(who)
     }
 
-    fn watched_shell(&mut self, who: &Principal) -> Option<(&mut Shell, &mut Killer)> {
+    fn watched_shell(&mut self, who: &RunAs) -> Option<(&mut Shell, &mut Killer)> {
         self.watched(who)
     }
 
-    async fn open_user(&mut self, u: &str) -> Result<(), String> {
-        if self.users.contains_key(u) {
+    async fn open_login(&mut self, who: &RunAs) -> Result<(), String> {
+        if !who.login {
             return Ok(());
         }
-        let who = Principal::User(u.to_string());
-        let mut s = self.target.open(&self.host, &who, 1).await;
-        if s.got.is_empty() {
-            return Err(refusal(&self.target, &self.host, &who, s.limit));
+        let name = match &who.principal {
+            Principal::Root => ROOT.to_string(),
+            Principal::User(u) => u.clone(),
+        };
+        // A stale shell is closed and opened again: the profile is read
+        // once more. A shell never used again never gets here.
+        let reopened = match self.stale.remove(&name) {
+            Some(why) => {
+                if let Some(old) = self.logins.remove(&name) {
+                    old.close().await;
+                }
+                Some(why)
+            }
+            None => None,
+        };
+        if self.logins.contains_key(&name) {
+            return Ok(());
         }
-        let mut sh = s.got.remove(0);
-        // More than asked for is not expected; close the rest.
-        for extra in s.got {
-            extra.close().await;
-        }
+        let mut sh = match &who.principal {
+            Principal::Root => {
+                let (sh, home) = open_root_login(&self.target, &self.host).await?;
+                self.homes.insert(name.clone(), home);
+                sh
+            }
+            Principal::User(u) => {
+                let p = Principal::User(u.clone());
+                let mut s = self.target.open(&self.host, &p, 1).await;
+                if s.got.is_empty() {
+                    return Err(refusal(&self.target, &self.host, &p, s.limit));
+                }
+                let sh = s.got.remove(0);
+                // More than asked for is not expected; close the rest.
+                for extra in s.got {
+                    extra.close().await;
+                }
+                sh
+            }
+        };
         if let Err(e) = init_shell(&mut sh).await {
             sh.close().await;
-            return Err(format!("could not set up the shell for user {u}: {e}"));
+            return Err(format!("could not set up the shell for user {name}: {e}"));
         }
-        self.users.insert(u.to_string(), sh);
+        self.logins.insert(name.clone(), sh);
+        if let Some((rule, after)) = reopened {
+            self.sink.line(&format!(
+                "   login shell {name} reopened: {rule} after #{after}"
+            ));
+            self.sink
+                .event(json!({"ev":"login_reopened","host":self.host,
+                "user":name,"rule":rule,"after":after}));
+        }
         Ok(())
     }
 }
@@ -1157,8 +1304,8 @@ fn source_vars(w: &WindowOp) -> String {
 
 /// What the executor sets once in every shell it opens (root and login):
 /// `__tp_run`, this process's staging subdirectory name, so scripts name
-/// the variable and the plan carries no per-process value. A login op in
-/// a root shell gets it through its `env -i` ([`crate::trailer`]).
+/// the variable and the plan carries no per-process value. A login shell
+/// has it as a variable of its own, like the root shell.
 async fn init_shell(shell: &mut Shell) -> Result<(), String> {
     // An op's wrapper runs its body in a subshell, so the assignment goes
     // in front of it, in the shell itself; the wrapped no-op is the
@@ -1221,6 +1368,32 @@ fn units_after_last_svc(window: &Window) -> Vec<&WindowOp> {
         .skip(last_svc.map_or(0, |i| i + 1))
         .filter(|w| matches!(w.node.spec, OpSpec::Unit(_)))
         .collect()
+}
+
+/// The `unit` ops of `ops` that changed and that no `svc` op that ran
+/// came after, by the outcomes reported so far: what the window flag
+/// `__tp_dr` stands for after `ops`, whichever shell each ran in.
+fn pending_units<'a>(report: &HostReport, ops: &'a [WindowOp]) -> Vec<&'a WindowOp> {
+    let outcome = |id: NodeId| {
+        report
+            .ops
+            .iter()
+            .rev()
+            .find(|o| o.id == id.0)
+            .map(|o| o.outcome)
+    };
+    let mut pending: Vec<&WindowOp> = Vec::new();
+    for w in ops {
+        match (&w.node.spec, outcome(w.id)) {
+            (OpSpec::Unit(_), Some(Outcome::Changed)) => pending.push(w),
+            (
+                OpSpec::Svc(_),
+                Some(Outcome::Changed | Outcome::Unchanged | Outcome::AllowedFail),
+            ) => pending.clear(),
+            _ => {}
+        }
+    }
+    pending
 }
 
 /// `w`'s script as sent: inside the halt gate; inside its guard's test
@@ -1458,6 +1631,7 @@ fn describe(op: &OpNode) -> String {
         OpSpec::Git(g) => format!("git {}", g.path),
         OpSpec::Resource(r) => format!("{} {}", r.kind, r.name),
         OpSpec::Wait(w) => format!("wait_for {}", w.describe()),
+        OpSpec::Relogin(u) => format!("relogin {u}"),
         OpSpec::File(f) if f.is_secret() => format!("file {} (secret)", f.path),
         OpSpec::File(f) => {
             use crate::ops::file::FileKind;
@@ -1697,24 +1871,7 @@ impl HostExec {
     /// ([`crate::report::DaemonReload`]); a failed one fails the host with
     /// its rc and output, like a failed op.
     async fn flush(&mut self, window: &Window) {
-        let outcome = |id: NodeId, rep: &HostReport| {
-            rep.ops
-                .iter()
-                .rev()
-                .find(|o| o.id == id.0)
-                .map(|o| o.outcome)
-        };
-        let mut pending: Vec<&WindowOp> = Vec::new();
-        for w in &window.ops {
-            match (&w.node.spec, outcome(w.id, &self.report)) {
-                (OpSpec::Unit(_), Some(Outcome::Changed)) => pending.push(w),
-                (
-                    OpSpec::Svc(_),
-                    Some(Outcome::Changed | Outcome::Unchanged | Outcome::AllowedFail),
-                ) => pending.clear(),
-                _ => {}
-            }
-        }
+        let pending = pending_units(&self.report, &window.ops);
         if pending.is_empty() {
             return;
         }
@@ -1722,7 +1879,7 @@ impl HostExec {
         let id = self.seq;
         let nonce = self.shells.root.nonce().to_string();
         let script = format!(
-            "if [ -z \"${{__tp_halt-}}\" ]; then\n{}[ $? -eq 0 ] || __tp_halt=1\n__tp_dr=0\nelse\n{}fi\n",
+            "if [ -z \"${{__tp_halt-}}\" ]; then\n__tp_dr=1\n{}[ $? -eq 0 ] || __tp_halt=1\n__tp_dr=0\nelse\n{}fi\n",
             wrap(OpKind::Sh, &flush_body(), id, &nonce),
             crate::trailer::skip(OpKind::Sh, id, &nonce)
         );
@@ -1992,7 +2149,7 @@ impl HostExec {
     /// it). The new send gets its own start line and clock.
     async fn resend(
         &mut self,
-        who: &Principal,
+        who: &RunAs,
         w: &WindowOp,
         script: &str,
         k: u32,
@@ -2238,10 +2395,17 @@ impl HostExec {
         self.finish_op(w, &desc, Outcome::NotRun, 0, false, "");
     }
 
-    /// Verify the users `users` exist (on the root shell), then open the
-    /// shell of each that is not open yet; `Err` blocks the host.
-    async fn ensure_users(&mut self, users: &BTreeSet<String>) -> Result<(), String> {
+    /// Verify the users of `logins` exist (on the root shell), then open
+    /// the login shell of each that is not open yet; `Err` blocks the host.
+    async fn ensure_logins(&mut self, logins: &BTreeSet<RunAs>) -> Result<(), String> {
         use prepare::ShellSet as _;
+        let users: BTreeSet<String> = logins
+            .iter()
+            .filter_map(|l| match &l.principal {
+                Principal::User(u) => Some(u.clone()),
+                Principal::Root => None,
+            })
+            .collect();
         let new: Vec<&String> = users
             .iter()
             .filter(|u| !self.users_ok.contains(*u))
@@ -2260,16 +2424,15 @@ impl HostExec {
             let ok: Vec<String> = new.into_iter().cloned().collect();
             self.users_ok.extend(ok);
         }
-        for u in users {
-            self.shells.open_user(u).await?;
+        for l in logins {
+            self.shells.open_login(l).await?;
         }
         Ok(())
     }
 
-    /// The shell `who`'s ops run in (opened by prepare or `ensure_users`).
-    fn shell_for(&mut self, who: &Principal) -> Option<&mut Shell> {
-        use prepare::ShellSet as _;
-        self.shells.shell(who)
+    /// The shell `who`'s ops run in (opened by prepare or `ensure_logins`).
+    fn shell_for(&mut self, who: &RunAs) -> Option<&mut Shell> {
+        self.shells.shell_of(who)
     }
 
     /// Stream controller files whose sha256 differs, one chunk per shell
@@ -2290,7 +2453,7 @@ impl HostExec {
 
     async fn stream_file(
         &mut self,
-        who: &Principal,
+        who: &RunAs,
         dest_word: &str,
         rel: &str,
         src: &std::path::Path,
@@ -2316,7 +2479,7 @@ impl HostExec {
         Ok(())
     }
 
-    async fn probe_as(&mut self, who: &Principal, script: String) -> Result<(), String> {
+    async fn probe_as(&mut self, who: &RunAs, script: String) -> Result<(), String> {
         self.seq += 1;
         let id = self.seq;
         let sh = self
@@ -2460,14 +2623,12 @@ impl Executor for HostExec {
         queries: &[FactQuery],
     ) -> Vec<Value> {
         let default = |q: &FactQuery| q.fact.missing();
-        let users: BTreeSet<String> = queries
+        let logins: BTreeSet<RunAs> = queries
             .iter()
-            .filter_map(|q| match &q.run_as.principal {
-                Principal::User(u) => Some(u.clone()),
-                Principal::Root => None,
-            })
+            .filter(|q| q.run_as.login)
+            .map(|q| q.run_as.clone())
             .collect();
-        if let Err(why) = self.ensure_users(&users).await {
+        if let Err(why) = self.ensure_logins(&logins).await {
             self.block(why);
             return queries.iter().map(default).collect();
         }
@@ -2493,7 +2654,7 @@ impl Executor for HostExec {
                 retry: 0,
             };
             let id = self.seq;
-            let who = &q.run_as.principal;
+            let who = &q.run_as;
             let sent = match self.shell_for(who) {
                 Some(sh) => sh
                     .send_op(&node, id, &host.os)
@@ -2511,7 +2672,7 @@ impl Executor for HostExec {
         }
         let mut values = Vec::new();
         for (q, id) in queries.iter().zip(&ids) {
-            let got = match self.shell_for(&q.run_as.principal) {
+            let got = match self.shell_for(&q.run_as) {
                 Some(sh) => prepare::collect(sh, *id).await,
                 None => Err("no shell".to_string()),
             };
@@ -2754,18 +2915,28 @@ impl Executor for HostExec {
             return Ok(Applied::All);
         }
 
-        // Consecutive ops on the same principal's shell form a run.
+        // Consecutive ops with the same RunAs (one shell) form a run.
         let mut runs: Vec<(usize, usize)> = Vec::new();
         let mut s = 0;
         while s < window.ops.len() {
-            let who = &window.ops[s].node.run_as.principal;
+            let who = &window.ops[s].node.run_as;
             let mut e = window.ops[s..]
                 .iter()
-                .position(|w| w.node.run_as.principal != *who)
+                .position(|w| w.node.run_as != *who)
                 .map_or(window.ops.len(), |n| s + n);
             // An op with retries ends its run: the controller sends it
             // again after a failure, so nothing may be queued behind it.
             if let Some(n) = window.ops[s..e].iter().position(|w| w.node.retry > 0) {
+                e = s + n + 1;
+            }
+            // So does an op that may stale its own login shell (T114,
+            // [`OpNode::stales_own_shell`]): nothing queued behind it may
+            // run in the old environment.
+            let homes = &self.shells.homes;
+            if let Some(n) = window.ops[s..e]
+                .iter()
+                .position(|w| w.node.stales_own_shell(homes))
+            {
                 e = s + n + 1;
             }
             runs.push((s, e));
@@ -2793,15 +2964,18 @@ impl Executor for HostExec {
             }
         }
 
-        // Render each op for its principal's shell (open now).
+        // Render each op for its shell (open now).
         let mut scripts = Vec::new();
         let mut afters = Vec::new();
+        // Per op: it carries the daemon-reload of a changed unit.
+        let mut reloading = Vec::new();
         // A `unit` op came earlier in this window: later `svc` ops carry
         // the daemon-reload of a changed unit. The flag never outlives the
         // window (the flush at its end), so earlier windows do not count.
         let mut units = false;
         for (i, w) in window.ops.iter().enumerate() {
             let daemon_reload = units && matches!(w.node.spec, OpSpec::Svc(_));
+            reloading.push(daemon_reload);
             afters.push(match &w.node.spec {
                 OpSpec::Unit(_) => UNIT_FLAG,
                 OpSpec::Svc(_) if daemon_reload => UNIT_FLAG_CLEAR,
@@ -2810,9 +2984,9 @@ impl Executor for HostExec {
             if matches!(w.node.spec, OpSpec::Unit(_)) {
                 units = true;
             }
-            let who = &w.node.run_as.principal;
+            let who = &w.node.run_as;
             let Some(sh) = self.shell_for(who) else {
-                let why = format!("op #{}: no shell open for {who:?}", w.id.0);
+                let why = format!("op #{}: no shell open for {who}", w.id.0);
                 self.block(why.clone());
                 return Err(why);
             };
@@ -2865,7 +3039,46 @@ impl Executor for HostExec {
         let mut r = 0;
         while r < runs.len() && !failed_seen && send_err.is_none() {
             let (start, end) = runs[r];
-            let who = window.ops[start].node.run_as.principal.clone();
+            let who = window.ops[start].node.run_as.clone();
+
+            // A login shell an earlier op staled is closed and opened
+            // again now; the scripts rendered for it (this run's and every
+            // later run's) carry its new nonce.
+            let was = self.shell_for(&who).map(|sh| sh.nonce().to_string());
+            if let Err(why) = prepare::ShellSet::open_login(&mut self.shells, &who).await {
+                self.block(why.clone());
+                return Err(why);
+            }
+            if self.shell_for(&who).map(|sh| sh.nonce().to_string()) != was {
+                for i in start..window.ops.len() {
+                    let w = &window.ops[i];
+                    if w.node.run_as != who {
+                        continue;
+                    }
+                    let Some(sh) = self.shells.shell_of(&who) else {
+                        break;
+                    };
+                    let opts = crate::trailer::RenderOpts {
+                        source: source[i],
+                        daemon_reload: reloading[i],
+                    };
+                    match crate::trailer::render_with(
+                        &w.node,
+                        w.id.0,
+                        sh.nonce(),
+                        &host.os,
+                        sh.user(),
+                        opts,
+                    ) {
+                        Ok(r) => scripts[i] = r,
+                        Err(e) => {
+                            let why = format!("op #{}: {e}", w.id.0);
+                            self.block(why.clone());
+                            return Err(why);
+                        }
+                    }
+                }
+            }
 
             // Send the run, gated on the shell's halt flag and each op's
             // guard (constants for what is reported, variables for sources
@@ -2887,6 +3100,14 @@ impl Executor for HostExec {
                     afters[i],
                 ));
                 in_run.extend(w.members.iter().map(|m| m.id));
+            }
+            // The window flag is a variable of one shell: a run with an
+            // `svc` op that carries the reload starts with the flag as the
+            // reported outcomes have it (a unit changed in another shell,
+            // and no `svc` op that ran after it).
+            if reloading[start..end].iter().any(|r| *r) {
+                let flag = u8::from(!pending_units(&self.report, &window.ops[..start]).is_empty());
+                gated[0] = format!("__tp_dr={flag}\n{}", gated[0]);
             }
             let Some(sh) = self.shell_for(&who) else {
                 break;
@@ -3019,6 +3240,13 @@ impl Executor for HostExec {
                                     };
                                     let note = if skipped { "skipped" } else { "" };
                                     self.finish_op(w, &descs[i], o, 0, changed, note);
+                                    // The profile may have changed under the
+                                    // login shells (T114, rules 1-6).
+                                    if let Some(st) = w.node.stales(&self.shells.homes)
+                                        && (changed || st.always)
+                                    {
+                                        self.shells.mark_stale(&st.scope, st.rule, w.id.0);
+                                    }
                                     if let (crate::trace::OpSpec::Pkg(p), Some(names)) =
                                         (&w.node.spec, installed.as_ref())
                                         && matches!(p.wanted, Wanted::Absent)
@@ -3220,7 +3448,10 @@ async fn run_one<V: 'static>(
         host: name.clone(),
         target,
         root: shell,
-        users: BTreeMap::new(),
+        logins: BTreeMap::new(),
+        stale: BTreeMap::new(),
+        homes: BTreeMap::new(),
+        sink: sink.clone(),
         killer: Killer::new(target_rc, name.clone()),
     };
     let mut engine = Engine::new(HostExec::new(&name, shells, sink.clone(), check));

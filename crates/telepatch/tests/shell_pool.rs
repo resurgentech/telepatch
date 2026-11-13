@@ -259,41 +259,21 @@ async fn non_root_user_principal_is_not_supported_yet() {
     }
 }
 
-/// Fake `getent` + a HOME with a login profile; `as_user(me)` sees the
-/// profile's marker, a plain op does not. Also: another user is a render
-/// error, and a missing passwd entry fails the op with a trailer.
+/// An `as_user(me)` op sent to a shell that is `me`'s is a plain op there:
+/// no wrapper, the shell's own environment (the login environment is the
+/// shell's, opened by the executor: `tests/login_shell.rs`). Another user is
+/// a render error.
 #[tokio::test]
-async fn as_user_runs_in_a_fresh_login_environment() {
+async fn as_user_for_the_shells_own_user_is_a_plain_op_in_it() {
     let me = me();
-    let d = tempfile::tempdir().unwrap();
-    let home = d.path().join("home");
-    std::fs::create_dir(&home).unwrap();
-    std::fs::write(
-        home.join(".bash_profile"),
-        "export TP_MARK=from-profile\nexport PATH=\"$HOME/bin:$PATH\"\n",
-    )
-    .unwrap();
-    let bin = d.path().join("bin");
-    std::fs::create_dir(&bin).unwrap();
-    script(
-        &bin,
-        "getent",
-        &format!(
-            "[ \"$1 $2\" = \"passwd {me}\" ] || exit 2\necho '{me}:x:1:1::{}:/bin/bash'",
-            home.display()
-        ),
-    );
-    let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap());
-    let t = LocalTransport::new().uid(0).env("PATH", &path);
+    let t = LocalTransport::new().uid(0);
     let mut s = t.open("local", &Principal::Root, 1).await;
     let sh = &mut s.got[0];
 
     let h = host();
     h.raw("echo plain ${TP_MARK-unset}");
     let u = h.as_user(&me);
-    u.raw(
-        "echo login $TP_MARK; echo $HOME $USER; case :$PATH: in *:$HOME/bin:*) echo path-ok;; esac",
-    );
+    u.raw("echo login ${TP_MARK-unset}");
     let other = h.as_user("nobody-such");
     other.raw("echo x");
     let nodes = h.snapshot().nodes;
@@ -305,6 +285,7 @@ async fn as_user_runs_in_a_fresh_login_environment() {
     sh.send_op(&op(0), 0, &h.os).await.unwrap();
     // The shell's identity for rendering is `me` (we may not really be root).
     let rendered = telepatch::trailer::render_for(&op(1), 1, sh.nonce(), &h.os, &me).unwrap();
+    assert!(!rendered.contains("bash -l") && !rendered.contains("env -i"));
     sh.send(1, &rendered).await.unwrap();
     assert!(matches!(
         telepatch::trailer::render_for(&op(2), 2, sh.nonce(), &h.os, &me),
@@ -313,25 +294,6 @@ async fn as_user_runs_in_a_fresh_login_environment() {
 
     assert_eq!(sh.wait(0).await.unwrap().output, b"plain unset\n");
     let r = sh.wait(1).await.unwrap();
-    assert_eq!(
-        String::from_utf8(r.output).unwrap(),
-        format!("login from-profile\n{} {me}\npath-ok\n", home.display())
-    );
+    assert_eq!(String::from_utf8(r.output).unwrap(), "login unset\n");
     assert_eq!(r.trailer.typed::<ShellResult>().unwrap().rc, 0);
-
-    // A user the shell is, but without a passwd entry (fake getent says no).
-    let h2 = host();
-    h2.as_user("ghost").raw("echo x");
-    let Node::Op(g) = &h2.snapshot().nodes[0] else {
-        unreachable!()
-    };
-    let rendered = telepatch::trailer::render_for(g, 9, sh.nonce(), &h2.os, "ghost").unwrap();
-    sh.send(9, &rendered).await.unwrap();
-    let r = sh.wait(9).await.unwrap();
-    assert_eq!(r.trailer.typed::<ShellResult>().unwrap().rc, 1);
-    assert!(
-        String::from_utf8(r.output)
-            .unwrap()
-            .contains("no passwd entry")
-    );
 }

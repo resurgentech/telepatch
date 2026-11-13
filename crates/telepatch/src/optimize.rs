@@ -70,7 +70,16 @@ fn conflicts(a: &Item, b: &Item) -> bool {
     if (is_pkg_absent(a) && is_pkg_install(b)) || (is_pkg_install(a) && is_pkg_absent(b)) {
         return true;
     }
+    // `relogin()` keeps its place among the ops of its own login shell: an
+    // op moved across it would run in the other environment.
+    if (is_relogin(a) || is_relogin(b)) && a.run_as == b.run_as {
+        return true;
+    }
     hit(&a.writes, &b.reads) || hit(&a.writes, &b.writes) || hit(&a.reads, &b.writes)
+}
+
+fn is_relogin(n: &crate::trace::OpNode) -> bool {
+    matches!(n.spec, OpSpec::Relogin(_))
 }
 
 fn writes_repo(n: &crate::trace::OpNode) -> bool {
@@ -575,6 +584,23 @@ mod tests {
             .iter()
             .map(|w| w.members.iter().map(|m| m.id.0).collect())
             .collect()
+    }
+
+    #[test]
+    fn relogin_keeps_its_place_among_the_ops_of_its_own_login_shell() {
+        let login = |n: &mut OpNode| n.run_as = RunAs::login("root");
+        // No declared reads or writes at all: only the explicit rule holds
+        // the two installs apart.
+        let relogin = with(op(1, OpSpec::Relogin("root".into()), &[], &[]), login);
+        let g = optimize(vec![
+            with(pkg(0, "a"), login),
+            relogin.clone(),
+            with(pkg(2, "b"), login),
+        ]);
+        assert_eq!(ids(g), [vec![0], vec![1], vec![2]]);
+        // An op of another shell is not held.
+        let g = optimize(vec![pkg(0, "a"), relogin, pkg(2, "b")]);
+        assert_eq!(ids(g), [vec![0, 2], vec![1]]);
     }
 
     #[test]

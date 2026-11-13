@@ -775,7 +775,7 @@ fn principals(h: Host<Vars>) -> PlaybookFuture {
         f.content("r\n");
         sh!(u, "echo MARK_USER_ON_ROOT >> {ulog}").when(f.changed());
         // User source, user target in the same run (a login op as the
-        // source: its outcome crosses `env -i`).
+        // source: a variable of the user's persistent login shell).
         let uf = u.file(&uconf);
         uf.content("u\n");
         sh!(u, "echo MARK_USER_ON_USER >> {ulog}").when(uf.changed());

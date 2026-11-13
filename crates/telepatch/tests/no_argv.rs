@@ -192,10 +192,14 @@ fn a_check_command_is_on_no_command_line() {
     assert_no_hit(&run_sweep_op("check"));
 }
 
-// ---- the delimiter ----
+// ---- no here-doc, so no delimiter ----
 
+/// A script line that equalled the old per-op here-doc delimiter used to be
+/// a render error (the shell would have ended the script there). A login op
+/// has no here-doc now: it is sent exactly like a root op, so the line
+/// renders and runs, byte for byte.
 #[test]
-fn a_login_script_line_equal_to_its_delimiter_is_a_render_error() {
+fn a_login_script_line_equal_to_the_old_delimiter_renders_and_runs() {
     let h: Host<()> = Host::new(
         "t",
         telepatch::facts::os::Os::parse("ID=debian\nVERSION_ID=12\n").unwrap(),
@@ -206,15 +210,88 @@ fn a_login_script_line_equal_to_its_delimiter_is_a_render_error() {
     let telepatch::Node::Op(op) = &nodes[0] else {
         panic!()
     };
-    let err = telepatch::trailer::render_for(op, 5, "n0nce", &h.os, "root").unwrap_err();
+    let ok = telepatch::trailer::render_for(op, 5, "n0nce", &h.os, "root").unwrap();
+    assert!(!ok.contains("bash -l") && !ok.contains("/dev/fd/9"), "{ok}");
+    assert!(!ok.contains("env -i") && !ok.contains("getent"), "{ok}");
+}
+
+fn delimiter_pb(h: Host<PathBuf>) -> PlaybookFuture {
+    Box::pin(async move {
+        let out = h.vars.join("delim").display().to_string();
+        h.as_user("root").raw(format!(
+            "cat <<'EOT' > '{out}'\n__tp_S_n0nce_5\n__tp_S_{{n}}\nEOT\n"
+        ));
+        Ok(())
+    })
+}
+
+#[test]
+fn a_login_script_with_such_a_line_runs_as_user() {
+    let d = tempfile::tempdir().unwrap();
+    let r = go("delim", delimiter_pb, d.path());
+    assert_eq!(r.exit_code(), 0, "{}", r.render());
     assert_eq!(
-        err,
-        telepatch::trailer::RenderError::ScriptHasDelimiter {
-            delimiter: "__tp_S_n0nce_5".into()
-        }
+        std::fs::read_to_string(d.path().join("delim")).unwrap(),
+        "__tp_S_n0nce_5\n__tp_S_{n}\n"
     );
-    // Another op id is another delimiter: the same script renders.
-    let ok = telepatch::trailer::render_for(op, 6, "n0nce", &h.os, "root").unwrap();
-    assert!(ok.contains("bash -l /dev/fd/9 9<<'__tp_S_n0nce_6'"), "{ok}");
-    assert!(!ok.contains("bash -l -c"), "{ok}");
+}
+
+// ---- one persistent login shell ----
+
+fn shell_pb(h: Host<PathBuf>) -> PlaybookFuture {
+    Box::pin(async move {
+        let (a, b, c) = (
+            h.vars.join("s1").display().to_string(),
+            h.vars.join("s2").display().to_string(),
+            h.vars.join("kids").display().to_string(),
+        );
+        h.as_user("root").raw(format!("echo $$ > '{a}'"));
+        // The shell's own pid, the op's parent (the op subshell is a child
+        // of the login shell), and every other child of the shell while
+        // the op runs, by /proc with builtins only.
+        h.as_user("root").raw(format!(
+            "echo $$ > '{b}'\n\
+             {{\n\
+             read -r l < /proc/$BASHPID/stat; r=${{l##*) }}; set -- $r\n\
+             echo \"PARENT $2 SHELL $$\"\n\
+             mapfile -d '' -t me < /proc/$$/cmdline; echo \"SHELLARGV ${{me[*]}}\"\n\
+             for f in /proc/[0-9]*/stat; do\n\
+               read -r l < \"$f\" 2>/dev/null || continue\n\
+               r=${{l##*) }}; set -- $r; pid=${{f#/proc/}}; pid=${{pid%/stat}}\n\
+               if [ \"$2\" = \"$$\" ] && [ \"$pid\" != \"$BASHPID\" ]; then\n\
+                 mapfile -d '' -t w < /proc/$pid/cmdline; echo \"KID $pid ${{w[*]}}\"\n\
+               fi\n\
+             done\n\
+             }} > '{c}'\n"
+        ));
+        Ok(())
+    })
+}
+
+#[test]
+fn two_as_user_ops_share_one_login_shell_and_start_no_bash_l() {
+    let d = tempfile::tempdir().unwrap();
+    let r = go("shell", shell_pb, d.path());
+    assert_eq!(r.exit_code(), 0, "{}", r.render());
+    let (s1, s2) = (
+        std::fs::read_to_string(d.path().join("s1")).unwrap(),
+        std::fs::read_to_string(d.path().join("s2")).unwrap(),
+    );
+    assert!(
+        !s1.trim().is_empty() && s1 == s2,
+        "two shells: {s1:?} {s2:?}"
+    );
+    let kids = std::fs::read_to_string(d.path().join("kids")).unwrap();
+    // The op's own `$BASHPID` has the login shell as its parent.
+    assert!(
+        kids.contains(&format!("PARENT {0} SHELL {0}", s1.trim())),
+        "{kids}"
+    );
+    // The shell is the login bash, and no `bash -l` runs as its child.
+    assert!(kids.contains("SHELLARGV bash -l"), "{kids}");
+    let others: Vec<&str> = kids.lines().filter(|l| l.starts_with("KID ")).collect();
+    assert!(
+        others.iter().all(|l| !l.contains("bash")),
+        "a bash child of the login shell: {others:?}"
+    );
 }

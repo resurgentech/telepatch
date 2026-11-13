@@ -16,7 +16,7 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 
 use crate::sh::quote;
-use crate::trace::Principal;
+use crate::trace::RunAs;
 
 /// Raw bytes per copy-channel script. A 20 MiB file is many scripts.
 pub const CHUNK: usize = 256 * 1024;
@@ -280,7 +280,7 @@ pub struct CopyFile {
 /// One file op's controller copy.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CopyItem {
-    pub who: Principal,
+    pub who: RunAs,
     pub dest_word: String,
     pub display: String,
     pub written: String,

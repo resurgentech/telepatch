@@ -16,7 +16,7 @@ use crate::TraceError;
 use crate::host::{Host, OpHandle};
 use crate::key::{Key, Value};
 use crate::sh::quote;
-use crate::trace::{Node, NodeId, OpSpec, Principal, Trace};
+use crate::trace::{Node, NodeId, OpSpec, RunAs, Trace};
 
 /// What an existing checkout should do.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -386,11 +386,11 @@ pub fn errors(trace: &Trace) -> Vec<TraceError> {
     out
 }
 
-/// Git ops of `window`, grouped by principal, trace order.
-pub fn by_principal<'a>(
-    ops: impl IntoIterator<Item = (&'a Principal, &'a GitSpec)>,
-) -> Vec<(Principal, Vec<&'a GitSpec>)> {
-    let mut out: Vec<(Principal, Vec<&GitSpec>)> = Vec::new();
+/// Git ops of `window`, grouped by [`RunAs`] (shell), trace order.
+pub fn by_run_as<'a>(
+    ops: impl IntoIterator<Item = (&'a RunAs, &'a GitSpec)>,
+) -> Vec<(RunAs, Vec<&'a GitSpec>)> {
+    let mut out: Vec<(RunAs, Vec<&GitSpec>)> = Vec::new();
     for (who, spec) in ops {
         if spec.path.is_empty() {
             continue;

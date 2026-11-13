@@ -85,3 +85,21 @@ fn plan_is_deterministic() {
     let h = host("web1", "arch");
     assert_eq!(trace(&playbook(), &h), trace(&playbook(), &h));
 }
+
+fn relogin_run(h: Host<Vars>) -> PlaybookFuture {
+    Box::pin(async move {
+        let _role = h.role_enter("profile");
+        let u = h.as_user(&h.vars.admin);
+        u.raw("echo one");
+        u.relogin();
+        u.raw("echo two");
+        h.as_user("root").relogin();
+        Ok(())
+    })
+}
+
+#[test]
+fn plan_shows_relogin() {
+    let pb = Playbook::new("relogin", relogin_run);
+    insta::assert_snapshot!(trace(&pb, &host("web1", "ubuntu2404")));
+}

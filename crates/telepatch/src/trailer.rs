@@ -32,8 +32,9 @@
 //! checking `$$`. Its framing, `\n__tpS_<nonce> <id> <pid> <shell_pid>\n`,
 //! is not `__tp_`, so it is never taken for a trailer, and the splitter
 //! never shows it as output. A guard skip and a halt skip ([`skip`]) print
-//! none. A login op's start line is printed by the outer subshell, whose
-//! group holds the inner `bash -l`; the inner script is plain.
+//! none. A login op (`as_user`) renders exactly like a root op: it is sent
+//! to the user's persistent login shell ([`crate::executor`]), so `$$` in
+//! its start line is that login bash and the op's subshell is its child.
 //!
 //! The persistent shell's stderr is merged into its stdout. Bash prints a
 //! job notice for a job killed by a signal, and the notice holds the whole
@@ -395,8 +396,8 @@ fn start_line(nonce: &str, id: usize) -> String {
     format!("printf '\\n{START_TAG}{nonce} {id} %s %s\\n' \"$BASHPID\" \"$$\"\n")
 }
 
-/// `wrap_with` for a skip or a login op's inner script: the plain
-/// subshell, no start line and no stderr swap.
+/// `wrap_with` for a skip: the plain subshell, no start line and no stderr
+/// swap.
 fn wrap_plain(kind: OpKind, body: &str, id: usize, nonce: &str, record: bool) -> String {
     wrap_framed(kind, body, id, nonce, record, false)
 }
@@ -481,9 +482,8 @@ fn wrap_framed(
 /// Why an op could not be rendered for the shell it was routed to.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RenderError {
-    /// A login environment for `user` was requested in a shell that is
-    /// `shell_user`'s. Switching to another user (`sudo -iu`) is not
-    /// implemented yet.
+    /// An `as_user(user)` op was sent to a shell that is `shell_user`'s: a
+    /// sanity check, as each user has a login shell of their own.
     UserSwitchUnsupported { user: String, shell_user: String },
     /// A line of a script given to a here-doc equals the here-doc's
     /// delimiter, which would end the script early. Never cut silently.
@@ -520,16 +520,13 @@ pub(crate) fn heredoc_body(script: &str, delimiter: &str) -> Result<String, Rend
     Ok(format!("{script}{nl}{delimiter}\n"))
 }
 
-const LOGIN_PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
-
 /// Render `op` for a shell whose user is `shell_user` ("root" for a root
-/// shell). Ops with `run_as.login == false` are [`render_op`] unchanged. An
-/// op issued through `as_user(u)` runs its whole wrapped script (trailer
-/// included, stdout inherited) in a fresh `bash -l` for `u` started with
-/// `env -i`, with HOME and SHELL taken from `getent passwd u` evaluated in
-/// the shell at op time, so a profile edited earlier in the run is seen. If
-/// `u` has no passwd entry the op fails with rc 1 and a message on stderr
-/// (still with a trailer). Only `u == shell_user` is supported.
+/// shell). An op issued through `as_user(u)` is sent to `u`'s persistent
+/// login shell ([`crate::executor`]), which already is `u` with `u`'s
+/// login environment, so it renders exactly like a root op: the killable
+/// subshell of [`render_op`], no per-op `bash`, `env -i`, here-doc or
+/// `getent`. Only a sanity check stays: the op's user must be the shell's
+/// user ([`RenderError::UserSwitchUnsupported`]).
 pub fn render_for(
     op: &OpNode,
     id: usize,
@@ -542,7 +539,7 @@ pub fn render_for(
 
 /// [`render_for`] for an op a guard in the same run reads: its trailer
 /// also writes its result to `$__tp_f` when the parent shell set it (see
-/// [`crate::executor`]). A login op gets `__tp_f` through its `env -i`.
+/// [`crate::executor`]).
 pub fn render_source_for(
     op: &OpNode,
     id: usize,
@@ -563,8 +560,9 @@ pub fn render_source_for(
     )
 }
 
-/// [`render_for`] with [`RenderOpts`]. A login op gets `__tp_f` (a source)
-/// and `__tp_dr` (the unit flag) through its `env -i`.
+/// [`render_for`] with [`RenderOpts`]. `__tp_f` (a source), `__tp_dr` (the
+/// unit flag) and `__tp_run` are variables of the shell the op is sent to:
+/// the login shell's own, for a login op.
 pub fn render_with(
     op: &OpNode,
     id: usize,
@@ -573,60 +571,19 @@ pub fn render_with(
     shell_user: &str,
     opts: RenderOpts,
 ) -> Result<String, RenderError> {
-    let record = opts.source;
-    // A login op's start line and stderr swap belong to the outer subshell,
-    // whose group holds the inner `bash -l`: the inner script is plain.
-    let plain = render_op_with(op, id, nonce, os, opts, !op.run_as.login);
-    if !op.run_as.login {
-        return Ok(plain);
+    if op.run_as.login {
+        let user = match &op.run_as.principal {
+            crate::trace::Principal::Root => "root",
+            crate::trace::Principal::User(u) => u.as_str(),
+        };
+        if user != shell_user {
+            return Err(RenderError::UserSwitchUnsupported {
+                user: user.to_string(),
+                shell_user: shell_user.to_string(),
+            });
+        }
     }
-    let user = match &op.run_as.principal {
-        crate::trace::Principal::Root => "root",
-        crate::trace::Principal::User(u) => u.as_str(),
-    };
-    if user != shell_user {
-        return Err(RenderError::UserSwitchUnsupported {
-            user: user.to_string(),
-            shell_user: shell_user.to_string(),
-        });
-    }
-    let q = crate::sh::quote(user);
-    let failed = wrap_plain(
-        op.spec.op_kind(),
-        &format!("echo \"telepatch: no passwd entry for \"{q} >&2\nrc=1\n"),
-        id,
-        nonce,
-        record,
-    );
-    let mut pass = String::new();
-    if record {
-        pass.push_str("__tp_f=\"${__tp_f-}\" ");
-    }
-    if opts.daemon_reload && matches!(op.spec, crate::trace::OpSpec::Svc(_)) {
-        pass.push_str("__tp_dr=\"${__tp_dr-}\" ");
-    }
-    if plain.contains("$__tp_run") {
-        pass.push_str("__tp_run=\"${__tp_run-}\" ");
-    }
-    // The script goes to the login bash on fd 9 from a quoted here-doc, never
-    // as an argument: an argument is capped (128 KiB) and shows in `ps`.
-    let delim = format!("__tp_S_{nonce}_{id}");
-    let body = heredoc_body(&plain, &delim)?;
-    // The outer subshell waits for the inner `bash -l` when it is TERMed
-    // (the trap), so the inner's trailer is printed before the next op. Its
-    // own stderr stays /dev/null: the notice bash prints for its killed
-    // `env ... bash -l` job holds the here-doc, the whole script. Only the
-    // inner `bash -l` and the no-passwd message get the real stderr (fd 3).
-    let start = start_line(nonce, id);
-    Ok(format!(
-        "{{ (\ntrap 'exit 143' TERM\n{start}\
-         __tp_pw=$(getent passwd {q}) || __tp_pw=\n\
-         if [ -z \"$__tp_pw\" ]; then\n{{\n{failed}}} 2>&3\nelse\n\
-         IFS=: read -r _ _ _ _ _ __tp_home __tp_shell <<<\"$__tp_pw\"\n\
-         env -i {pass}HOME=\"$__tp_home\" USER={q} LOGNAME={q} SHELL=\"$__tp_shell\" PATH={LOGIN_PATH} bash -l /dev/fd/9 9<<'{delim}' 2>&3 3>&-\n\
-         {body}\
-         fi\n) </dev/null; }} 3>&2 2>/dev/null\n",
-    ))
+    Ok(render_op_with(op, id, nonce, os, opts, true))
 }
 
 #[cfg(test)]

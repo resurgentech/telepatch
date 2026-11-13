@@ -264,10 +264,18 @@ fn ops_and_fact_reads_go_to_their_principal_shell() {
     assert_eq!(stub.ran("MARK_ROOT_3"), [ROOT]);
     assert_eq!(stub.ran("MARK_USER_1"), std::slice::from_ref(&user));
     assert_eq!(stub.ran("tp-mark-fact-zz"), std::slice::from_ref(&user));
-    // One root channel, one user channel: the user's shell is opened once.
+    // One root channel. The user's shell is opened once, and again after
+    // each changed `sh!` op that writes `*` (T114 rule 5: it may have
+    // changed a profile): once before the user op, once before the fact
+    // read.
     let mut remotes: Vec<String> = stub.channels().into_iter().map(|(r, _)| r).collect();
     remotes.sort();
-    assert_eq!(remotes, [ROOT.to_string(), user], "{remotes:?}");
+    assert_eq!(
+        remotes,
+        [ROOT.to_string(), user.clone(), user.clone(), user],
+        "{remotes:?}"
+    );
+    assert!(out.contains("login shell"), "{out}");
 
     // The root op after the user op waited for it (Assumption A3).
     let order = std::fs::read_to_string(stub.work().join("order")).unwrap();

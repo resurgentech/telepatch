@@ -1355,18 +1355,21 @@ fn binary_release_plan() {
     insta::assert_snapshot!("binary_release_plan", plan);
 }
 
-/// A login op that names `$__tp_run` gets it through its `env -i`; one that
-/// does not is rendered as before.
+/// A login op that names `$__tp_run` reads it from its login shell, where
+/// the executor set it at open: the op is rendered exactly like a root op
+/// with the same script, nothing passed on a command line (`tests/
+/// login_shell.rs` runs it).
 #[test]
-fn a_login_op_passes_the_run_variable_through_env_i() {
+fn a_login_op_names_the_run_variable_and_renders_like_a_root_op() {
     let h = host();
     h.as_user("root").raw("echo \"$__tp_run\"");
-    h.as_user("root").raw("echo plain");
+    h.raw("echo \"$__tp_run\"");
     let nodes = h.snapshot().nodes;
     let Node::Op(a) = &nodes[0] else { panic!() };
     let Node::Op(b) = &nodes[1] else { panic!() };
+    assert!(a.run_as.login && !b.run_as.login);
     let a = telepatch::trailer::render_for(a, 1, "n0nce", &h.os, "root").unwrap();
-    let b = telepatch::trailer::render_for(b, 2, "n0nce", &h.os, "root").unwrap();
-    assert!(a.contains("env -i __tp_run=\"${__tp_run-}\" HOME="), "{a}");
-    assert!(!b.contains("__tp_run"), "{b}");
+    let b = telepatch::trailer::render_for(b, 1, "n0nce", &h.os, "root").unwrap();
+    assert_eq!(a, b);
+    assert!(!a.contains("env -i"), "{a}");
 }

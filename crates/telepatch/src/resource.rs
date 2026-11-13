@@ -16,7 +16,7 @@ use crate::engine::Window;
 use crate::host::{Host, OpHandle};
 use crate::key::Key;
 use crate::sh::quote;
-use crate::trace::{NodeId, OpSpec, Principal};
+use crate::trace::{NodeId, OpSpec, RunAs};
 
 /// What a resource's probe found. `stdout` is `None` when the command was
 /// missing (`missing_is_none`) or was not run.
@@ -286,7 +286,7 @@ fn entry_norm(s: &str) -> String {
 
 pub(crate) struct ProbeJob {
     pub id: NodeId,
-    pub who: Principal,
+    pub who: RunAs,
     pub script: String,
     pub kind: &'static str,
     pub name: String,
@@ -302,7 +302,7 @@ pub(crate) fn jobs(window: &Window) -> Vec<ProbeJob> {
             };
             Some(ProbeJob {
                 id: op.id,
-                who: op.node.run_as.principal.clone(),
+                who: op.node.run_as.clone(),
                 script: capture_script(&r.probe),
                 kind: r.kind,
                 name: r.name.clone(),

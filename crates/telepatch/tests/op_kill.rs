@@ -485,10 +485,11 @@ async fn a_killed_op_leaves_no_trailer_and_no_script_text() {
     assert_eq!(text_of(&seen).matches("next").count(), 1, "{seen:?}");
 }
 
-/// A login op: the outer subshell prints the start line and its group
-/// holds the inner `bash -l`; TERM still ends in the trailer, rc 143.
+/// A login op is a root op sent to the login shell: one start line, its
+/// own `$BASHPID` is the group leader (no inner `bash -l`); TERM ends in
+/// the trailer, rc 143.
 #[tokio::test]
-async fn a_login_op_has_one_start_line_and_its_group_includes_the_inner_bash() {
+async fn a_login_op_has_one_start_line_and_is_its_own_group_leader() {
     let me = String::from_utf8(
         std::process::Command::new("id")
             .arg("-un")
@@ -524,8 +525,7 @@ async fn a_login_op_has_one_start_line_and_its_group_includes_the_inner_bash() {
         .unwrap()
         .parse()
         .unwrap();
-    assert_ne!(inner, pid, "the inner bash is not the outer subshell");
-    assert_eq!(stat(inner).unwrap().1, pid, "inner bash is in the group");
+    assert_eq!(inner, pid, "the op's subshell is the group leader");
     let (rest, _) = term_until_end(&mut k, &mut sh, pid, 1).await;
     assert_eq!(rc_of(&rest, 1), Some(143), "{rest:?}");
     assert!(

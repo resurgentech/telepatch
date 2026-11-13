@@ -36,7 +36,7 @@ use crate::ops::pkg::{Manager, PkgMode, PkgSpec, Source, Wanted};
 use crate::pool::{Shell, ShellError};
 use crate::report::{FetchLine, FetchState, WillChange, WillCreate, WillInstall, WillRemove};
 use crate::sh::quote;
-use crate::trace::{NodeId, OpNode, OpSpec, Principal};
+use crate::trace::{NodeId, OpNode, OpSpec, Principal, RunAs};
 use crate::trailer::{OpKind, wrap};
 
 /// Non-root users the window's ops address (`as_user(u)`).
@@ -48,6 +48,17 @@ pub fn users_in(window: &Window) -> BTreeSet<String> {
             Principal::User(u) => Some(u.clone()),
             Principal::Root => None,
         })
+        .collect()
+}
+
+/// Every login shell the window's ops address: one per [`RunAs`] with
+/// `login` set, `as_user("root")` included.
+pub fn logins_in(window: &Window) -> BTreeSet<RunAs> {
+    window
+        .ops
+        .iter()
+        .filter(|o| o.node.run_as.login)
+        .map(|o| o.node.run_as.clone())
         .collect()
 }
 
@@ -493,7 +504,8 @@ pub fn svc_after_installers(window: &Window) -> bool {
             | OpSpec::User(_)
             | OpSpec::Repo(_)
             | OpSpec::Git(_)
-            | OpSpec::Wait(_) => {}
+            | OpSpec::Wait(_)
+            | OpSpec::Relogin(_) => {}
         }
     }
     false
@@ -553,32 +565,37 @@ pub async fn collect(shell: &mut Shell, id: usize) -> Result<(i32, String), Stri
     Ok((rc, String::from_utf8_lossy(&out.output).into_owned()))
 }
 
-/// A host's shells as prepare sees them: the root shell, the shells of the
-/// users opened so far, and a way to open one more.
+/// A host's shells as prepare sees them: the root shell, the login shells
+/// opened so far (one per user, root's included), and a way to open one
+/// more.
 #[allow(async_fn_in_trait)]
 pub trait ShellSet {
-    /// The shell ops of `who` run in: `Root` is the root shell, `User(u)`
-    /// is `u`'s shell once [`ShellSet::open_user`] has opened it.
-    fn shell(&mut self, who: &Principal) -> Option<&mut Shell>;
-    /// Open `u`'s shell unless it is open. `Err` is the reason the host is
-    /// blocked.
-    async fn open_user(&mut self, u: &str) -> Result<(), String>;
+    /// The shell ops of `who` run in: the plain root shell for a root op,
+    /// else the login shell of `who`'s user once [`ShellSet::open_login`]
+    /// has opened it.
+    fn shell(&mut self, who: &RunAs) -> Option<&mut Shell>;
+    /// Open `who`'s login shell unless it is open (a no-op for a plain root
+    /// op). `Err` is the reason the host is blocked.
+    async fn open_login(&mut self, who: &RunAs) -> Result<(), String>;
     /// `who`'s shell with the second shell that stops a probe on expiry
     /// ([`crate::executor::probe_bounded`]); `None` when the set has none,
     /// and the probe then runs unbounded.
     fn watched_shell(
         &mut self,
-        _who: &Principal,
+        _who: &RunAs,
     ) -> Option<(&mut Shell, &mut crate::executor::Killer)> {
         None
     }
 }
 
-fn shell_of<'a, S: ShellSet>(shells: &'a mut S, who: &Principal) -> Result<&'a mut Shell, String> {
-    shells.shell(who).ok_or_else(|| match who {
-        Principal::Root => "no root shell".to_string(),
-        Principal::User(u) => format!("no shell open for user {u}"),
-    })
+fn shell_of<'a, S: ShellSet>(shells: &'a mut S, who: &RunAs) -> Result<&'a mut Shell, String> {
+    shells
+        .shell(who)
+        .ok_or_else(|| match (&who.principal, who.login) {
+            (Principal::Root, false) => "no root shell".to_string(),
+            (Principal::Root, true) => "no login shell open for root".to_string(),
+            (Principal::User(u), _) => format!("no shell open for user {u}"),
+        })
 }
 
 /// Check `window` on the host. Users already verified are in `users_ok`.
@@ -621,7 +638,7 @@ fn controller_copies(window: &Window) -> Vec<crate::local::CopyItem> {
             continue;
         }
         out.push(crate::local::CopyItem {
-            who: op.node.run_as.principal.clone(),
+            who: op.node.run_as.clone(),
             dest_word: f.path_word(),
             display: f.path.clone(),
             written: place.written.clone(),
@@ -670,7 +687,7 @@ pub async fn prepare_window<S: ShellSet>(
     };
     if !new_users.is_empty() {
         let id = next();
-        let root = shell_of(shells, &Principal::Root)?;
+        let root = shell_of(shells, &RunAs::root_shell())?;
         let (_, out) = probe(root, id, &users_script(&new_users)).await?;
         let missing = missing_users(&out);
         if !missing.is_empty() {
@@ -683,17 +700,17 @@ pub async fn prepare_window<S: ShellSet>(
         }
         users_ok.extend(new_users);
     }
-    for u in &users {
-        shells.open_user(u).await?;
+    for l in &logins_in(window) {
+        shells.open_login(l).await?;
     }
 
     // Git: a different remote or a dirty tree blocks before this window
     // downloads or changes anything. One probe per principal.
-    let git_groups = crate::ops::git::by_principal(window.ops.iter().filter_map(|op| {
+    let git_groups = crate::ops::git::by_run_as(window.ops.iter().filter_map(|op| {
         let OpSpec::Git(g) = &op.node.spec else {
             return None;
         };
-        Some((&op.node.run_as.principal, g))
+        Some((&op.node.run_as, g))
     }));
     let mut git_notes = Vec::new();
     for (who, specs) in &git_groups {
@@ -753,7 +770,7 @@ pub async fn prepare_window<S: ShellSet>(
         // The rows above may mix principals; send them on each file's shell
         // by grouping. A single script per principal, then stitch.
         let mut sums = vec![None; words.len()];
-        let mut by_who: Vec<(crate::trace::Principal, Vec<usize>)> = Vec::new();
+        let mut by_who: Vec<(RunAs, Vec<usize>)> = Vec::new();
         for (i, (ci, _)) in flat.iter().enumerate() {
             let who = copies[*ci].who.clone();
             match by_who.iter_mut().find(|(w, _)| w == &who) {
@@ -793,7 +810,7 @@ pub async fn prepare_window<S: ShellSet>(
         // downloader's own flag, in the script): the controller's
         // watchdog on the whole probe.
         let limit = crate::ops::fetch::controller_deadline(&fetch_items);
-        let out = match shells.watched_shell(&Principal::Root) {
+        let out = match shells.watched_shell(&RunAs::root_shell()) {
             Some((sh, killer)) => {
                 use crate::executor::{Bounded, KillBounds, probe_bounded};
                 match probe_bounded(sh, killer, KillBounds::POLICY, id, &script, limit).await? {
@@ -810,7 +827,7 @@ pub async fn prepare_window<S: ShellSet>(
                 }
             }
             None => {
-                let root = shell_of(shells, &Principal::Root)?;
+                let root = shell_of(shells, &RunAs::root_shell())?;
                 probe(root, id, &script).await?.1
             }
         };
@@ -851,7 +868,7 @@ pub async fn prepare_window<S: ShellSet>(
     let mut pkg_ids = Vec::new();
     for (m, names) in &groups {
         let id = next();
-        let root = shell_of(shells, &Principal::Root)?;
+        let root = shell_of(shells, &RunAs::root_shell())?;
         let w = wrap(
             OpKind::Sh,
             &crate::ops::shell::raw_body(&pkg_probe(m, names)),
@@ -867,7 +884,7 @@ pub async fn prepare_window<S: ShellSet>(
     let mut group_id = None;
     if !group_list.is_empty() {
         let id = next();
-        let root = shell_of(shells, &Principal::Root)?;
+        let root = shell_of(shells, &RunAs::root_shell())?;
         let w = wrap(
             OpKind::Sh,
             &crate::ops::shell::raw_body(&crate::ops::group::probe(&group_list)),
@@ -890,7 +907,7 @@ pub async fn prepare_window<S: ShellSet>(
         .collect();
     if !user_specs.is_empty() {
         let id = next();
-        let root = shell_of(shells, &Principal::Root)?;
+        let root = shell_of(shells, &RunAs::root_shell())?;
         let w = wrap(
             OpKind::Sh,
             &crate::ops::shell::raw_body(&crate::ops::user::probe(&user_specs)),
@@ -913,7 +930,7 @@ pub async fn prepare_window<S: ShellSet>(
         .collect();
     if !repo_specs.is_empty() {
         let id = next();
-        let root = shell_of(shells, &Principal::Root)?;
+        let root = shell_of(shells, &RunAs::root_shell())?;
         let w = wrap(
             OpKind::Sh,
             &crate::ops::shell::raw_body(&crate::ops::repo::probe(&repo_specs)),
@@ -930,7 +947,7 @@ pub async fn prepare_window<S: ShellSet>(
     let svc_list = svc_wants(window);
     if !svc_list.is_empty() {
         let id = next();
-        let root = shell_of(shells, &Principal::Root)?;
+        let root = shell_of(shells, &RunAs::root_shell())?;
         let w = wrap(
             OpKind::Sh,
             &crate::ops::shell::raw_body(&crate::ops::svc::probe(&svc_list)),
@@ -946,7 +963,7 @@ pub async fn prepare_window<S: ShellSet>(
     let unit_list = unit_specs(window);
     if !unit_list.is_empty() {
         let id = next();
-        let root = shell_of(shells, &Principal::Root)?;
+        let root = shell_of(shells, &RunAs::root_shell())?;
         let w = wrap(
             OpKind::Sh,
             &crate::ops::shell::raw_body(&crate::ops::unit::probe(&unit_list)),
@@ -958,7 +975,7 @@ pub async fn prepare_window<S: ShellSet>(
     }
     // Non-distro probes, each in its op's RunAs and principal's shell (as
     // `read_facts` does).
-    let mut src_ids: Vec<(NodeId, &PkgSpec, &Principal, Option<usize>)> = Vec::new();
+    let mut src_ids: Vec<(NodeId, &PkgSpec, &RunAs, Option<usize>)> = Vec::new();
     for op in &window.ops {
         let OpSpec::Pkg(p) = &op.node.spec else {
             continue;
@@ -981,7 +998,7 @@ pub async fn prepare_window<S: ShellSet>(
             timeout: None,
             retry: 0,
         };
-        let who = &op.node.run_as.principal;
+        let who = &op.node.run_as;
         let sh = shell_of(shells, who)?;
         match sh.send_op(&node, id, os).await {
             Ok(()) => src_ids.push((op.id, p, who, Some(id))),
@@ -1002,7 +1019,7 @@ pub async fn prepare_window<S: ShellSet>(
     };
     for ((m, _names), id) in groups.iter().zip(pkg_ids) {
         // Gather only: a failed probe means "unknown", not "blocked".
-        let root = shell_of(shells, &Principal::Root)?;
+        let root = shell_of(shells, &RunAs::root_shell())?;
         let probed = match collect(root, id).await {
             Ok((_, out)) => Some(out),
             Err(_) => None,
@@ -1063,7 +1080,7 @@ pub async fn prepare_window<S: ShellSet>(
     no_dl.refused()?;
     if let Some(id) = group_id {
         // Gather only: a failed probe reports nothing.
-        let root = shell_of(shells, &Principal::Root)?;
+        let root = shell_of(shells, &RunAs::root_shell())?;
         if let Ok((_, out)) = collect(root, id).await {
             for name in crate::ops::group::missing(&out) {
                 will.will_create.push(WillCreate {
@@ -1076,7 +1093,7 @@ pub async fn prepare_window<S: ShellSet>(
         }
     }
     if let Some(id) = user_id {
-        let root = shell_of(shells, &Principal::Root)?;
+        let root = shell_of(shells, &RunAs::root_shell())?;
         if let Ok((_, out)) = collect(root, id).await {
             for (name, detail) in crate::ops::user::findings(&out) {
                 let marked = user_specs
@@ -1098,7 +1115,7 @@ pub async fn prepare_window<S: ShellSet>(
     }
     if let Some(id) = repo_id {
         // Gather only: a failed probe reports nothing.
-        let root = shell_of(shells, &Principal::Root)?;
+        let root = shell_of(shells, &RunAs::root_shell())?;
         if let Ok((_, out)) = collect(root, id).await {
             for name in crate::ops::repo::findings(&out) {
                 will.will_create.push(WillCreate {
@@ -1112,7 +1129,7 @@ pub async fn prepare_window<S: ShellSet>(
     }
     if let Some(id) = unit_id {
         // Gather only: a failed probe reports nothing.
-        let root = shell_of(shells, &Principal::Root)?;
+        let root = shell_of(shells, &RunAs::root_shell())?;
         if let Ok((_, out)) = collect(root, id).await {
             let earlier = earlier_windows || unit_after_installers(window);
             for (name, detail) in crate::ops::unit::findings(&unit_list, &out, earlier) {
@@ -1127,7 +1144,7 @@ pub async fn prepare_window<S: ShellSet>(
     }
     if let Some(id) = svc_id {
         // Gather only: a failed probe reports nothing.
-        let root = shell_of(shells, &Principal::Root)?;
+        let root = shell_of(shells, &RunAs::root_shell())?;
         if let Ok((_, out)) = collect(root, id).await {
             let earlier = earlier_windows || svc_after_installers(window);
             for (name, detail) in crate::ops::svc::findings_after(&svc_list, &out, earlier) {
@@ -1462,7 +1479,7 @@ pub async fn check_files<S: ShellSet>(
         }
         *seq += 1;
         let id = *seq;
-        let sh = shell_of(shells, &op.node.run_as.principal)?;
+        let sh = shell_of(shells, &op.node.run_as)?;
         let (_, got) = probe(sh, id, &file_probe_script(f, diff && !f.is_secret())).await?;
         let fnd = file_finding(op.id, f, &parse_file_probe(&got), diff);
         if let Some(why) = &fnd.block {

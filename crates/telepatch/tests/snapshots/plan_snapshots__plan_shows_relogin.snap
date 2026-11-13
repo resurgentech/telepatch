@@ -1,0 +1,16 @@
+---
+source: crates/telepatch/tests/plan_snapshots.rs
+expression: "trace(&pb, &host(\"web1\", \"ubuntu2404\"))"
+---
+host web1 (os: Debian/Ubuntu 24.04)
+blocking reads: 0
+
+role profile
+  #1 sh as login:deploy reads [] writes [*]
+      | echo one
+  #2 relogin as login:deploy reads [*] writes []
+      | relogin deploy
+  #3 sh as login:deploy reads [] writes [*]
+      | echo two
+  #4 relogin as login:root reads [*] writes []
+      | relogin root

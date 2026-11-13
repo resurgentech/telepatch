@@ -300,8 +300,8 @@ impl<V> Host<V> {
         })
     }
 
-    /// Ops issued through the returned scope run in a fresh login
-    /// environment of `user` (also for `"root"`).
+    /// Ops issued through the returned scope run in `user`'s persistent
+    /// login shell (also for `"root"`: root's own, beside the plain one).
     pub fn as_user(&self, user: &str) -> Scope<V> {
         let mut host = self.clone();
         host.run_as = RunAs::login(user);
@@ -317,6 +317,25 @@ impl<V> Deref for Scope<V> {
     type Target = Host<V>;
     fn deref(&self) -> &Host<V> {
         &self.0
+    }
+}
+
+impl<V> Scope<V> {
+    /// Mark `user`'s login shell stale at this place in the trace: it is
+    /// closed and reopened (the profile read again) before the next op or
+    /// fact read routed to it. An op with no host effect, for a profile
+    /// change no rule of [`crate::trace::OpNode::stales`] can see. It
+    /// reads everything and writes nothing, so nothing moves across it.
+    #[track_caller]
+    pub fn relogin(&self) -> OpHandle {
+        let who = match &self.0.run_as.principal {
+            crate::trace::Principal::Root => "root".to_string(),
+            crate::trace::Principal::User(u) => u.clone(),
+        };
+        let h = self.0.op(OpSpec::Relogin(who));
+        h.reads([Key::Any]);
+        h.writes([]);
+        h
     }
 }
 
