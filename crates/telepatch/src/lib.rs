@@ -37,6 +37,7 @@ pub mod vars;
 pub use host::{Host, OpHandle, Scope, TraceError};
 pub use key::{Key, Value};
 pub use local::{local, local_dir, local_file};
+pub use ops::wait::{MIN, Port, SEC, Wait};
 pub use policy::{Allowance, Policy};
 pub use resource::{Change, Probe, Probed, Resource, Script, Terminfo, plan_against};
 pub use role::{Playbook, PlaybookFuture, RoleGuard};

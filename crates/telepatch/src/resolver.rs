@@ -169,6 +169,7 @@ mod tests {
             allowed: Vec::new(),
             at_end: false,
             timeout: None,
+            retry: 0,
         })
     }
 

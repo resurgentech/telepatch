@@ -31,6 +31,9 @@ fn op_line(out: &mut String, id: usize, op: &OpNode, os: &Os) {
     if op.allow_fail {
         out.push_str(" allow_fail");
     }
+    if op.retry > 0 {
+        let _ = write!(out, " retry {}", op.retry);
+    }
     if let Some(d) = op.timeout {
         let _ = write!(out, " timeout {}", crate::trace::fmt_duration(d));
     }

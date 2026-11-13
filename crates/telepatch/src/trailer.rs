@@ -316,13 +316,20 @@ fn render_op_with(
     opts: RenderOpts,
     killable: bool,
 ) -> String {
-    let body = match &op.spec {
+    let body = op_body(op, os, opts);
+    wrap_framed(op.spec.op_kind(), &body, id, nonce, opts.source, killable)
+}
+
+/// The op's body as the shell runs it (it sets `rc`, `changed`, ...). A
+/// `wait_for` gets the op's own deadline, its `.timeout(d)`.
+fn op_body(op: &OpNode, os: &Os, opts: RenderOpts) -> String {
+    match &op.spec {
         crate::trace::OpSpec::Raw { script } => crate::ops::shell::raw_body(script),
         crate::trace::OpSpec::Svc(s) if opts.daemon_reload => s.render_exec_reload(),
         crate::trace::OpSpec::Svc(s) => s.render_exec(),
+        crate::trace::OpSpec::Wait(w) => w.render(op.effective_timeout()),
         spec => spec.exec_script(os),
-    };
-    wrap_framed(op.spec.op_kind(), &body, id, nonce, opts.source, killable)
+    }
 }
 
 /// Wrap `body` (which sets `rc` / `changed` / ...) in the trailer subshell

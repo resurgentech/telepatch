@@ -181,6 +181,9 @@ struct V {
     allow: bool,
     /// A plain file written first, to prove a blocked host applies nothing.
     first: Option<String>,
+    /// `.retry(n)` and `.timeout(d)` on the fetch.
+    retry: Option<u32>,
+    timeout: Option<std::time::Duration>,
 }
 
 impl V {
@@ -195,6 +198,8 @@ impl V {
             owner: None,
             allow: false,
             first: None,
+            retry: None,
+            timeout: None,
         }
     }
     fn unpack(url: &str, sum: &str, target: &Path, strip: u32) -> V {
@@ -215,6 +220,12 @@ fn pb_fetch(h: Host<V>) -> PlaybookFuture {
         let mut f = h.fetch(&v.url);
         if let Some(s) = &v.sum {
             f = f.sha256(s);
+        }
+        if let Some(n) = v.retry {
+            f = f.retry(n);
+        }
+        if let Some(d) = v.timeout {
+            f = f.timeout(d);
         }
         let o = h.file(&v.target);
         if v.unpack {
@@ -1436,4 +1447,272 @@ fn fetch_plan() {
     assert!(plan.contains("$__tp_run"), "{plan}");
 
     insta::assert_snapshot!("fetch_plan", plan);
+}
+
+// --- T113: .retry and .timeout on a fetch ---
+
+const SECS: fn(u64) -> std::time::Duration = std::time::Duration::from_secs;
+
+impl Env {
+    /// A `curl` for these tests, in `<d>/bin` ahead of the real PATH. Each
+    /// call is logged (`curl <args>`). Calls up to the `fail_first`-th
+    /// fail with rc 7. Then it serves `www/<name>`, or, with `hang`, it
+    /// sleeps `sleep <hang>` (an odd number, so the test can look for the
+    /// process) instead of answering: with `honours`, it behaves as curl
+    /// does under `--max-time m` (gives up after `m` seconds with rc 28);
+    /// without, it ignores the flag.
+    fn curl_that(&self, fail_first: u32, hang: Option<u32>, honours: bool) -> String {
+        let bin = self.p("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let dd = self.d.path().display();
+        let hang_part = match hang {
+            None => String::new(),
+            Some(n) if honours => format!(
+                "if [ -n \"$max\" ]; then sleep \"$max\"; echo 'curl: (28) Operation timed out' >&2; exit 28; fi\nsleep {n}\n"
+            ),
+            Some(n) => format!("sleep {n}\n"),
+        };
+        let body = format!(
+            r#"D={dd}
+out=; url=; max=
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -o) out=$2; shift 2;;
+    --max-time) max=$2; shift 2;;
+    --) url=$2; shift 2;;
+    *) shift;;
+  esac
+done
+echo "curl max=$max $url" >> $D/log
+{hang_part}n=$(wc -l < $D/log)
+if [ "$n" -le {fail_first} ]; then echo "curl: (7) Failed to connect" >&2; exit 7; fi
+cp "$D/www/${{url#http://fake/}}" "$out""#
+        );
+        let f = bin.join("curl");
+        std::fs::write(&f, format!("#!/bin/bash\n{body}\n")).unwrap();
+        std::fs::set_permissions(&f, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        format!("{}:{}", bin.display(), std::env::var("PATH").unwrap())
+    }
+}
+
+fn limited(e: &Env, retry: Option<u32>, timeout: Option<std::time::Duration>) -> V {
+    e.serve("a", FILE.as_bytes());
+    let mut v = V::from(
+        "http://fake/a",
+        Some(&sha256(FILE.as_bytes())),
+        &e.p("out/a"),
+    );
+    v.retry = retry;
+    v.timeout = timeout;
+    v
+}
+
+#[test]
+fn a_retried_fetch_downloads_again_after_a_failure_and_places_the_file() {
+    let e = Env::new();
+    let v = limited(&e, Some(2), Some(SECS(30)));
+    let path = e.curl_that(1, None, true);
+    let (r, out) = e.go(&v, &path);
+    assert_eq!(status(&r), &HostStatus::Changed, "{out}\n{}", r.render());
+    assert_eq!(std::fs::read_to_string(e.p("out/a")).unwrap(), FILE);
+    assert_eq!(e.log().lines().count(), 2, "{}", e.log());
+    e.assert_clean();
+}
+
+#[test]
+fn a_fetch_without_retry_gives_up_after_one_failure() {
+    let e = Env::new();
+    let v = limited(&e, None, Some(SECS(30)));
+    let path = e.curl_that(1, None, true);
+    let (r, out) = e.go(&v, &path);
+    let HostStatus::Blocked(why) = status(&r) else {
+        panic!("{:?}\n{out}", status(&r));
+    };
+    assert!(why.contains("download failed (curl rc 7)"), "{why}");
+    assert_eq!(e.log().lines().count(), 1);
+}
+
+#[test]
+fn a_checksum_mismatch_is_not_retried() {
+    let e = Env::new();
+    let mut v = limited(&e, Some(3), Some(SECS(30)));
+    v.sum = Some(sha256(b"something else"));
+    let path = e.curl_that(0, None, true);
+    let (r, out) = e.go(&v, &path);
+    let HostStatus::Blocked(why) = status(&r) else {
+        panic!("{:?}\n{out}", status(&r));
+    };
+    assert!(why.contains("sha256 mismatch"), "{why}");
+    assert_eq!(e.log().lines().count(), 1, "{}", e.log());
+}
+
+#[test]
+fn every_attempt_is_bounded_by_the_downloader_s_own_flag_and_the_default_is_ten_minutes() {
+    let e = Env::new();
+    let path = e.curl_that(0, None, true);
+    let v = limited(&e, None, Some(SECS(45)));
+    let (r, out) = e.go(&v, &path);
+    assert_eq!(status(&r), &HostStatus::Changed, "{out}\n{}", r.render());
+    assert!(e.log().contains("curl max=45 http://fake/a"), "{}", e.log());
+    let e2 = Env::new();
+    let path = e2.curl_that(0, None, true);
+    let v = limited(&e2, None, None);
+    let (r, out) = e2.go(&v, &path);
+    assert_eq!(status(&r), &HostStatus::Changed, "{out}\n{}", r.render());
+    assert!(
+        e2.log().contains("curl max=600 http://fake/a"),
+        "{}",
+        e2.log()
+    );
+}
+
+#[test]
+fn a_fetch_that_hangs_is_stopped_by_curl_max_time_and_blocks_naming_it() {
+    let e = Env::new();
+    let v = limited(&e, None, Some(SECS(1)));
+    let path = e.curl_that(0, Some(977), true);
+    let t = std::time::Instant::now();
+    let (r, out) = e.go(&v, &path);
+    assert!(t.elapsed() < SECS(20), "{:?}", t.elapsed());
+    let HostStatus::Blocked(why) = status(&r) else {
+        panic!("{:?}\n{out}", status(&r));
+    };
+    assert_eq!(
+        why,
+        "fetch http://fake/a: download timed out after 1s (window 1)"
+    );
+    assert!(!e.p("out/a").exists());
+    e.assert_clean();
+}
+
+#[test]
+fn a_timed_out_download_is_retried_with_a_fresh_flag_each_time() {
+    let e = Env::new();
+    let v = limited(&e, Some(1), Some(SECS(1)));
+    let path = e.curl_that(0, Some(977), true);
+    let (r, out) = e.go(&v, &path);
+    let HostStatus::Blocked(why) = status(&r) else {
+        panic!("{:?}\n{out}", status(&r));
+    };
+    assert!(why.contains("download timed out after 1s"), "{why}");
+    assert_eq!(e.log().lines().count(), 2, "{}", e.log());
+}
+
+#[test]
+fn a_wget_timeout_blocks_as_a_timed_out_download() {
+    let e = Env::new();
+    let v = limited(&e, None, Some(SECS(1)));
+    let bin = e.p("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let wget = bin.join("wget");
+    // wget's `--timeout=n` bounds a stall; on one it exits 4.
+    std::fs::write(
+        &wget,
+        format!(
+            "#!/bin/bash\necho \"wget $*\" >> {}/log\necho 'failed: Connection timed out.' >&2\nexit 4\n",
+            e.d.path().display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&wget, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    let farm = e.farm_without(&["curl", "wget"]);
+    let (r, out) = e.go(&v, &format!("{}:{}", bin.display(), farm.display()));
+    let HostStatus::Blocked(why) = status(&r) else {
+        panic!("{:?}\n{out}", status(&r));
+    };
+    assert_eq!(
+        why,
+        "fetch http://fake/a: download timed out after 1s (window 1)"
+    );
+    assert!(e.log().contains("--timeout=1"), "{}", e.log());
+}
+
+/// Is a process whose command line has `needle` running?
+fn running(needle: &str) -> bool {
+    Command::new("pgrep")
+        .args(["-f", needle])
+        .output()
+        .map(|o| !o.stdout.is_empty())
+        .unwrap_or(false)
+}
+
+#[test]
+fn a_curl_that_ignores_max_time_is_stopped_by_the_controller_and_nothing_is_left() {
+    let e = Env::new();
+    // The bound is (1 s + 5 s) for the one attempt plus 30 s of slack.
+    let v = limited(&e, None, Some(SECS(1)));
+    let path = e.curl_that(0, Some(978), false);
+    let t = std::time::Instant::now();
+    let (r, out) = e.go(&v, &path);
+    let took = t.elapsed();
+    let HostStatus::Blocked(why) = status(&r) else {
+        panic!("{:?}\n{out}", status(&r));
+    };
+    assert_eq!(
+        why,
+        "fetch http://fake/a: download timed out after 1s (stopped by the controller) (window 1)"
+    );
+    assert!(took >= SECS(30), "stopped before its bound: {took:?}");
+    assert!(took < SECS(60), "{took:?}");
+    assert!(!running("sleep 978"), "the download was left running");
+    assert!(!e.p("out/a").exists());
+    e.assert_clean();
+}
+
+#[test]
+fn a_zero_fetch_timeout_is_a_trace_error() {
+    let h = host();
+    h.file("/a").from(
+        h.fetch("https://example.com/x")
+            .sha256(SUM)
+            .timeout(std::time::Duration::ZERO),
+    );
+    assert_eq!(
+        errors(&h),
+        ["file /a: fetch https://example.com/x: timeout(..): the duration must be more than zero"]
+    );
+}
+
+fn pb_two_limits(h: Host<V>) -> PlaybookFuture {
+    Box::pin(async move {
+        let v = h.vars.clone();
+        let sum = v.sum.clone().unwrap();
+        let f1 = h.fetch(&v.url).sha256(&sum).timeout(SECS(5)).retry(0);
+        let f2 = h.fetch(&v.url).sha256(&sum).timeout(SECS(45)).retry(1);
+        h.file(&format!("{}.1", v.target)).from(&f1);
+        h.file(&format!("{}.2", v.target)).from(&f2);
+        Ok(())
+    })
+}
+
+#[test]
+fn two_fetches_of_one_url_download_once_with_the_longest_timeout() {
+    let e = Env::new();
+    let v = limited(&e, None, None);
+    let path = e.curl_that(0, None, true);
+    e.clear_log();
+    let out = Rc::new(RefCell::new(String::new()));
+    let r = run(
+        &Playbook::new("fetch", pb_two_limits),
+        vec![HostSpec {
+            groups: Vec::new(),
+            name: "h1".into(),
+            target: Target::Local(
+                LocalTransport::new()
+                    .uid(0)
+                    .env("PATH", &path)
+                    .env("TMPDIR", &e.p("tmp").display().to_string())
+                    .env("TP_FETCH_STAGE", &e.p("stage").display().to_string())
+                    .env("TP_FETCH_CACHE", &e.p("cache").display().to_string()),
+            ),
+            vars: v,
+        }],
+        RunOpts {
+            log: None,
+            stdout: Stdout::Capture(out.clone()),
+        },
+    );
+    assert_eq!(status(&r), &HostStatus::Changed, "{}", r.render());
+    assert_eq!(e.log().lines().count(), 1, "{}", e.log());
+    assert!(e.log().contains("curl max=45 "), "{}", e.log());
 }

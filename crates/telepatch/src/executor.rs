@@ -796,6 +796,63 @@ impl Watch {
     }
 }
 
+/// How a probe under the controller's clock ended ([`probe_bounded`]).
+#[derive(Debug)]
+pub enum Bounded {
+    /// The probe's own trailer came: its rc and output.
+    Done(i32, String),
+    /// The controller stopped it, with the output it had printed.
+    Stopped(Stopped, String),
+}
+
+/// Run `script` in `sh` as a plain probe (as [`prepare::probe`] does) under
+/// the same watchdog as an op ([`Watch`]): its clock is `limit` from its
+/// start line; on expiry the second shell kills its process group. The
+/// probe is the only op in flight, so the helper's queue is one op long.
+/// `Err` is a shell that died, not a stop.
+pub async fn probe_bounded(
+    sh: &mut Shell,
+    killer: &mut Killer,
+    bounds: KillBounds,
+    id: usize,
+    script: &str,
+    limit: Duration,
+) -> Result<Bounded, String> {
+    let wrapped = wrap(
+        OpKind::Sh,
+        &crate::ops::shell::raw_body(script),
+        id,
+        sh.nonce(),
+    );
+    sh.send(id, &wrapped).await.map_err(|e| e.to_string())?;
+    let mut watch = Watch::new(bounds, [(id, limit)]);
+    let mut out: Vec<u8> = Vec::new();
+    loop {
+        match watch.next(sh, killer).await {
+            Tick::Event(Event::Output(i, b)) if i == id => out.extend_from_slice(&b),
+            Tick::Event(Event::Done(i, t)) if i == id => {
+                let rc = t
+                    .typed::<crate::trailer::ShellResult>()
+                    .map_err(|e| e.to_string())?
+                    .rc;
+                return Ok(Bounded::Done(
+                    rc,
+                    String::from_utf8_lossy(&out).into_owned(),
+                ));
+            }
+            Tick::Event(Event::Failed(i, e)) if i == id => return Err(e.to_string()),
+            Tick::Event(_) => {}
+            Tick::Stopped { why, .. } => {
+                return Ok(Bounded::Stopped(
+                    why,
+                    String::from_utf8_lossy(&out).into_owned(),
+                ));
+            }
+            Tick::Idle => return Err("shell ended without a result".to_string()),
+        }
+    }
+}
+
 /// Why `target` could not open `who`'s shell on `host`, from the `Limit`
 /// and (SSH) the ssh-side text.
 fn refusal(target: &Target, host: &str, who: &Principal, limit: Option<Limit>) -> String {
@@ -843,6 +900,10 @@ impl prepare::ShellSet for HostShells {
             Principal::Root => Some(&mut self.root),
             Principal::User(u) => self.users.get_mut(u),
         }
+    }
+
+    fn watched_shell(&mut self, who: &Principal) -> Option<(&mut Shell, &mut Killer)> {
+        self.watched(who)
     }
 
     async fn open_user(&mut self, u: &str) -> Result<(), String> {
@@ -1396,6 +1457,7 @@ fn describe(op: &OpNode) -> String {
         OpSpec::Git(g) if g.path.is_empty() => format!("git {}", g.url),
         OpSpec::Git(g) => format!("git {}", g.path),
         OpSpec::Resource(r) => format!("{} {}", r.kind, r.name),
+        OpSpec::Wait(w) => format!("wait_for {}", w.describe()),
         OpSpec::File(f) if f.is_secret() => format!("file {} (secret)", f.path),
         OpSpec::File(f) => {
             use crate::ops::file::FileKind;
@@ -1482,6 +1544,28 @@ fn parse_result(kind: OpKind, t: &Trailer) -> Result<Parsed, String> {
             .map(|r| (r.rc, r.changed, false, None, false, String::new())),
     };
     r.map_err(|e| format!("unreadable result {:?}: {e}", t.json))
+}
+
+/// `timed out after 2s` when a `wait_for` failed with rc 124, what its
+/// body exits with at its own deadline; empty for everything else. (The
+/// controller's timeouts are never keyed on an rc: they come as
+/// [`Stopped`].)
+fn timed_out(w: &WindowOp, rc: i32) -> String {
+    if rc == 124 && matches!(w.node.spec, OpSpec::Wait(_)) {
+        format!(
+            "timed out after {}",
+            crate::trace::fmt_duration(w.node.effective_timeout())
+        )
+    } else {
+        String::new()
+    }
+}
+
+/// How long the controller waits before attempt `k + 1` of a retried op,
+/// `k` being the attempt that just failed (1-based): 1, 2, 4 .. 30
+/// seconds.
+pub fn retry_wait(k: u32) -> Duration {
+    Duration::from_secs((1u64 << k.saturating_sub(1).min(5)).min(30))
 }
 
 fn last_lines(bytes: &[u8], n: usize) -> String {
@@ -1900,6 +1984,37 @@ impl HostExec {
         if self.verdict.is_none() {
             self.verdict = Some(HostStatus::Blocked(why));
         }
+    }
+
+    /// After attempt `k` of `w` failed (`why`) with retries left: the
+    /// stream line and event, the wait, then the same gated `script` as a
+    /// new send, with the halt flag cleared first (the failed attempt set
+    /// it). The new send gets its own start line and clock.
+    async fn resend(
+        &mut self,
+        who: &Principal,
+        w: &WindowOp,
+        script: &str,
+        k: u32,
+        why: &str,
+    ) -> Result<(), String> {
+        let wait = retry_wait(k);
+        let of = w.node.retry + 1;
+        self.sink.line(&format!(
+            "{} | attempt {k} of {of} failed ({why}); retrying in {}s",
+            self.name,
+            wait.as_secs()
+        ));
+        self.sink
+            .event(json!({"ev":"op_retry","host":self.name,"id":w.id.0,
+            "attempt":k,"of":of,"why":why,"wait_s":wait.as_secs()}));
+        tokio::time::sleep(wait).await;
+        let sh = self
+            .shell_for(who)
+            .ok_or_else(|| "no shell to send the retry to".to_string())?;
+        sh.send(w.id.0, &format!("unset __tp_halt\n{script}"))
+            .await
+            .map_err(|e| e.to_string())
     }
 
     /// Print the header (once) and log `op_start`.
@@ -2375,6 +2490,7 @@ impl Executor for HostExec {
                 allowed: Vec::new(),
                 at_end: false,
                 timeout: None,
+                retry: 0,
             };
             let id = self.seq;
             let who = &q.run_as.principal;
@@ -2643,10 +2759,15 @@ impl Executor for HostExec {
         let mut s = 0;
         while s < window.ops.len() {
             let who = &window.ops[s].node.run_as.principal;
-            let e = window.ops[s..]
+            let mut e = window.ops[s..]
                 .iter()
                 .position(|w| w.node.run_as.principal != *who)
                 .map_or(window.ops.len(), |n| s + n);
+            // An op with retries ends its run: the controller sends it
+            // again after a failure, so nothing may be queued behind it.
+            if let Some(n) = window.ops[s..e].iter().position(|w| w.node.retry > 0) {
+                e = s + n + 1;
+            }
             runs.push((s, e));
             s = e;
         }
@@ -2733,6 +2854,8 @@ impl Executor for HostExec {
             })
             .collect();
         let mut done = vec![false; window.ops.len()];
+        // Attempts that failed and were sent again, per op ([`HostExec::resend`]).
+        let mut attempts = vec![0u32; window.ops.len()];
         let mut failed_seen = false;
         let mut send_err = None;
 
@@ -2785,7 +2908,7 @@ impl Executor for HostExec {
             };
             let mut watch = Watch::new(
                 KillBounds::POLICY,
-                timed.iter().map(|w| (w.id.0, w.node.effective_timeout())),
+                timed.iter().map(|w| (w.id.0, w.node.enforced_timeout())),
             );
             loop {
                 let tick = match self.shells.watched(&who) {
@@ -2817,6 +2940,28 @@ impl Executor for HostExec {
                                 true,
                             ),
                         };
+                        let again = !failed_seen
+                            && !drop_host
+                            && w.node.retry > attempts[i]
+                            && i + 1 == end;
+                        if again {
+                            attempts[i] += 1;
+                            live[i].tail.clear();
+                            done[i] = false;
+                            match self
+                                .resend(&who, w, &gated[i - start], attempts[i], &note)
+                                .await
+                            {
+                                Ok(()) => {
+                                    watch = Watch::new(
+                                        KillBounds::POLICY,
+                                        [(w.id.0, w.node.enforced_timeout())],
+                                    );
+                                }
+                                Err(e) => send_err = Some(e),
+                            }
+                            continue;
+                        }
                         if failed_seen {
                             self.finish_op(w, &descs[i], Outcome::NotRun, 0, false, "");
                         } else if w.node.allow_fail && !drop_host {
@@ -2915,20 +3060,47 @@ impl Executor for HostExec {
                                             }
                                         }
                                     }
+                                } else if w.node.retry > attempts[i] && i + 1 == end {
+                                    attempts[i] += 1;
+                                    live[i].tail.clear();
+                                    done[i] = false;
+                                    let why = match timed_out(w, rc) {
+                                        t if t.is_empty() => format!("rc {rc}"),
+                                        t => t,
+                                    };
+                                    match self
+                                        .resend(&who, w, &gated[i - start], attempts[i], &why)
+                                        .await
+                                    {
+                                        Ok(()) => {
+                                            watch = Watch::new(
+                                                KillBounds::POLICY,
+                                                [(w.id.0, w.node.enforced_timeout())],
+                                            );
+                                        }
+                                        Err(e) => send_err = Some(e),
+                                    }
                                 } else if w.node.allow_fail {
+                                    let why = timed_out(w, rc);
                                     self.finish_op(
                                         w,
                                         &descs[i],
                                         Outcome::AllowedFail,
                                         rc,
                                         false,
-                                        "",
+                                        &why,
                                     );
                                 } else {
                                     failed_seen = true;
                                     let tail = last_lines(&live[i].tail, TAIL_LINES);
-                                    self.finish_op(w, &descs[i], Outcome::Failed, rc, false, "");
-                                    self.fail(w, &descs[i], rc, tail);
+                                    let why = timed_out(w, rc);
+                                    self.finish_op(w, &descs[i], Outcome::Failed, rc, false, &why);
+                                    let op = if why.is_empty() {
+                                        descs[i].clone()
+                                    } else {
+                                        format!("{}, {why}", descs[i])
+                                    };
+                                    self.fail(w, &op, rc, tail);
                                 }
                             }
                             Err(msg) => {
@@ -3148,6 +3320,12 @@ pub fn run_with<V: 'static>(
 mod tests {
     use super::*;
 
+    #[test]
+    fn the_wait_between_attempts_is_1_2_4_up_to_30_seconds() {
+        let got: Vec<u64> = (1..=9).map(|k| retry_wait(k).as_secs()).collect();
+        assert_eq!(got, [1, 2, 4, 8, 16, 30, 30, 30, 30]);
+    }
+
     fn subjects(v: &[(usize, &str)]) -> HashMap<NodeId, String> {
         v.iter().map(|(i, s)| (NodeId(*i), s.to_string())).collect()
     }
@@ -3247,6 +3425,7 @@ mod tests {
                 allowed: Vec::new(),
                 at_end: false,
                 timeout: None,
+                retry: 0,
             },
         }
     }
@@ -3443,6 +3622,36 @@ mod watchdog_tests {
             panic!("{ev:?}")
         };
         assert_eq!(t.typed::<ShellResult>().unwrap().rc, 0);
+    }
+
+    #[tokio::test]
+    async fn a_probe_under_the_watchdog_returns_its_output_and_a_stuck_one_is_stopped() {
+        let t = local_target();
+        let mut sh = shell(&t).await;
+        let mut k = Killer::new(t.clone(), "local".into());
+        let (ms, secs) = (Duration::from_millis, Duration::from_secs);
+        // Inside its limit: the probe's rc and output.
+        match probe_bounded(&mut sh, &mut k, bounds(), 1, "echo hi; exit 3", secs(10)).await {
+            Ok(Bounded::Done(3, out)) => assert_eq!(out.trim(), "hi"),
+            other => panic!("{other:?}"),
+        }
+        // Past it: stopped, with what it printed, and no process left.
+        let t0 = std::time::Instant::now();
+        let r = probe_bounded(
+            &mut sh,
+            &mut k,
+            bounds(),
+            2,
+            "echo partial; sleep 303 & sleep 304 & wait",
+            ms(300),
+        )
+        .await;
+        let Ok(Bounded::Stopped(Stopped::TimedOut { .. }, out)) = r else {
+            panic!("{r:?}")
+        };
+        assert_eq!(out.trim(), "partial");
+        assert!(t0.elapsed() < secs(5), "{:?}", t0.elapsed());
+        next_op_runs(&mut sh, &mut k, 3).await;
     }
 
     #[tokio::test]

@@ -581,6 +581,8 @@ pub fn prepared(
         url: url.to_string(),
         sum: (!sum.is_empty()).then(|| sum.to_string()),
         unpack: false,
+        retry: 0,
+        timeout: None,
     };
     let state = match fetch::parse(std::slice::from_ref(&item), out).remove(0) {
         Found::Blocked(why) => return Err(blocked(&why)),

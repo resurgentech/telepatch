@@ -15,3 +15,4 @@ pub mod shell;
 pub mod svc;
 pub mod unit;
 pub mod user;
+pub mod wait;

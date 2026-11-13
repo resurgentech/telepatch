@@ -5,17 +5,17 @@
 //!    a barrier. A repo op and a cargo op each also conflict with every
 //!    distro `pkg` op, both ways.
 //! 2. Merge: `pkg` ops with the same manager, mode, wanted, `RunAs`, guard
-//!    `allow_fail` and `timeout` (a limit is part of equality) are folded
+//!    `allow_fail`, `retry` and `timeout` (a limit is part of equality) are folded
 //!    into the earliest one when
 //!    [`Graph::hoist_is_safe`] holds, i.e. no other item between the
 //!    earliest and the latest member has an edge to a member. Rustup ops
 //!    (same user, toolchain, profile, installer, `RunAs`, guard and
-//!    `allow_fail` and `timeout`; any wanted, the merged op wanting the stronger) use
+//!    `allow_fail`, `retry` and `timeout`; any wanted, the merged op wanting the stronger) use
 //!    [`Graph::rustup_hoist_is_safe`] instead: only the moving op's
 //!    effects are checked, and of those only what it adds to the earlier
 //!    op. Then guarded
 //!    ops with an equal spec (any kind except a resource, which never
-//!    merges), `RunAs`, `allow_fail` and `timeout` are folded
+//!    merges), `RunAs`, `allow_fail`, `retry` and `timeout` are folded
 //!    (svc units compared by key, so a restart of `docker` and one of
 //!    `docker.service` are equal; a restart and a reload are not)
 //!    into the latest one, their guards or-joined, when
@@ -112,6 +112,7 @@ struct MergeKey {
     guard: Option<Guard>,
     allow_fail: bool,
     timeout: Option<std::time::Duration>,
+    retry: u32,
 }
 
 fn merge_key(item: &Item) -> Option<MergeKey> {
@@ -130,6 +131,7 @@ fn merge_key(item: &Item) -> Option<MergeKey> {
             guard: w.node.guard.clone(),
             allow_fail: w.node.allow_fail,
             timeout: w.node.timeout,
+            retry: w.node.retry,
         }),
         _ => None,
     }
@@ -143,6 +145,7 @@ struct SameKey {
     run_as: RunAs,
     allow_fail: bool,
     timeout: Option<std::time::Duration>,
+    retry: u32,
 }
 
 fn same_key(item: &Item) -> Option<SameKey> {
@@ -168,6 +171,7 @@ fn same_key(item: &Item) -> Option<SameKey> {
         run_as: w.node.run_as.clone(),
         allow_fail: w.node.allow_fail,
         timeout: w.node.timeout,
+        retry: w.node.retry,
     })
 }
 
@@ -531,6 +535,7 @@ mod tests {
                 allowed: Vec::new(),
                 at_end: false,
                 timeout: None,
+                retry: 0,
                 spec,
             },
             members: vec![Member {
@@ -634,6 +639,17 @@ mod tests {
         let g = optimize(vec![with(pkg(0, "a"), t(5)), pkg(1, "b")]);
         assert_eq!(ids(g), [vec![0], vec![1]]);
         let g = optimize(vec![with(pkg(0, "a"), t(5)), with(pkg(1, "b"), t(5))]);
+        assert_eq!(ids(g), [vec![0, 1]]);
+    }
+
+    #[test]
+    fn a_different_retry_blocks_a_pkg_merge_and_an_equal_one_merges() {
+        let r = |n: u32| move |o: &mut OpNode| o.retry = n;
+        let g = optimize(vec![with(pkg(0, "a"), r(1)), with(pkg(1, "b"), r(2))]);
+        assert_eq!(ids(g), [vec![0], vec![1]]);
+        let g = optimize(vec![with(pkg(0, "a"), r(1)), pkg(1, "b")]);
+        assert_eq!(ids(g), [vec![0], vec![1]]);
+        let g = optimize(vec![with(pkg(0, "a"), r(2)), with(pkg(1, "b"), r(2))]);
         assert_eq!(ids(g), [vec![0, 1]]);
     }
 

@@ -44,6 +44,7 @@
 //! changes.
 
 use std::borrow::Borrow;
+use std::time::Duration;
 
 use crate::engine::Window;
 use crate::host::Host;
@@ -63,9 +64,42 @@ pub struct Fetched {
     /// Download on the controller and stream the bytes, instead of fetching
     /// on the host. For an air-gapped host.
     pub via_controller: bool,
+    /// Download again up to this many more times when a download attempt
+    /// fails (not on a checksum mismatch).
+    pub retry: u32,
+    /// Stop one download attempt after this long; `None`: the default,
+    /// [`DEFAULT_TIMEOUT`].
+    pub timeout: Option<Duration>,
 }
 
+/// How long one download attempt may take when the fetch sets no
+/// `.timeout(..)`: ten minutes, like an `sh` or `git` op.
+pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+
 impl Fetched {
+    /// Try the download up to `n` more times when it fails, waiting 1, 2,
+    /// 4 .. 30 seconds between tries. A checksum mismatch is not retried.
+    /// Of several ops fetching the same url and sum, the largest count
+    /// counts.
+    #[track_caller]
+    pub fn retry(mut self, n: u32) -> Fetched {
+        self.retry = n;
+        self
+    }
+
+    /// Stop one download attempt after `d`. Two bounds apply: the
+    /// downloader's own flag on each attempt (`curl --max-time d`, `wget
+    /// --timeout=d`, which bounds a stall, not the total), and, behind
+    /// it, the controller's watchdog on the whole prepare probe, in case
+    /// the flag fails ([`controller_deadline`]). Without it an attempt
+    /// has [`DEFAULT_TIMEOUT`]. Of several ops fetching the same url and
+    /// sum, the longest counts.
+    #[track_caller]
+    pub fn timeout(mut self, d: Duration) -> Fetched {
+        self.timeout = Some(d);
+        self
+    }
+
     /// The checksum the download must have: 64 hex digits, either case.
     #[track_caller]
     pub fn sha256(mut self, sum: impl AsRef<str>) -> Fetched {
@@ -90,6 +124,12 @@ impl Fetched {
     pub(crate) fn problem(&self) -> Option<String> {
         if self.url.trim().is_empty() {
             return Some("fetch has no url".to_string());
+        }
+        if self.timeout.is_some_and(|d| d.is_zero()) {
+            return Some(format!(
+                "fetch {}: timeout(..): the duration must be more than zero",
+                self.url
+            ));
         }
         match &self.sha256 {
             Some(s) if !valid_sum(s) => Some(format!(
@@ -140,6 +180,8 @@ impl<V> Host<V> {
             url: url.as_ref().to_string(),
             sha256: None,
             via_controller: false,
+            retry: 0,
+            timeout: None,
         }
     }
 }
@@ -206,24 +248,36 @@ pub struct Item {
     pub sum: Option<String>,
     /// Some op unpacks it: the archive format and its tool are checked.
     pub unpack: bool,
+    /// The most any op's fetch of it asks for ([`Fetched::retry`]).
+    pub retry: u32,
+    /// The longest any op's fetch of it asks for ([`Fetched::timeout`]);
+    /// `None` when none set one.
+    pub timeout: Option<Duration>,
 }
 
-/// A download this op needs: `(url, sum, unpack)`. File ops and a package
-/// installed from a fetched file.
-fn op_fetch(spec: &OpSpec) -> Option<(&str, &Option<String>, bool)> {
+impl Item {
+    /// The limit of one attempt: the fetch's own, else the default.
+    pub fn attempt_timeout(&self) -> Duration {
+        self.timeout.unwrap_or(DEFAULT_TIMEOUT)
+    }
+}
+
+/// A download this op needs: `(url, sum, unpack)` and its fetch's
+/// `(retry, timeout)`. File ops and a package installed from a fetched
+/// file.
+type Want<'a> = (&'a str, &'a Option<String>, bool, u32, Option<Duration>);
+
+fn op_fetch(spec: &OpSpec) -> Option<Want<'_>> {
+    fn of(f: &Fetched, unpack: bool) -> Want<'_> {
+        (f.url.as_str(), &f.sha256, unpack, f.retry, f.timeout)
+    }
     match spec {
         OpSpec::File(f) => f
             .src
             .as_ref()
             .filter(|s| !s.fetched.via_controller)
-            .map(|s| {
-                (
-                    s.fetched.url.as_str(),
-                    &s.fetched.sha256,
-                    s.unpack.is_some(),
-                )
-            }),
-        OpSpec::Pkg(p) => p.file.as_ref().map(|f| (f.url.as_str(), &f.sha256, false)),
+            .map(|s| of(&s.fetched, s.unpack.is_some())),
+        OpSpec::Pkg(p) => p.file.as_ref().map(|f| of(f, false)),
         _ => None,
     }
 }
@@ -233,22 +287,139 @@ fn op_fetch(spec: &OpSpec) -> Option<(&str, &Option<String>, bool)> {
 pub fn items(window: &Window) -> Vec<Item> {
     let mut out: Vec<Item> = Vec::new();
     for op in &window.ops {
-        let Some((url, sum, unpack)) = op_fetch(&op.node.spec) else {
+        let Some((url, sum, unpack, retry, timeout)) = op_fetch(&op.node.spec) else {
             continue;
         };
         match out
             .iter_mut()
             .find(|i| i.url == url && i.sum.as_ref() == sum.as_ref())
         {
-            Some(i) => i.unpack |= unpack,
+            Some(i) => {
+                i.unpack |= unpack;
+                i.retry = i.retry.max(retry);
+                i.timeout = i.timeout.max(timeout);
+            }
             None => out.push(Item {
                 url: url.to_string(),
                 sum: sum.clone(),
                 unpack,
+                retry,
+                timeout,
             }),
         }
     }
     out
+}
+
+/// The most extra time the controller allows an attempt beyond its own
+/// limit, before the downloader's flag is judged to have failed.
+const ATTEMPT_GRACE: Duration = Duration::from_secs(5);
+
+/// The controller's slack on top of a fetch probe's attempts.
+const PROBE_SLACK: Duration = Duration::from_secs(30);
+
+/// How long the controller lets the whole fetch probe of `items` run
+/// before it stops it (the outer bound; the downloader's own flag is the
+/// inner one). The probe runs its items one after another, so the bound
+/// adds them up: for each item, `(retry + 1)` attempts of `timeout + 5 s`
+/// and the waits between them (1, 2, 4 .. 30 s,
+/// [`crate::executor::retry_wait`]), then 30 s of slack.
+pub fn controller_deadline(items: &[Item]) -> Duration {
+    let mut total = PROBE_SLACK;
+    for it in items {
+        total += (it.attempt_timeout() + ATTEMPT_GRACE) * (it.retry + 1);
+        total += (1..=it.retry)
+            .map(crate::executor::retry_wait)
+            .sum::<Duration>();
+    }
+    total
+}
+
+/// The reason the host is blocked when the controller stopped the fetch
+/// probe of `items` (`why`), which printed `out` first: every item with no
+/// answer line in `out`, named with its limit.
+pub fn stopped(
+    items: &[Item],
+    out: &str,
+    why: &crate::executor::Stopped,
+    limit: Duration,
+) -> String {
+    use crate::executor::Stopped;
+    let missing: Vec<&Item> = items
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| {
+            let pre = format!("fetch {i} ");
+            !out.lines().any(|l| l.starts_with(pre.as_str()))
+        })
+        .map(|(_, it)| it)
+        .collect();
+    let what = |it: &Item| -> String {
+        let d = crate::trace::fmt_duration(it.attempt_timeout());
+        match why {
+            Stopped::TimedOut { .. } | Stopped::EndedWithoutResult => {
+                format!(
+                    "fetch {}: download timed out after {d} (stopped by the controller)",
+                    it.url
+                )
+            }
+            Stopped::NoSecondShell(_) => format!(
+                "fetch {}: download timed out after {d}; no second shell to stop it",
+                it.url
+            ),
+            Stopped::NeverStarted => format!(
+                "fetch {}: the download never started within {}; shell dropped",
+                it.url,
+                crate::trace::fmt_duration(limit)
+            ),
+        }
+    };
+    missing
+        .iter()
+        .map(|it| what(it))
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+/// Added to the prepare script: `curl` and `wget` become functions that
+/// run the real tool with its own time limit (`curl --max-time`, `wget
+/// --timeout=`, `tp_lt` seconds, per attempt) and again after a failure
+/// (`tp_lr` more times, waiting 1, 2, 4 .. 30 seconds). No coreutils
+/// `timeout`. A curl rc 28 or a wget that says it timed out ends as rc
+/// 124 (`tp_lim`'s own word for it, which neither tool uses), so the
+/// answer line can say the download timed out. `command` skips the
+/// function; `tp_one` is the same text as without limits and calls them
+/// by name.
+const LIMITS: &str = r#"tp_lim() {
+  local n=0 d=1 rc t=$1 o; shift
+  while :; do
+    if [ "$t" = curl ]; then
+      command curl --max-time "$tp_lt" "$@"; rc=$?
+      if [ "$rc" -eq 28 ]; then rc=124; fi
+    else
+      o=$(command wget --timeout="$tp_lt" "$@" 2>&1); rc=$?
+      printf '%s
+' "$o"
+      if [ "$rc" -ne 0 ] && printf %s "$o" | grep -qi 'timed out'; then rc=124; fi
+    fi
+    if [ "$rc" -eq 0 ] || [ "$n" -ge "$tp_lr" ]; then return "$rc"; fi
+    n=$((n+1)); sleep "$d"; d=$((d*2)); [ "$d" -le 30 ] || d=30
+  done
+}
+curl() { tp_lim curl "$@"; }
+wget() { tp_lim wget "$@"; }
+"#;
+
+/// `timeout`'s duration argument for the downloader flags: seconds, with
+/// milliseconds when it has some, at least a millisecond.
+fn secs_arg(d: Duration) -> String {
+    let d = d.max(Duration::from_millis(1));
+    let (s, ms) = (d.as_secs(), d.subsec_millis());
+    if ms == 0 {
+        s.to_string()
+    } else {
+        format!("{s}.{ms:03}").trim_end_matches('0').to_string()
+    }
 }
 
 /// The prepare script for `items`, one `fetch <i> <word> ..` line each:
@@ -256,9 +427,12 @@ pub fn items(window: &Window) -> Vec<Item> {
 /// <message>`, `notool`, `badarchive`, `needtool <name>`.
 pub fn prepare_script(items: &[Item]) -> String {
     let mut s = prelude();
+    s.push_str(LIMITS);
     for (i, it) in items.iter().enumerate() {
         s.push_str(&format!(
-            "tp_one {i} {} {} {}\n",
+            "tp_lt={} tp_lr={}\ntp_one {i} {} {} {}\n",
+            secs_arg(it.attempt_timeout()),
+            it.retry,
             quote(&it.url),
             quote(it.sum.as_deref().unwrap_or("")),
             if it.unpack { 1 } else { 0 }
@@ -364,7 +538,7 @@ pub const NO_DOWNLOADER: &str = "neither curl nor wget is on the host";
 
 /// Does `op` (a window op) fetch `it`?
 pub fn uses(op: &crate::trace::OpNode, it: &Item) -> bool {
-    op_fetch(&op.spec).is_some_and(|(url, sum, _)| url == it.url && sum == &it.sum)
+    op_fetch(&op.spec).is_some_and(|(url, sum, ..)| url == it.url && sum == &it.sum)
 }
 
 /// Parse [`prepare_script`]'s output, one [`Found`] per item. An item with
@@ -403,6 +577,13 @@ pub fn parse(items: &[Item], out: &str) -> Vec<Found> {
                         p.next().unwrap_or(""),
                         p.next().unwrap_or(""),
                     );
+                    if rc == "124" {
+                        return Found::Blocked(format!(
+                            "fetch {}: download timed out after {}",
+                            it.url,
+                            crate::trace::fmt_duration(it.attempt_timeout())
+                        ));
+                    }
                     let msg = if msg.is_empty() {
                         String::new()
                     } else {
@@ -533,6 +714,8 @@ mod tests {
                 url: "u".into(),
                 sha256: None,
                 via_controller: false,
+                retry: 0,
+                timeout: None,
             }
             .sha256(&up)
             .sha256,
@@ -542,10 +725,96 @@ mod tests {
             url: "u".into(),
             sha256: None,
             via_controller: false,
+            retry: 0,
+            timeout: None,
         }
         .sha256("zz");
         assert_eq!(f.sha256.as_deref(), Some("zz"));
         assert!(f.problem().unwrap().contains("64 hex digits"));
+    }
+
+    fn item(url: &str, retry: u32, timeout: Option<Duration>) -> Item {
+        Item {
+            url: url.into(),
+            sum: None,
+            unpack: false,
+            retry,
+            timeout,
+        }
+    }
+
+    #[test]
+    fn the_controller_s_deadline_adds_every_item_s_attempts_waits_and_slack() {
+        let s = Duration::from_secs;
+        // One default attempt: 10 min + 5 s, and 30 s of slack.
+        assert_eq!(controller_deadline(&[item("a", 0, None)]), s(600 + 5 + 30));
+        // Three attempts of 20 s + 5 s, waits of 1 and 2 s, slack.
+        assert_eq!(
+            controller_deadline(&[item("a", 2, Some(s(20)))]),
+            s(3 * 25 + 1 + 2 + 30)
+        );
+        // Items run one after another: the bound is their sum, one slack.
+        assert_eq!(
+            controller_deadline(&[item("a", 0, Some(s(10))), item("b", 1, Some(s(20)))]),
+            s(15 + 2 * 25 + 1 + 30)
+        );
+        assert_eq!(controller_deadline(&[]), s(30));
+    }
+
+    #[test]
+    fn the_longest_timeout_and_the_most_retries_win_per_url_and_a_missing_one_is_the_default() {
+        let m = |a: Option<u64>, b: Option<u64>| {
+            let s = Duration::from_secs;
+            item("u", 0, a.map(s))
+                .timeout
+                .max(item("u", 0, b.map(s)).timeout)
+        };
+        assert_eq!(m(None, Some(5)), Some(Duration::from_secs(5)));
+        assert_eq!(m(Some(9), Some(5)), Some(Duration::from_secs(9)));
+        assert_eq!(item("u", 0, None).attempt_timeout(), DEFAULT_TIMEOUT);
+        assert_eq!(DEFAULT_TIMEOUT, Duration::from_secs(600));
+    }
+
+    #[test]
+    fn the_script_gives_every_item_its_limit_and_uses_no_coreutils_timeout() {
+        let script = prepare_script(&[
+            item("http://x/a", 2, Some(Duration::from_millis(1500))),
+            item("http://x/b", 0, None),
+        ]);
+        assert!(script.contains("tp_lt=1.5 tp_lr=2\ntp_one 0 "), "{script}");
+        assert!(script.contains("tp_lt=600 tp_lr=0\ntp_one 1 "), "{script}");
+        assert!(script.contains("--max-time") && script.contains("--timeout="));
+        assert!(!script.contains("timeout -k") && !script.contains("timeout \"$"));
+    }
+
+    #[test]
+    fn a_stopped_probe_names_every_item_with_no_answer_and_the_controller() {
+        let items = [
+            item("http://x/a", 0, Some(Duration::from_secs(1))),
+            item("http://x/b", 0, None),
+            item("http://x/c", 0, Some(Duration::from_secs(2))),
+        ];
+        let why = crate::executor::Stopped::TimedOut { trailer: None };
+        let got = stopped(&items, "fetch 0 cached\n", &why, Duration::from_secs(99));
+        assert_eq!(
+            got,
+            "fetch http://x/b: download timed out after 10m (stopped by the controller); \
+             fetch http://x/c: download timed out after 2s (stopped by the controller)"
+        );
+        // Everyone answered: nothing to name.
+        let all = "fetch 0 cached\nfetch 1 cached\nfetch 2 cached\n";
+        assert_eq!(stopped(&items, all, &why, Duration::from_secs(99)), "");
+    }
+
+    #[test]
+    fn rc_124_is_a_timed_out_download() {
+        let items = [item("http://x/a", 0, Some(Duration::from_secs(7)))];
+        assert_eq!(
+            parse(&items, "fetch 0 fail curl 124 curl: (28) x\n"),
+            [Found::Blocked(
+                "fetch http://x/a: download timed out after 7s".into()
+            )]
+        );
     }
 
     #[test]
@@ -554,6 +823,8 @@ mod tests {
             url: "http://x/a".into(),
             sum: sum.map(str::to_string),
             unpack: false,
+            retry: 0,
+            timeout: None,
         };
         let items = [
             it(Some("w")),

@@ -2111,3 +2111,413 @@ mod limits {
         assert_eq!(leak, "", "the script is readable in /proc cmdline");
     }
 }
+
+// --- T113: .retry, wait_for ---
+
+mod retry_and_wait {
+    use super::*;
+    use std::time::{Duration, Instant};
+    use telepatch::executor::{CheckOpts, run_check};
+    use telepatch::facts::os::Os;
+    use telepatch::{Port, Wait};
+
+    fn failed(r: &Report) -> (&String, &String, i32) {
+        let HostStatus::Failed { op, tail, rc, .. } = &r.hosts[0].status else {
+            panic!("{:?}", r.hosts[0].status)
+        };
+        (op, tail, *rc)
+    }
+
+    fn runs(d: &std::path::Path) -> usize {
+        std::fs::read_to_string(d.join("count"))
+            .unwrap_or_default()
+            .lines()
+            .count()
+    }
+
+    /// The op fails until its second run; a later op follows it.
+    fn flaky(h: Host<PathBuf>) -> PlaybookFuture {
+        Box::pin(async move {
+            let c = p(&h, "count");
+            let later = p(&h, "later");
+            sh!(h, "echo run >> {c}; [ \"$(wc -l < {c})\" -ge 2 ]").retry(2);
+            sh!(h, "touch {later}");
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn a_retried_op_that_fails_then_succeeds_ends_ok_after_two_runs() {
+        let d = tempfile::tempdir().unwrap();
+        let (r, out) = go(&Playbook::new("flaky", flaky), vec![spec("h1", d.path())]);
+        assert_eq!(
+            r.hosts[0].status,
+            HostStatus::Changed,
+            "{}\n{out}",
+            r.render()
+        );
+        assert_eq!(runs(d.path()), 2, "{out}");
+        assert!(
+            out.contains("attempt 1 of 3 failed (rc 1); retrying in 1s"),
+            "{out}"
+        );
+        assert!(!out.contains("attempt 2 of 3"), "{out}");
+        // Nothing was queued behind the retried op: the next op ran.
+        assert!(d.path().join("later").exists(), "{out}");
+        // One result per op: the failed first attempt is not reported.
+        assert_eq!(r.hosts[0].ops.len(), 2);
+        assert_eq!(r.hosts[0].ops[0].rc, 0);
+    }
+
+    fn always_fails(h: Host<PathBuf>) -> PlaybookFuture {
+        Box::pin(async move {
+            let c = p(&h, "count");
+            let later = p(&h, "later");
+            sh!(h, "echo run >> {c}; exit 3").retry(1);
+            sh!(h, "touch {later}");
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn retry_exhausted_fails_with_the_last_rc_and_ran_n_plus_one_times() {
+        let d = tempfile::tempdir().unwrap();
+        let (r, out) = go(
+            &Playbook::new("always", always_fails),
+            vec![spec("h1", d.path())],
+        );
+        assert_eq!(r.exit_code(), 1);
+        assert_eq!(failed(&r).2, 3, "{out}");
+        assert_eq!(runs(d.path()), 2, "{out}");
+        assert_eq!(out.matches("attempt ").count(), 1, "{out}");
+        assert!(
+            out.contains("attempt 1 of 2 failed (rc 3); retrying in 1s"),
+            "{out}"
+        );
+        assert!(!d.path().join("later").exists());
+        assert_eq!(r.hosts[0].ops.len(), 2, "{}", r.render());
+    }
+
+    fn once_only(h: Host<PathBuf>) -> PlaybookFuture {
+        Box::pin(async move {
+            let c = p(&h, "count");
+            sh!(h, "echo run >> {c}").retry(3);
+            // Skipped by `creates` (rc 0): not a failure either.
+            sh!(h, "echo run >> {c}", creates = "{c}").retry(3);
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn a_succeeded_or_skipped_op_is_never_sent_again() {
+        let d = tempfile::tempdir().unwrap();
+        let (r, out) = go(
+            &Playbook::new("once", once_only),
+            vec![spec("h1", d.path())],
+        );
+        assert_eq!(
+            r.hosts[0].status,
+            HostStatus::Changed,
+            "{}\n{out}",
+            r.render()
+        );
+        assert_eq!(runs(d.path()), 1, "{out}");
+        assert!(!out.contains("attempt"), "{out}");
+    }
+
+    fn halted_skip(h: Host<PathBuf>) -> PlaybookFuture {
+        Box::pin(async move {
+            let c = p(&h, "count");
+            sh!(h, "exit 5");
+            // Halt-skipped (the op before it failed), never retried.
+            sh!(h, "echo run >> {c}").retry(3);
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn an_op_the_halt_skipped_is_never_sent_again() {
+        let d = tempfile::tempdir().unwrap();
+        let (r, out) = go(
+            &Playbook::new("halt", halted_skip),
+            vec![spec("h1", d.path())],
+        );
+        assert_eq!(failed(&r).2, 5, "{out}");
+        assert_eq!(runs(d.path()), 0, "{out}");
+        assert!(!out.contains("attempt"), "{out}");
+    }
+
+    fn timed_retry(h: Host<PathBuf>) -> PlaybookFuture {
+        Box::pin(async move {
+            let c = p(&h, "count");
+            sh!(h, "echo run >> {c}; sleep 20")
+                .retry(1)
+                .timeout(Duration::from_secs(1));
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn each_attempt_gets_its_own_timeout_and_the_last_one_decides() {
+        let d = tempfile::tempdir().unwrap();
+        let t = Instant::now();
+        let (r, out) = go(
+            &Playbook::new("tr", timed_retry),
+            vec![spec("h1", d.path())],
+        );
+        let (op, _, _) = failed(&r);
+        assert!(op.ends_with(", timed out after 1s"), "{op}\n{out}");
+        assert_eq!(runs(d.path()), 2, "{out}");
+        assert!(
+            out.contains("attempt 1 of 2 failed (timed out after 1s); retrying in 1s"),
+            "{out}"
+        );
+        // Two 1 s clocks, one 1 s wait, and the kills: not one 2 s clock.
+        assert!(t.elapsed() < Duration::from_secs(30), "{:?}", t.elapsed());
+        assert!(out.contains("-> FAILED (timed out after 1s)"), "{out}");
+    }
+
+    fn killed_retry(h: Host<PathBuf>) -> PlaybookFuture {
+        Box::pin(async move {
+            let c = p(&h, "count");
+            let later = p(&h, "later");
+            // TERM is ignored: each attempt ends by KILL, with no trailer.
+            // The second attempt is sent under the same id as the first.
+            sh!(
+                h,
+                "trap '' TERM; echo run >> {c}; [ \"$(wc -l < {c})\" -ge 2 ] && exit 0; (trap '' TERM; sleep 30)"
+            )
+            .retry(1)
+            .timeout(Duration::from_secs(1));
+            sh!(h, "touch {later}");
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn a_killed_attempt_with_no_trailer_is_retried_and_the_new_attempt_is_reported() {
+        let d = tempfile::tempdir().unwrap();
+        let (r, out) = go(
+            &Playbook::new("kr", killed_retry),
+            vec![spec("h1", d.path())],
+        );
+        assert_eq!(runs(d.path()), 2, "{out}");
+        assert_eq!(
+            r.hosts[0].status,
+            HostStatus::Changed,
+            "{}\n{out}",
+            r.render()
+        );
+        assert!(
+            out.contains("attempt 1 of 2 failed (timed out after 1s); retrying in 1s"),
+            "{out}"
+        );
+        assert!(d.path().join("later").exists(), "{out}");
+    }
+
+    fn allowed(h: Host<PathBuf>) -> PlaybookFuture {
+        Box::pin(async move {
+            let c = p(&h, "count");
+            let later = p(&h, "later");
+            sh!(h, "echo run >> {c}; exit 3").allow_fail().retry(1);
+            sh!(h, "touch {later}");
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn an_allow_fail_op_is_retried_and_the_run_goes_on() {
+        let d = tempfile::tempdir().unwrap();
+        let (r, out) = go(&Playbook::new("af", allowed), vec![spec("h1", d.path())]);
+        assert_eq!(runs(d.path()), 2, "{out}");
+        assert!(d.path().join("later").exists(), "{}\n{out}", r.render());
+        assert_eq!(format!("{:?}", r.hosts[0].ops[0].outcome), "AllowedFail");
+        assert_eq!(r.hosts[0].ops.len(), 2);
+    }
+
+    fn guarded(h: Host<PathBuf>) -> PlaybookFuture {
+        Box::pin(async move {
+            let c = p(&h, "count");
+            let later = p(&h, "later");
+            let flaky = sh!(h, "echo run >> {c}; [ \"$(wc -l < {c})\" -ge 2 ]").retry(1);
+            sh!(h, "touch {later}").when(flaky.ok());
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn a_guard_reading_a_retried_op_sees_its_last_attempt() {
+        let d = tempfile::tempdir().unwrap();
+        let (r, out) = go(&Playbook::new("g", guarded), vec![spec("h1", d.path())]);
+        assert_eq!(runs(d.path()), 2, "{out}");
+        assert!(d.path().join("later").exists(), "{}\n{out}", r.render());
+    }
+
+    fn wait_path(h: Host<PathBuf>) -> PlaybookFuture {
+        Box::pin(async move {
+            let f = p(&h, "ready");
+            let later = p(&h, "later");
+            sh!(h, "(sleep 1; touch {f}) >/dev/null 2>&1 &");
+            h.wait_for(Wait::path(&f)).timeout(Duration::from_secs(20));
+            sh!(h, "touch {later}");
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn wait_for_a_path_that_appears_in_time_is_ok_and_changes_nothing() {
+        let d = tempfile::tempdir().unwrap();
+        let (r, out) = go(&Playbook::new("wp", wait_path), vec![spec("h1", d.path())]);
+        assert_eq!(
+            r.hosts[0].status,
+            HostStatus::Changed,
+            "{}\n{out}",
+            r.render()
+        );
+        let w = &r.hosts[0].ops[1];
+        assert!(w.desc.starts_with("wait_for path "), "{}", w.desc);
+        assert!(!w.changed, "wait_for reports no change");
+        assert_eq!(format!("{:?}", w.outcome), "Unchanged");
+        assert!(d.path().join("later").exists());
+    }
+
+    fn wait_never(h: Host<PathBuf>) -> PlaybookFuture {
+        Box::pin(async move {
+            let f = p(&h, "never");
+            let later = p(&h, "later");
+            h.wait_for(Wait::path(&f)).timeout(Duration::from_secs(2));
+            sh!(h, "touch {later}");
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn wait_for_that_never_holds_fails_the_role_reported_as_timed_out() {
+        let d = tempfile::tempdir().unwrap();
+        let t = Instant::now();
+        let (r, out) = go(&Playbook::new("wn", wait_never), vec![spec("h1", d.path())]);
+        assert!(t.elapsed() < Duration::from_secs(15));
+        assert_eq!(r.exit_code(), 1);
+        let (op, tail, rc) = failed(&r);
+        assert_eq!(rc, 124, "{out}");
+        assert!(op.starts_with("wait_for path "), "{op}");
+        assert!(op.ends_with(", timed out after 2s"), "{op}");
+        assert!(tail.contains("not reached within 2s"), "{tail}");
+        assert!(out.contains("-> FAILED (timed out after 2s)"), "{out}");
+        assert!(!d.path().join("later").exists());
+    }
+
+    struct Ports {
+        open: u16,
+        shut: u16,
+        dir: PathBuf,
+    }
+
+    fn wait_port(h: Host<Ports>) -> PlaybookFuture {
+        Box::pin(async move {
+            let v = &h.vars;
+            let later = v.dir.join("later").to_str().unwrap().to_string();
+            h.wait_for(Port::tcp(v.open))
+                .timeout(Duration::from_secs(5));
+            sh!(h, "touch {later}");
+            h.wait_for(Port::tcp(v.shut))
+                .timeout(Duration::from_secs(2));
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn wait_for_a_tcp_port_sees_a_listener_and_times_out_on_a_closed_port() {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let open = l.local_addr().unwrap().port();
+        let shut = {
+            let s = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            s.local_addr().unwrap().port()
+        };
+        let d = tempfile::tempdir().unwrap();
+        let v = Ports {
+            open,
+            shut,
+            dir: d.path().to_path_buf(),
+        };
+        let out = Rc::new(RefCell::new(String::new()));
+        let r = run(
+            &Playbook::new("port", wait_port),
+            vec![HostSpec {
+                groups: Vec::new(),
+                name: "h1".into(),
+                target: local(),
+                vars: v,
+            }],
+            RunOpts {
+                log: None,
+                stdout: Stdout::Capture(out.clone()),
+            },
+        );
+        let out = out.borrow().clone();
+        // The open port passes at once (the touch ran); the closed one fails.
+        assert!(d.path().join("later").exists(), "{out}");
+        let (op, _, rc) = failed(&r);
+        assert_eq!(rc, 124, "{out}");
+        assert_eq!(op, &format!("wait_for port tcp/{shut}, timed out after 2s"));
+        drop(l);
+    }
+
+    fn wait_in_check(h: Host<PathBuf>) -> PlaybookFuture {
+        Box::pin(async move {
+            let never = p(&h, "never");
+            h.wait_for(Wait::path(&never))
+                .timeout(Duration::from_secs(30));
+            h.wait_for(Port::tcp(1)).timeout(Duration::from_secs(30));
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn check_neither_runs_nor_lists_wait_for_and_exits_clean() {
+        let d = tempfile::tempdir().unwrap();
+        let out = Rc::new(RefCell::new(String::new()));
+        let t = Instant::now();
+        let r = run_check(
+            &Playbook::new("c", wait_in_check),
+            vec![spec("h1", d.path())],
+            RunOpts {
+                log: None,
+                stdout: Stdout::Capture(out.clone()),
+            },
+            CheckOpts { diff: false },
+        );
+        assert!(t.elapsed() < Duration::from_secs(10), "it waited");
+        assert_eq!(r.exit_code(), 0, "{}\n{}", r.render(), out.borrow());
+        let out = out.borrow();
+        assert!(!out.contains("wait_for"), "check lists nothing: {out}");
+    }
+
+    fn limited_plan(h: Host<()>) {
+        sh!(h, "echo a").retry(2).timeout(Duration::from_secs(90));
+        sh!(h, "echo b");
+        h.wait_for(Port::tcp(5432)).timeout(Duration::from_secs(60));
+        h.wait_for(Wait::unit("pg.service"));
+    }
+
+    #[test]
+    fn the_plan_shows_retry_and_wait_for_and_defaults_show_nothing() {
+        let h = Host::new(
+            "t",
+            Os::parse("ID=debian\nVERSION_ID=12\n").unwrap(),
+            Rc::new(()),
+        );
+        limited_plan(h.clone());
+        let plan = telepatch::plan::render_host("t", &h.os, &h.snapshot());
+        let lines: Vec<&str> = plan.lines().filter(|l| l.starts_with("  #")).collect();
+        assert!(lines[0].ends_with(" retry 2 timeout 1m30s"), "{}", lines[0]);
+        assert!(!lines[1].contains("timeout") && !lines[1].contains("retry"));
+        assert!(lines[2].starts_with("  #2 wait as shell:root reads [*] writes []"));
+        assert!(lines[2].ends_with(" timeout 1m"), "{}", lines[2]);
+        assert!(plan.contains("      | wait_for port tcp/5432\n"), "{plan}");
+        assert!(
+            plan.contains("      | wait_for unit pg.service\n"),
+            "{plan}"
+        );
+    }
+}

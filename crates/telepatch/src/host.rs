@@ -219,6 +219,7 @@ impl<V> Host<V> {
             allowed: Vec::new(),
             at_end: false,
             timeout: None,
+            retry: 0,
         };
         let id = self.trace.borrow_mut().push(Node::Op(node));
         OpHandle {
@@ -400,6 +401,7 @@ impl OpHandle {
             allowed: Vec::new(),
             at_end: false,
             timeout: None,
+            retry: 0,
         };
         let id = self.trace.borrow_mut().push(Node::Op(node));
         OpHandle {
@@ -465,6 +467,20 @@ impl OpHandle {
         self.edit(|op| op.timeout = Some(d)).clone()
     }
 
+    /// Run this op again when it fails or times out, up to `n` more times
+    /// (so at most `n + 1` runs), before it counts as failed. The
+    /// controller does it: it ends the op's pipelined run, so nothing is
+    /// queued behind it, clears the shell's halt flag, waits 1, 2, 4 .. 30
+    /// seconds and sends the same script again, with a new start line and
+    /// a new clock (the timeout is per attempt). Only the last attempt is
+    /// reported, and a guard that reads the op sees it. An op that
+    /// succeeded or was skipped is never sent again; an `allow_fail` op
+    /// that fails is. A second call replaces the count.
+    #[track_caller]
+    pub fn retry(&self, n: u32) -> OpHandle {
+        self.edit(|op| op.retry = n).clone()
+    }
+
     /// Run this op only when `guard` holds: any composition of earlier
     /// ops' `.changed()` and `.ok()` with `|`, `&` and `!`. A false guard
     /// skips the op (reported `skipped`, with the guard). A second call
@@ -505,7 +521,7 @@ impl OpHandle {
 }
 
 /// The handle methods every op takes (`.allow`, `.reads`, `.writes`,
-/// `.allow_fail`, `.when`, `.timeout`, `.at_end`, `.post`), on a typed handle that
+/// `.allow_fail`, `.when`, `.retry`, `.timeout`, `.at_end`, `.post`), on a typed handle that
 /// wraps an [`OpHandle`] as its field `0`: each edits the node as the
 /// `OpHandle` method does and returns the typed handle, owned, so a chain
 /// keeps its type (`h.svc(u).restart().when(g)` is a `SvcHandle`).
@@ -540,6 +556,12 @@ macro_rules! op_builders {
             #[track_caller]
             pub fn when(&self, guard: $crate::trace::Guard) -> Self {
                 self.0.when(guard);
+                self.clone()
+            }
+            /// See [`OpHandle::retry`].
+            #[track_caller]
+            pub fn retry(&self, n: u32) -> Self {
+                self.0.retry(n);
                 self.clone()
             }
             /// See [`OpHandle::timeout`].

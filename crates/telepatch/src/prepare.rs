@@ -489,7 +489,11 @@ pub fn svc_after_installers(window: &Window) -> bool {
             | OpSpec::Resource(_) => {
                 return true;
             }
-            OpSpec::Group(_) | OpSpec::User(_) | OpSpec::Repo(_) | OpSpec::Git(_) => {}
+            OpSpec::Group(_)
+            | OpSpec::User(_)
+            | OpSpec::Repo(_)
+            | OpSpec::Git(_)
+            | OpSpec::Wait(_) => {}
         }
     }
     false
@@ -559,6 +563,15 @@ pub trait ShellSet {
     /// Open `u`'s shell unless it is open. `Err` is the reason the host is
     /// blocked.
     async fn open_user(&mut self, u: &str) -> Result<(), String>;
+    /// `who`'s shell with the second shell that stops a probe on expiry
+    /// ([`crate::executor::probe_bounded`]); `None` when the set has none,
+    /// and the probe then runs unbounded.
+    fn watched_shell(
+        &mut self,
+        _who: &Principal,
+    ) -> Option<(&mut Shell, &mut crate::executor::Killer)> {
+        None
+    }
 }
 
 fn shell_of<'a, S: ShellSet>(shells: &'a mut S, who: &Principal) -> Result<&'a mut Shell, String> {
@@ -775,8 +788,32 @@ pub async fn prepare_window<S: ShellSet>(
     let mut no_dl = NoDownloader::default();
     if !fetch_items.is_empty() {
         let id = next();
-        let root = shell_of(shells, &Principal::Root)?;
-        let (_, out) = probe(root, id, &crate::ops::fetch::prepare_script(&fetch_items)).await?;
+        let script = crate::ops::fetch::prepare_script(&fetch_items);
+        // The outer bound of the downloads (the inner one is the
+        // downloader's own flag, in the script): the controller's
+        // watchdog on the whole probe.
+        let limit = crate::ops::fetch::controller_deadline(&fetch_items);
+        let out = match shells.watched_shell(&Principal::Root) {
+            Some((sh, killer)) => {
+                use crate::executor::{Bounded, KillBounds, probe_bounded};
+                match probe_bounded(sh, killer, KillBounds::POLICY, id, &script, limit).await? {
+                    Bounded::Done(_, out) => out,
+                    Bounded::Stopped(why, out) => {
+                        let msg = crate::ops::fetch::stopped(&fetch_items, &out, &why, limit);
+                        // Every item answered before the stop: read them.
+                        if msg.is_empty() {
+                            out
+                        } else {
+                            return Err(no_dl.other(format!("{msg} (window {})", window.number)));
+                        }
+                    }
+                }
+            }
+            None => {
+                let root = shell_of(shells, &Principal::Root)?;
+                probe(root, id, &script).await?.1
+            }
+        };
         for (it, found) in fetch_items
             .iter()
             .zip(crate::ops::fetch::parse(&fetch_items, &out))
@@ -942,6 +979,7 @@ pub async fn prepare_window<S: ShellSet>(
             allowed: Vec::new(),
             at_end: false,
             timeout: None,
+            retry: 0,
         };
         let who = &op.node.run_as.principal;
         let sh = shell_of(shells, who)?;
@@ -1692,6 +1730,7 @@ pacman() {
                 allowed: Vec::new(),
                 at_end: false,
                 timeout: None,
+                retry: 0,
             },
         };
         let restart = SvcSpec {

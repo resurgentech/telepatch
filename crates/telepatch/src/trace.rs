@@ -92,6 +92,8 @@ pub enum OpSpec {
     Git(crate::ops::git::GitSpec),
     /// An author-defined resource (`h.resource`).
     Resource(crate::resource::ResourceSpec),
+    /// Wait for a condition on the host (`h.wait_for`).
+    Wait(crate::ops::wait::Wait),
 }
 
 impl OpSpec {
@@ -120,6 +122,8 @@ impl OpSpec {
             }
             OpSpec::Group(_) | OpSpec::Svc(_) | OpSpec::Git(_) => true,
             OpSpec::Resource(r) => r.inverse.is_some(),
+            // Changes nothing, so there is nothing to undo: not a hole.
+            OpSpec::Wait(_) => true,
             OpSpec::Raw { .. }
             | OpSpec::Shell(_)
             | OpSpec::File(_)
@@ -142,6 +146,7 @@ impl OpSpec {
             OpSpec::Unit(_) => "unit",
             OpSpec::Git(_) => "git",
             OpSpec::Resource(r) => r.kind,
+            OpSpec::Wait(_) => "wait",
         }
     }
 
@@ -149,7 +154,7 @@ impl OpSpec {
     pub fn op_kind(&self) -> crate::trailer::OpKind {
         use crate::trailer::OpKind;
         match self {
-            OpSpec::Raw { .. } | OpSpec::Shell(_) => OpKind::Sh,
+            OpSpec::Raw { .. } | OpSpec::Shell(_) | OpSpec::Wait(_) => OpKind::Sh,
             OpSpec::Pkg(_) => OpKind::Pkg,
             OpSpec::File(_) => OpKind::File,
             OpSpec::Group(_) => OpKind::Group,
@@ -171,6 +176,7 @@ impl OpSpec {
             OpSpec::User(u) => u.render(false),
             OpSpec::File(f) => f.render_mode(false),
             OpSpec::Unit(u) => u.render_mode(false),
+            OpSpec::Wait(w) => format!("wait_for {}", w.describe()),
             _ => self.exec_script(os),
         }
     }
@@ -189,6 +195,9 @@ impl OpSpec {
             OpSpec::Unit(u) => u.render_mode(true),
             OpSpec::Git(g) => g.render(),
             OpSpec::Resource(r) => r.exec_body(),
+            // The body keeps its own deadline, which only the op's node
+            // knows ([`crate::trailer`] renders it with the node's).
+            OpSpec::Wait(w) => w.render(crate::ops::wait::DEFAULT_WAIT),
         }
     }
 
@@ -196,8 +205,7 @@ impl OpSpec {
     /// `.timeout(..)`: `pkg` long (a source build or a big download), `sh`,
     /// raw, resources and git medium, `file` and `repo` short, `svc`
     /// shorter, `unit`, `group` and `user` shortest. The controller
-    /// enforces it ([`crate::executor`]). (`wait_for` takes its 5
-    /// minutes with its own kind, in T113.)
+    /// enforces it ([`crate::executor`]); `wait_for` 5 minutes.
     pub fn default_timeout(&self) -> std::time::Duration {
         use std::time::Duration;
         const MIN: u64 = 60;
@@ -209,6 +217,7 @@ impl OpSpec {
             OpSpec::File(_) | OpSpec::Repo(_) => 5 * MIN,
             OpSpec::Svc(_) => 2 * MIN,
             OpSpec::Unit(_) | OpSpec::Group(_) | OpSpec::User(_) => MIN,
+            OpSpec::Wait(_) => return crate::ops::wait::DEFAULT_WAIT,
         })
     }
 
@@ -225,6 +234,7 @@ impl OpSpec {
             OpSpec::Unit(u) => u.default_writes(),
             OpSpec::Git(g) => g.default_writes(),
             OpSpec::Resource(r) => BTreeSet::from([r.key.clone()]),
+            OpSpec::Wait(_) => BTreeSet::new(),
         }
     }
 
@@ -244,7 +254,7 @@ impl OpSpec {
             OpSpec::Svc(s) => BTreeMap::from([(Key::svc(s.key_name()), Value::Exists(true))]),
             OpSpec::Unit(u) => u.default_post(),
             OpSpec::Git(g) => g.default_post(),
-            OpSpec::Resource(_) => BTreeMap::new(),
+            OpSpec::Resource(_) | OpSpec::Wait(_) => BTreeMap::new(),
         }
     }
 }
@@ -419,13 +429,31 @@ pub struct OpNode {
     /// its start line; the controller stops it after that. `None`: the
     /// kind's default ([`OpSpec::default_timeout`]).
     pub timeout: Option<std::time::Duration>,
+    /// `.retry(n)`: a failed or timed-out op is sent again by the
+    /// controller, up to `n` more times, before it counts as failed. The
+    /// op ends its pipelined run.
+    pub retry: u32,
 }
+
+/// What the controller adds to a `wait_for`'s own deadline.
+pub const WAIT_BACKSTOP: std::time::Duration = std::time::Duration::from_secs(15);
 
 impl OpNode {
     /// The timeout the controller enforces: the op's own, else its
     /// kind's default.
     pub fn effective_timeout(&self) -> std::time::Duration {
         self.timeout.unwrap_or_else(|| self.spec.default_timeout())
+    }
+
+    /// The controller's deadline for one attempt: [`Self::effective_timeout`],
+    /// and for a `wait_for`, which keeps its own deadline in its body, 15
+    /// seconds more (a backstop for a probe that hangs).
+    pub fn enforced_timeout(&self) -> std::time::Duration {
+        let t = self.effective_timeout();
+        match self.spec {
+            OpSpec::Wait(_) => t + WAIT_BACKSTOP,
+            _ => t,
+        }
     }
 }
 
@@ -646,6 +674,7 @@ mod limit_tests {
             allowed: Vec::new(),
             at_end: false,
             timeout: None,
+            retry: 0,
         }
     }
 
@@ -678,6 +707,21 @@ mod limit_tests {
         });
         sh.timeout = Some(secs(7));
         assert_eq!(sh.effective_timeout(), secs(7));
+    }
+
+    #[test]
+    fn wait_for_defaults_to_five_minutes_and_the_controller_adds_a_backstop() {
+        let mut w = node(OpSpec::Wait(crate::ops::wait::Wait::Tcp(1)));
+        assert_eq!(w.effective_timeout(), secs(5 * 60));
+        assert_eq!(w.enforced_timeout(), secs(5 * 60 + 15));
+        w.timeout = Some(secs(60));
+        assert_eq!(w.enforced_timeout(), secs(75));
+        // Every other kind: the controller's deadline is the limit.
+        let mut sh = node(OpSpec::Raw {
+            script: "true".into(),
+        });
+        sh.timeout = Some(secs(7));
+        assert_eq!(sh.enforced_timeout(), secs(7));
     }
 
     #[test]

@@ -262,6 +262,14 @@ impl Shell {
     /// Write `script` (which must end in a trailer for `id`) without
     /// waiting for anything.
     pub async fn send(&mut self, id: usize, script: &str) -> Result<(), ShellError> {
+        // Sending an id again after the controller abandoned it (a retry
+        // of a killed op): the stale entry goes, or the new attempt's
+        // trailer would be taken for the old one's and swallowed.
+        if self.abandoned.remove(&id)
+            && let Some(pos) = self.inflight.iter().position(|&i| i == id)
+        {
+            self.inflight.remove(pos);
+        }
         self.inflight.push_back(id);
         let Some(stdin) = self.stdin.as_mut() else {
             return Err(self.died("stdin closed"));
