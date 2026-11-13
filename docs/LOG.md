@@ -1802,3 +1802,17 @@ are appended, never edited in; a hook refuses rewrites.
 - Tests: tests/cache_usage.rs (15). Red 12/14 (impl.), FOREMAN red
   reruns; green. No snapshot moved. Gate E and check-sandbox green.
 - Commits: telepatch 2fe54c4
+
+## 2026-11-13 — T122 A playbook owns what it caches; what it stops fetching is removed
+
+- Items a run of P used get P in their owners. On an entitled run (real,
+  no `--only`, engine Ok, host ok/changed, record lock held), an item P
+  owns whose sum is not in F (P's whole trace on this host) loses P;
+  with no owner left it is removed (`no longer fetched by P`). Other
+  runs say `cache: ownership not checked (<reason>)` once.
+- A playbook name with a tab, comma or newline (or empty) is a trace
+  error. Note: "Cache ownership".
+- Tests: cache_usage.rs 28 (10 new red then green). By-design test
+  changes in binary_release.rs/fetch.rs (an older tarball is removed).
+  Gate E and check-sandbox green; no snapshot moved.
+- Commits: telepatch 7a24837
