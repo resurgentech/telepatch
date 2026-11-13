@@ -174,7 +174,8 @@ use std::rc::Rc;
 use serde_json::json;
 
 use crate::engine::{
-    Applied, Engine, EngineError, Executor, HostInfo, Split, Window, WindowKind, WindowOp,
+    Applied, Crossed, Engine, EngineError, Executor, HostInfo, RebootAt, Split, Window, WindowKind,
+    WindowOp,
 };
 use crate::facts::query::FactQuery;
 use crate::host::Host;
@@ -192,6 +193,10 @@ use crate::transport::docker::DockerTransport;
 use crate::transport::local::LocalTransport;
 use crate::transport::ssh::SshTransport;
 use crate::transport::{Limit, Shells, Transport, read_os};
+
+#[path = "reboot.rs"]
+mod reboot;
+pub use reboot::{RebootPolicy, RebootRecord, RebootWait};
 
 /// Where to reach a host.
 pub enum Target {
@@ -251,6 +256,11 @@ pub struct RunControls {
     pub max_fail: Option<usize>,
     /// Run only these roles (see [`Host::with_only`]); empty runs them all.
     pub only: Vec<String>,
+    /// `--reboot` (see [`RebootPolicy`]); the default reboots at a pending
+    /// barrier and only reports at the end.
+    pub reboot: RebootPolicy,
+    /// How long a rebooted host is waited for (tests inject short ones).
+    pub reboot_wait: RebootWait,
 }
 
 /// The host limiter: `serial` permits, and the count of hosts that failed.
@@ -1103,6 +1113,8 @@ pub struct HostExec {
     fetch_staged: bool,
     /// `--check`: what the run has found so far.
     check: Option<CheckState>,
+    /// Reboot policy and state ([`reboot`]).
+    reboot: reboot::RebootState,
 }
 
 /// What a `--check` carries from window to window of one host.
@@ -1773,6 +1785,7 @@ impl HostExec {
             suppress: HashMap::new(),
             fetch_staged: false,
             check,
+            reboot: reboot::RebootState::default(),
         }
     }
 
@@ -2312,6 +2325,7 @@ impl HostExec {
     ) {
         let when = when_text(w, self.starts_of(w));
         let label = match outcome {
+            Outcome::Changed if w.node.needs_reboot => "changed; needs reboot".to_string(),
             Outcome::Changed => "changed".to_string(),
             Outcome::Unchanged if note.is_empty() => "ok".to_string(),
             Outcome::Unchanged => format!("ok ({note})"),
@@ -2513,6 +2527,12 @@ impl HostExec {
             Err(EngineError::CheckStopped { site, reads }) => Some(CheckStop {
                 site: site.map(|s| s.to_string()),
                 reads: reads.iter().map(|k| k.to_string()).collect(),
+                reboot: false,
+            }),
+            Err(EngineError::CheckStoppedAtReboot { site }) => Some(CheckStop {
+                site: site.map(|s| s.to_string()),
+                reads: Vec::new(),
+                reboot: true,
             }),
             _ => None,
         };
@@ -2540,10 +2560,17 @@ impl HostExec {
                     .line(&format!("== {name} [coverage] {} ==", c.line()));
             }
             if let Some(stop) = &info.stopped {
-                self.say(format!(
-                    "a read of {} needs changes this check cannot apply: nothing after it was traced or checked",
-                    stop.reads.join(", ")
-                ));
+                if stop.reboot {
+                    self.say(
+                        "a reboot barrier may be pending and a check never reboots: nothing after it was traced or checked"
+                            .to_string(),
+                    );
+                } else {
+                    self.say(format!(
+                        "a read of {} needs changes this check cannot apply: nothing after it was traced or checked",
+                        stop.reads.join(", ")
+                    ));
+                }
             }
             self.sink.event(json!({"ev":"check","host":name,
                 "pending":info.pending,"ops":info.ops,"unchecked":info.unchecked,
@@ -2652,6 +2679,7 @@ impl Executor for HostExec {
                 at_end: false,
                 timeout: None,
                 retry: 0,
+                needs_reboot: false,
             };
             let id = self.seq;
             let who = &q.run_as;
@@ -2693,6 +2721,19 @@ impl Executor for HostExec {
             self.block(format!("reading facts: {e}"));
         }
         values
+    }
+
+    async fn reboot(
+        &mut self,
+        _host: &HostInfo,
+        window: usize,
+        at: &RebootAt,
+    ) -> Result<Crossed, String> {
+        self.cross_barrier(window, at).await
+    }
+
+    async fn end_of_run(&mut self, _host: &HostInfo, window: usize) -> Result<(), String> {
+        self.end_pending(window).await
     }
 
     async fn apply(&mut self, host: &HostInfo, window: &Window) -> Result<Applied, String> {
@@ -2911,6 +2952,7 @@ impl Executor for HostExec {
             }
         }
         if self.check.is_some() {
+            self.note_check_marks(window);
             self.check_window_end(window, file_found);
             return Ok(Applied::All);
         }
@@ -3032,6 +3074,8 @@ impl Executor for HostExec {
         let mut attempts = vec![0u32; window.ops.len()];
         let mut failed_seen = false;
         let mut send_err = None;
+        // What the run's ops marked, written after the run is collected.
+        let mut marks: Vec<(usize, String)> = Vec::new();
 
         // Each run is pipelined into its shell and collected in full
         // before the next run is sent (Assumption A3); after a failure
@@ -3263,6 +3307,7 @@ impl Executor for HostExec {
                                     if installed.is_some() {
                                         self.remember(w, o, changed, installed.as_deref());
                                     }
+                                    self.marks_of(w, i, &mut marks);
                                     if let crate::trace::OpSpec::Git(g) = &w.node.spec
                                         && let Ok(gr) = trailer.typed::<crate::trailer::GitResult>()
                                     {
@@ -3359,6 +3404,16 @@ impl Executor for HostExec {
                     }
                 }
             }
+            // The marks of this run, before a failure of a later op (or the
+            // halted host) is acted on: a change is never left unmarked.
+            if !marks.is_empty() {
+                let at = marks[marks.len() - 1].0;
+                if let Err(why) = self.write_marks(&marks).await {
+                    failed_seen = true;
+                    self.fail(&window.ops[at], "reboot mark", -1, why);
+                }
+                marks.clear();
+            }
             // An op of this run with no result was lost with the shell:
             // stop here, the loop below reports it.
             if done[start..end].iter().any(|d| !d) {
@@ -3403,6 +3458,7 @@ async fn run_one<V: 'static>(
     sink: Rc<Sink>,
     check: Option<CheckOpts>,
     only: Rc<[String]>,
+    reboot: (RebootPolicy, RebootWait),
 ) -> HostReport {
     let name = spec.name.clone();
     sink.event(json!({"ev":"host_open","host":name}));
@@ -3454,7 +3510,9 @@ async fn run_one<V: 'static>(
         sink: sink.clone(),
         killer: Killer::new(target_rc, name.clone()),
     };
-    let mut engine = Engine::new(HostExec::new(&name, shells, sink.clone(), check));
+    let mut exec = HostExec::new(&name, shells, sink.clone(), check);
+    exec.set_reboot(reboot.0, reboot.1, pb_name);
+    let mut engine = Engine::new(exec);
     let res = engine.run_host(&pb, host).await;
     engine.executor.cleanup_stage().await;
     let (mut rep, shells) = engine.executor.finish(res);
@@ -3469,6 +3527,7 @@ impl HostReport {
         match &self.status {
             HostStatus::Failed { role, op, rc, .. } => format!("role {role}: {op} (rc {rc})"),
             HostStatus::Blocked(w) | HostStatus::Error(w) | HostStatus::NotStarted(w) => w.clone(),
+            HostStatus::RebootPending(_) => "reboot pending at barrier".to_string(),
             _ => String::new(),
         }
     }
@@ -3524,13 +3583,22 @@ pub fn run_with<V: 'static>(
     let (pb_name, pb_run) = (playbook.name, playbook.run);
     let local = tokio::task::LocalSet::new();
     let only: Rc<[String]> = controls.only.into();
+    let reboot = (controls.reboot, controls.reboot_wait);
     let limiter = Rc::new(Limiter::new(controls.serial, controls.max_fail));
     let reports = rt.block_on(local.run_until(async {
         let tasks: Vec<_> = hosts
             .into_iter()
             .map(|h| {
                 let name = h.name.clone();
-                let run = run_one(pb_name, pb_run, h, sink.clone(), check, only.clone());
+                let run = run_one(
+                    pb_name,
+                    pb_run,
+                    h,
+                    sink.clone(),
+                    check,
+                    only.clone(),
+                    reboot,
+                );
                 tokio::task::spawn_local(gated(limiter.clone(), sink.clone(), name, check, run))
             })
             .collect();
@@ -3643,6 +3711,7 @@ mod tests {
                 id: NodeId(id),
                 role: String::new(),
                 pkg_names: Vec::new(),
+                needs_reboot: false,
             }],
             node: OpNode {
                 writes: spec.default_writes(),
@@ -3657,6 +3726,7 @@ mod tests {
                 at_end: false,
                 timeout: None,
                 retry: 0,
+                needs_reboot: false,
             },
         }
     }

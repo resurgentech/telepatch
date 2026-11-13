@@ -28,6 +28,12 @@ pub enum HostStatus {
     /// Never started: `--serial` held it back and `--max-fail` stopped the
     /// run first. Nothing ran on it. Counts as not a success.
     NotStarted(String),
+    /// The run stopped at a reboot barrier it cannot cross (`--local`, the
+    /// docker transport, `--reboot never`) with a reboot pending: what is
+    /// listed needs it. Everything before the barrier is applied, nothing
+    /// after it ran; the next run, after the reboot, goes past it. Not a
+    /// success: the playbook did not complete.
+    RebootPending(Vec<String>),
 }
 
 impl HostStatus {
@@ -39,6 +45,7 @@ impl HostStatus {
             HostStatus::Blocked(_) => "blocked",
             HostStatus::Error(_) => "error",
             HostStatus::NotStarted(_) => "skipped",
+            HostStatus::RebootPending(_) => "reboot pending",
         }
     }
 
@@ -349,15 +356,23 @@ pub struct FileDiff {
 /// cannot apply.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CheckStop {
-    /// `file:line` of the read, when known.
+    /// `file:line` of the read (or of the reboot barrier), when known.
     pub site: Option<String>,
     /// The keys the read asked about (`file:/etc/x`).
     pub reads: Vec<String>,
+    /// Stopped at a reboot barrier that may be pending, not at a read.
+    pub reboot: bool,
 }
 
 impl CheckStop {
     /// `check stopped at src/roles/x.rs:12: this read needs the changes above`.
     pub fn line(&self) -> String {
+        if self.reboot {
+            return match &self.site {
+                Some(s) => format!("check stopped at {s}: reboot pending at barrier"),
+                None => "check stopped: reboot pending at barrier".to_string(),
+            };
+        }
         match &self.site {
             Some(s) => format!("check stopped at {s}: this read needs the changes above"),
             None => "check stopped: this read needs the changes above".to_string(),
@@ -426,6 +441,12 @@ pub struct HostReport {
     pub diffs: Vec<FileDiff>,
     /// Set by a `--check` run.
     pub check: Option<CheckInfo>,
+    /// What the host still needs a reboot for at the end of the run (the
+    /// marks `.needs_reboot()` ops left, an earlier run's included). The
+    /// host's status is not changed by it. Empty after a reboot.
+    pub reboot_pending: Vec<String>,
+    /// Each reboot the run did, in order.
+    pub reboots: Vec<crate::executor::RebootRecord>,
 }
 
 impl HostReport {
@@ -449,6 +470,8 @@ impl HostReport {
             splits: Vec::new(),
             diffs: Vec::new(),
             check: None,
+            reboot_pending: Vec::new(),
+            reboots: Vec::new(),
         }
     }
 
@@ -525,10 +548,17 @@ impl Report {
             .max()
             .unwrap_or(0)
             .max(4);
+        let status_w = self
+            .hosts
+            .iter()
+            .map(|h| h.status.label().len())
+            .max()
+            .unwrap_or(0)
+            .max(8);
         let mut out = String::new();
         let _ = writeln!(
             out,
-            "{:<name_w$}  {:<8} {:>3} {:>7} {:>6} {:>7}  DETAIL",
+            "{:<name_w$}  {:<status_w$} {:>3} {:>7} {:>6} {:>7}  DETAIL",
             "HOST", "STATUS", "OK", "CHANGED", "FAILED", "NOT RUN"
         );
         for h in &self.hosts {
@@ -545,10 +575,12 @@ impl Report {
                 HostStatus::Blocked(why) | HostStatus::Error(why) | HostStatus::NotStarted(why) => {
                     why.lines().next().unwrap_or("").to_string()
                 }
+                HostStatus::RebootPending(_) => "reboot pending at barrier".to_string(),
+                _ if !h.reboot_pending.is_empty() => "reboot pending".to_string(),
                 _ => String::new(),
             };
             let row = format!(
-                "{:<name_w$}  {:<8} {:>3} {:>7} {:>6} {:>7}  {}",
+                "{:<name_w$}  {:<status_w$} {:>3} {:>7} {:>6} {:>7}  {}",
                 h.name,
                 h.status.label(),
                 ok,
@@ -638,7 +670,32 @@ impl Report {
                 HostStatus::NotStarted(why) => {
                     let _ = writeln!(out, "\n{}: not started: {why}", h.name);
                 }
+                HostStatus::RebootPending(list) => {
+                    let _ = writeln!(
+                        out,
+                        "\n{}: reboot pending at barrier ({})",
+                        h.name,
+                        list.join(", ")
+                    );
+                }
                 _ => {}
+            }
+            if !h.reboot_pending.is_empty() {
+                let _ = writeln!(
+                    out,
+                    "{}: reboot pending ({})",
+                    h.name,
+                    h.reboot_pending.join(", ")
+                );
+            }
+            for r in &h.reboots {
+                let _ = writeln!(
+                    out,
+                    "{}: rebooted once, down {}s ({})",
+                    h.name,
+                    r.down_secs,
+                    r.pending.join(", ")
+                );
             }
             if !h.skipped_roles.is_empty() {
                 let _ = writeln!(

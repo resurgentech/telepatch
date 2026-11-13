@@ -220,6 +220,7 @@ impl<V> Host<V> {
             at_end: false,
             timeout: None,
             retry: 0,
+            needs_reboot: false,
         };
         let id = self.trace.borrow_mut().push(Node::Op(node));
         OpHandle {
@@ -239,6 +240,15 @@ impl<V> Host<V> {
     /// Everything after this waits for everything before it.
     pub fn barrier(&self) -> NodeId {
         self.trace.borrow_mut().push(Node::Barrier)
+    }
+
+    /// The reboot barrier's builder. On its own it records nothing: call
+    /// [`RebootBarrier::if_pending`] (see "Reboot" in the design note).
+    #[must_use = "`h.reboot()` records nothing until `.if_pending()`"]
+    pub fn reboot(&self) -> RebootBarrier {
+        RebootBarrier {
+            trace: self.trace.clone(),
+        }
     }
 
     /// Mark a role boundary; the matching end is recorded when the guard
@@ -306,6 +316,27 @@ impl<V> Host<V> {
         let mut host = self.clone();
         host.run_as = RunAs::login(user);
         Scope(host)
+    }
+}
+
+/// What [`Host::reboot`] returns.
+#[must_use = "`h.reboot()` records nothing until `.if_pending()`"]
+pub struct RebootBarrier {
+    trace: Rc<RefCell<Trace>>,
+}
+
+impl RebootBarrier {
+    /// Place the reboot barrier here, in the playbook, between roles: a
+    /// hard fence. Everything before it is applied; the host reboots once
+    /// if any op before it (or an earlier run) marked it with
+    /// [`OpHandle::needs_reboot`], and waits to come back; everything
+    /// after it runs on the rebooted host. With nothing pending it does
+    /// nothing. Under `--local`, `--reboot never` and the docker
+    /// transport the run stops here instead (`reboot pending at barrier`).
+    #[track_caller]
+    pub fn if_pending(self) -> NodeId {
+        let site = Site::caller();
+        self.trace.borrow_mut().push(Node::Reboot { site })
     }
 }
 
@@ -421,6 +452,7 @@ impl OpHandle {
             at_end: false,
             timeout: None,
             retry: 0,
+            needs_reboot: false,
         };
         let id = self.trace.borrow_mut().push(Node::Op(node));
         OpHandle {
@@ -520,6 +552,16 @@ impl OpHandle {
         Guard::ExitOk(self.id)
     }
 
+    /// This op's change takes effect only after a reboot. When it changes
+    /// something, the host is marked (`reboot-pending`, listing it); a
+    /// `h.reboot().if_pending()` barrier reboots once for every mark, and
+    /// the end of the run reports what is still pending. A role marks and
+    /// never reboots. A second call changes nothing.
+    #[track_caller]
+    pub fn needs_reboot(&self) -> OpHandle {
+        self.edit(|op| op.needs_reboot = true).clone()
+    }
+
     /// Move this op to the end of its host's run: after the last window's
     /// ops, in a window of its own, in trace order with the other `at_end`
     /// ops. Until then its effects are not visible to fact reads (its
@@ -587,6 +629,12 @@ macro_rules! op_builders {
             #[track_caller]
             pub fn timeout(&self, d: std::time::Duration) -> Self {
                 self.0.timeout(d);
+                self.clone()
+            }
+            /// See [`OpHandle::needs_reboot`].
+            #[track_caller]
+            pub fn needs_reboot(&self) -> Self {
+                self.0.needs_reboot();
                 self.clone()
             }
             /// See [`OpHandle::at_end`].

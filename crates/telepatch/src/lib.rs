@@ -34,7 +34,7 @@ pub mod trailer;
 pub mod transport;
 pub mod vars;
 
-pub use host::{Host, OpHandle, Scope, TraceError};
+pub use host::{Host, OpHandle, RebootBarrier, Scope, TraceError};
 pub use key::{Key, Value};
 pub use local::{local, local_dir, local_file};
 pub use ops::wait::{MIN, Port, SEC, Wait};

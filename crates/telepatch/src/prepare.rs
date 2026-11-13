@@ -997,6 +997,7 @@ pub async fn prepare_window<S: ShellSet>(
             at_end: false,
             timeout: None,
             retry: 0,
+            needs_reboot: false,
         };
         let who = &op.node.run_as;
         let sh = shell_of(shells, who)?;
@@ -1734,6 +1735,7 @@ pacman() {
                 id: NodeId(id),
                 role: String::new(),
                 pkg_names: Vec::new(),
+                needs_reboot: false,
             }],
             node: OpNode {
                 writes: spec.default_writes(),
@@ -1748,6 +1750,7 @@ pacman() {
                 at_end: false,
                 timeout: None,
                 retry: 0,
+                needs_reboot: false,
             },
         };
         let restart = SvcSpec {

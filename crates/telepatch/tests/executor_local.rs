@@ -2521,3 +2521,81 @@ mod retry_and_wait {
         );
     }
 }
+
+// ---- a pending reboot barrier under --local (T102) ----
+
+fn reboot_local_pb(h: Host<PathBuf>) -> PlaybookFuture {
+    Box::pin(async move {
+        let before = p(&h, "before");
+        let after = p(&h, "after");
+        {
+            let _r = h.role_enter("kernel_update");
+            h.file(&before).content("1\n").needs_reboot();
+        }
+        h.reboot().if_pending();
+        {
+            let _r = h.role_enter("cuda_workloads");
+            sh!(h, "touch {after}");
+        }
+        Ok(())
+    })
+}
+
+fn reboot_local_host(d: &std::path::Path) -> HostSpec<PathBuf> {
+    HostSpec {
+        groups: Vec::new(),
+        name: "local".into(),
+        // The mark goes under the test's directory, never `/run`.
+        target: Target::Local(
+            LocalTransport::new()
+                .uid(0)
+                .env("TP_RUN_DIR", d.join("run").to_str().unwrap()),
+        ),
+        vars: d.to_path_buf(),
+    }
+}
+
+#[test]
+fn a_pending_barrier_under_local_stops_with_reboot_pending_at_barrier() {
+    let d = tempfile::tempdir().unwrap();
+    let pb = Playbook::new("rebootable", reboot_local_pb);
+    let (r, out) = go(&pb, vec![reboot_local_host(d.path())]);
+    let before = d.path().join("before").display().to_string();
+    assert_eq!(
+        r.hosts[0].status,
+        HostStatus::RebootPending(vec![format!("file {before}")]),
+        "{out}"
+    );
+    assert_eq!(r.exit_code(), 1);
+    // Before the barrier applied, after it not run.
+    assert_eq!(
+        std::fs::read_to_string(d.path().join("before")).unwrap(),
+        "1\n"
+    );
+    assert!(!d.path().join("after").exists());
+    assert!(
+        out.contains("== local [rebootable] reboot: pending (file")
+            || out.contains("== local [kernel_update] reboot: pending (file"),
+        "{out}"
+    );
+    assert!(out.contains("reboot pending at barrier =="), "{out}");
+    assert!(
+        r.render().contains("reboot pending at barrier"),
+        "{}",
+        r.render()
+    );
+    assert_eq!(
+        std::fs::read_to_string(d.path().join("run/reboot-pending")).unwrap(),
+        format!("file {before}\n")
+    );
+    assert_eq!(
+        r.hosts[0].skipped_roles,
+        ["cuda_workloads".to_string()],
+        "{out}"
+    );
+    // The next run, after "the reboot" (the mark gone), goes past it.
+    std::fs::remove_file(d.path().join("run/reboot-pending")).unwrap();
+    let (r2, out2) = go(&pb, vec![reboot_local_host(d.path())]);
+    assert_eq!(r2.hosts[0].status, HostStatus::Changed, "{out2}");
+    assert!(d.path().join("after").exists());
+}

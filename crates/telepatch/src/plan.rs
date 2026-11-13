@@ -31,6 +31,9 @@ fn op_line(out: &mut String, id: usize, op: &OpNode, os: &Os) {
     if op.allow_fail {
         out.push_str(" allow_fail");
     }
+    if op.needs_reboot {
+        out.push_str(" needs_reboot");
+    }
     if op.retry > 0 {
         let _ = write!(out, " retry {}", op.retry);
     }
@@ -103,6 +106,9 @@ pub fn render_host(name: &str, os: &Os, trace: &Trace) -> String {
             Node::Barrier => {
                 let _ = writeln!(out, "  #{i} barrier");
             }
+            Node::Reboot { .. } => {
+                let _ = writeln!(out, "  #{i} reboot if pending");
+            }
             Node::RoleBegin(_) | Node::RoleEnd(_) => unreachable!(),
         }
     }
@@ -160,6 +166,19 @@ fn split_line(s: &Split) -> String {
 /// the roles they came from; a split candidate is a line after the op that
 /// installs the downloader.
 pub fn render_windows(name: &str, os: &Os, blocking_reads: usize, windows: &[Window]) -> String {
+    render_windows_with(name, os, blocking_reads, windows, &[])
+}
+
+/// [`render_windows`] with the reboot barriers the engine crossed: each is
+/// the number of the last window before it (0: before the first), and
+/// prints `-- reboot if pending --` after that window.
+pub fn render_windows_with(
+    name: &str,
+    os: &Os,
+    blocking_reads: usize,
+    windows: &[Window],
+    reboots: &[usize],
+) -> String {
     let mut out = String::new();
     let _ = writeln!(
         out,
@@ -167,6 +186,12 @@ pub fn render_windows(name: &str, os: &Os, blocking_reads: usize, windows: &[Win
         os.family, os.distro, os.version
     );
     let _ = writeln!(out, "blocking reads: {blocking_reads}");
+    let barrier = |out: &mut String, after: usize| {
+        for _ in reboots.iter().filter(|n| **n == after) {
+            let _ = writeln!(out, "\n-- reboot if pending --");
+        }
+    };
+    barrier(&mut out, 0);
     for w in windows {
         let _ = writeln!(out, "\nwindow {} ({})", w.number, window_kind(w.kind));
         let mut role: Option<&str> = None;
@@ -196,6 +221,7 @@ pub fn render_windows(name: &str, os: &Os, blocking_reads: usize, windows: &[Win
                 let _ = writeln!(out, "{}", split_line(s));
             }
         }
+        barrier(&mut out, w.number);
     }
     sh_warnings(
         &mut out,

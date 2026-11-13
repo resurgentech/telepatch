@@ -8,6 +8,14 @@
 //! again. Explicit `barrier()` nodes never force execution; they only fence
 //! hoisting of non-mutating nodes (and are edges for the optimizer, T8).
 //!
+//! A reboot node ([`Node::Reboot`], `h.reboot().if_pending()`) is a hard
+//! fence. No window ever holds ops from both sides of it: before a read
+//! blocks, and again when the trace ends, the engine applies every pending
+//! op before each uncrossed reboot node, asks the executor to cross it
+//! ([`Executor::reboot`]) and only then goes on, so a read after the node,
+//! and every op after it, meets the rebooted host. The executor decides
+//! what crossing is (nothing pending: nothing; a halted host: nothing).
+//!
 //! A check-only executor ([`Executor::check_only`]) applies nothing, so an
 //! implicit barrier cannot be crossed: the engine hands the window before
 //! it to the executor (prepare runs for it) and stops tracing with
@@ -64,6 +72,9 @@ pub struct Member {
     /// The names this member asked for, for a `pkg` op (empty otherwise):
     /// a member of a merged `pkg` op changed when one of them was installed.
     pub pkg_names: Vec<String>,
+    /// `.needs_reboot()` on this member's own op: it marks the host when it
+    /// changed (a merged op's other members may not be marked).
+    pub needs_reboot: bool,
 }
 
 impl Member {
@@ -76,6 +87,7 @@ impl Member {
                 OpSpec::Pkg(p) => p.member_names(),
                 _ => Vec::new(),
             },
+            needs_reboot: op.needs_reboot,
         }
     }
 }
@@ -253,6 +265,12 @@ pub enum EngineError {
         site: Option<Site>,
         reads: Vec<Key>,
     },
+    /// A check-only run reached a reboot barrier that may be pending (the
+    /// host is marked, or an op before it that marks may change): a dry run
+    /// never reboots, so what follows cannot be checked.
+    CheckStoppedAtReboot {
+        site: Option<Site>,
+    },
 }
 
 impl std::fmt::Display for EngineError {
@@ -267,10 +285,36 @@ impl std::fmt::Display for EngineError {
                 Some(s) => write!(f, "check stopped at {s}: this read needs the changes above"),
                 None => f.write_str("check stopped: this read needs the changes above"),
             },
+            EngineError::CheckStoppedAtReboot { site } => match site {
+                Some(s) => write!(f, "check stopped at {s}: reboot pending at barrier"),
+                None => f.write_str("check stopped: reboot pending at barrier"),
+            },
         }
     }
 }
 impl std::error::Error for EngineError {}
+
+/// Where a reboot barrier is, for the executor's stream line.
+#[derive(Debug, Clone)]
+pub struct RebootAt {
+    /// The playbook's `h.reboot().if_pending()` call.
+    pub site: Option<Site>,
+    /// The role the barrier was traced in (empty outside any role).
+    pub role: String,
+}
+
+/// What crossing a reboot barrier came to ([`Executor::reboot`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Crossed {
+    /// Nothing was pending, or the host cannot cross (halted, or the run
+    /// stops at the barrier): the engine carries on, and the executor's
+    /// halted host reports what follows as not run.
+    Continue,
+    /// The host rebooted and came back: facts read before are stale.
+    Rebooted,
+    /// A check-only run met a barrier it cannot cross.
+    CheckStopped,
+}
 
 /// Runs windows and reads facts on a host. Native async fns: there is no
 /// `dyn Executor`, and the engine is `!Send` anyway.
@@ -290,6 +334,24 @@ pub trait Executor {
     async fn apply(&mut self, host: &HostInfo, window: &Window) -> Result<Applied, String>;
 
     fn observe(&mut self, _host: &HostInfo, _obs: &Observation) {}
+
+    /// Cross the reboot barrier `at`: every op before it has been applied.
+    /// `window` is the number of the last window that ran. The default
+    /// crosses nothing (an executor with no host to reboot).
+    async fn reboot(
+        &mut self,
+        _host: &HostInfo,
+        _window: usize,
+        _at: &RebootAt,
+    ) -> Result<Crossed, String> {
+        Ok(Crossed::Continue)
+    }
+
+    /// The trace ended and every window ran: whatever the host is left with
+    /// (a reboot still pending) is the executor's to report or act on.
+    async fn end_of_run(&mut self, _host: &HostInfo, _window: usize) -> Result<(), String> {
+        Ok(())
+    }
 
     /// A dry run: [`Executor::apply`] only prepares and reports, it never
     /// changes the host. The engine then stops at the first implicit
@@ -338,6 +400,8 @@ impl<E: Executor> Engine<E> {
                 Poll::Ready(Err(e)) => return Err(EngineError::Playbook(e)),
                 Poll::Ready(Ok(())) => {
                     host.check_only().map_err(EngineError::Playbook)?;
+                    self.cross_reboots(&info, &host, &mut window, &mut carry)
+                        .await?;
                     let ids = pending_ids(&host, false);
                     let ran = !ids.is_empty();
                     self.apply(
@@ -365,6 +429,10 @@ impl<E: Executor> Engine<E> {
                         )
                         .await?;
                     }
+                    self.executor
+                        .end_of_run(&info, window)
+                        .await
+                        .map_err(EngineError::Exec)?;
                     return Ok(());
                 }
                 Poll::Pending => {
@@ -390,6 +458,60 @@ impl<E: Executor> Engine<E> {
                     }
                     window += 1;
                 }
+            }
+        }
+    }
+
+    /// Cross every reboot node traced so far and not yet crossed, in
+    /// order: apply the pending ops before it (their own windows), then
+    /// [`Executor::reboot`]. A crossing that rebooted the host makes the
+    /// facts confirmed before it stale.
+    async fn cross_reboots<V>(
+        &mut self,
+        info: &HostInfo,
+        host: &Host<V>,
+        window: &mut usize,
+        carry: &mut Carry,
+    ) -> Result<(), EngineError> {
+        loop {
+            let Some(at) = pending_reboots(host).into_iter().next() else {
+                return Ok(());
+            };
+            let ids: Vec<NodeId> = pending_ids(host, false)
+                .into_iter()
+                .filter(|id| id.0 < at.0)
+                .collect();
+            let applied = !ids.is_empty();
+            self.apply(info, host, window, WindowKind::Final, ids, carry)
+                .await?;
+            let place = {
+                let trace = host.trace_cell().borrow();
+                let site = match trace.nodes.get(at.0) {
+                    Some(Node::Reboot { site }) => Some(*site),
+                    _ => None,
+                };
+                RebootAt {
+                    site,
+                    role: node_roles(&trace).get(at.0).cloned().unwrap_or_default(),
+                }
+            };
+            let crossed = self
+                .executor
+                .reboot(info, *window, &place)
+                .await
+                .map_err(EngineError::Exec)?;
+            if crossed == Crossed::CheckStopped {
+                return Err(EngineError::CheckStoppedAtReboot { site: place.site });
+            }
+            {
+                let mut resolver = host.resolver_cell().borrow_mut();
+                resolver.mark_applied(&host.trace_cell().borrow(), &[at]);
+                if crossed == Crossed::Rebooted {
+                    resolver.forget_confirmed();
+                }
+            }
+            if applied {
+                *window += 1;
             }
         }
     }
@@ -443,6 +565,8 @@ impl<E: Executor> Engine<E> {
         site: Option<Site>,
         carry: &mut Carry,
     ) -> Result<(), EngineError> {
+        // A read after a reboot node meets the rebooted host.
+        self.cross_reboots(info, host, window, carry).await?;
         let hoist = non_mutating_ready(host);
         self.apply(info, host, window, WindowKind::NonMutating, hoist, carry)
             .await?;
@@ -652,6 +776,12 @@ fn user_split<V>(host: &Host<V>, ids: &[NodeId]) -> usize {
     ids.len()
 }
 
+/// The reboot nodes traced and not crossed yet, in trace order.
+fn pending_reboots<V>(host: &Host<V>) -> Vec<NodeId> {
+    let trace = host.trace_cell().borrow();
+    host.resolver_cell().borrow().pending_reboots(&trace)
+}
+
 /// The pending ops that are (`at_end`) or are not `.at_end()`.
 fn pending_ids<V>(host: &Host<V>, at_end: bool) -> Vec<NodeId> {
     let trace = host.trace_cell().borrow();
@@ -679,8 +809,11 @@ fn non_mutating_ready<V>(host: &Host<V>) -> Vec<NodeId> {
     let mut mutation_writes: Vec<&Key> = Vec::new();
     let mut fenced = false;
     let mut out = Vec::new();
+    let reboots: BTreeSet<NodeId> = resolver.pending_reboots(&trace).into_iter().collect();
     for (i, node) in trace.nodes.iter().enumerate() {
         match node {
+            // Nothing moves across a reboot node that has not been crossed.
+            Node::Reboot { .. } if reboots.contains(&NodeId(i)) => break,
             Node::Barrier if !mutation_writes.is_empty() => fenced = true,
             Node::Op(op) if pending.contains(&NodeId(i)) && !op.at_end => {
                 if op.writes.is_empty() {
@@ -701,4 +834,168 @@ fn non_mutating_ready<V>(host: &Host<V>) -> Vec<NodeId> {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod reboot_tests {
+    use std::rc::Rc;
+
+    use super::*;
+    use crate::testing::{FakeExecutor, FixtureHost, block_on};
+
+    fn debian() -> FixtureHost<()> {
+        FixtureHost::new("web1", Os::fixture("debian12").unwrap(), Rc::new(()))
+    }
+
+    fn host() -> Host<()> {
+        let f = debian();
+        Host::new(f.name.clone(), f.os.clone(), f.vars.clone())
+    }
+
+    fn nodes(h: &Host<()>) -> Vec<Node> {
+        h.snapshot().nodes
+    }
+
+    #[test]
+    fn needs_reboot_sets_the_flag_on_every_typed_handle() {
+        let h = host();
+        h.raw("true").needs_reboot();
+        h.file("/etc/x").needs_reboot();
+        h.pkg(["linux-generic"]).needs_reboot();
+        h.svc("docker").started().needs_reboot();
+        h.unit("x.service").needs_reboot();
+        h.user("bot").needs_reboot();
+        h.group("g").needs_reboot();
+        h.repo("r").needs_reboot();
+        h.git("https://x/y.git").needs_reboot();
+        h.wait_for(crate::Wait::unit("x")).needs_reboot();
+        h.raw("untouched");
+        let flags: Vec<bool> = nodes(&h)
+            .iter()
+            .filter_map(|n| match n {
+                Node::Op(o) => Some(o.needs_reboot),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(flags.len(), 11, "{flags:?}");
+        assert!(flags[..10].iter().all(|f| *f), "{flags:?}");
+        assert!(!flags[10], "{flags:?}");
+    }
+
+    #[test]
+    fn a_reboot_node_is_recorded_by_if_pending_only() {
+        let h = host();
+        let _ = h.reboot();
+        assert!(nodes(&h).is_empty(), "h.reboot() alone records nothing");
+        h.raw("a");
+        let id = h.reboot().if_pending();
+        h.raw("b");
+        let n = nodes(&h);
+        assert_eq!(id, NodeId(1));
+        assert!(matches!(n[1], Node::Reboot { .. }), "{n:?}");
+        assert!(matches!(n[1], Node::Reboot { site } if site.file.ends_with("engine.rs")));
+        let plan = crate::plan::render_host("web1", &host().os, &h.snapshot());
+        assert!(plan.contains("  #1 reboot if pending\n"), "{plan}");
+    }
+
+    #[test]
+    fn a_marked_op_shows_needs_reboot_in_the_plan() {
+        let h = host();
+        h.file("/etc/x").needs_reboot();
+        h.file("/etc/y");
+        let plan = crate::plan::render_host("web1", &h.os, &h.snapshot());
+        let lines: Vec<&str> = plan.lines().filter(|l| l.starts_with("  #")).collect();
+        assert!(lines[0].contains(" needs_reboot"), "{plan}");
+        assert!(!lines[1].contains("needs_reboot"), "{plan}");
+    }
+
+    fn pkg_barrier_pb(h: Host<()>) -> crate::PlaybookFuture {
+        Box::pin(async move {
+            h.pkg(["a"]);
+            h.reboot().if_pending();
+            h.pkg(["b"]);
+            Ok(())
+        })
+    }
+
+    fn run(pb: fn(Host<()>) -> crate::PlaybookFuture) -> FakeExecutor {
+        let h = host();
+        let pb = Playbook::new("t", pb);
+        let mut engine = Engine::new(FakeExecutor::new());
+        block_on(engine.run_host(&pb, h)).unwrap();
+        engine.executor
+    }
+
+    #[test]
+    fn the_optimizer_never_merges_pkg_ops_across_a_reboot_node() {
+        let fake = run(pkg_barrier_pb);
+        let names: Vec<(usize, Vec<usize>)> = fake
+            .windows
+            .iter()
+            .map(|(_, w)| (w.number, w.ops.iter().map(|o| o.id.0).collect()))
+            .collect();
+        assert_eq!(names, [(1, vec![0]), (2, vec![2])], "{}", fake.render());
+        assert_eq!(fake.reboots, [("web1".to_string(), 1)]);
+        let text = fake.render();
+        let barrier = text.find("-- reboot if pending --").expect(&text);
+        let second = text.find("window 2").expect(&text);
+        assert!(barrier < second, "{text}");
+    }
+
+    #[test]
+    fn a_fact_read_after_the_reboot_node_waits_for_the_crossing() {
+        fn pb(h: Host<()>) -> crate::PlaybookFuture {
+            Box::pin(async move {
+                h.raw("echo a").writes([crate::Key::file("/a")]);
+                h.reboot().if_pending();
+                let _ = h.exists("/elsewhere").await;
+                h.raw("echo b").writes([crate::Key::file("/b")]);
+                Ok(())
+            })
+        }
+        let fake = run(pb);
+        let text = fake.render();
+        let apply_a = text.find("echo a").expect(&text);
+        let barrier = text.find("-- reboot if pending --").expect(&text);
+        let read = text.find("round trip").expect(&text);
+        let apply_b = text.find("echo b").expect(&text);
+        assert!(
+            apply_a < barrier && barrier < read && read < apply_b,
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn a_non_mutating_op_after_the_reboot_node_does_not_hoist_across_it() {
+        fn pb(h: Host<()>) -> crate::PlaybookFuture {
+            Box::pin(async move {
+                h.raw("echo before").writes([crate::Key::file("/a")]);
+                h.reboot().if_pending();
+                h.raw("echo after-ro")
+                    .reads([crate::Key::file("/c")])
+                    .writes([]);
+                let _ = h.exists("/elsewhere").await;
+                Ok(())
+            })
+        }
+        let fake = run(pb);
+        let text = fake.render();
+        let barrier = text.find("-- reboot if pending --").expect(&text);
+        let ro = text.find("echo after-ro").expect(&text);
+        assert!(barrier < ro, "hoisted across the barrier:\n{text}");
+        assert!(text.find("echo before").unwrap() < barrier, "{text}");
+    }
+
+    #[test]
+    fn a_trailing_reboot_node_is_crossed_after_the_last_window() {
+        fn pb(h: Host<()>) -> crate::PlaybookFuture {
+            Box::pin(async move {
+                h.raw("echo last");
+                h.reboot().if_pending();
+                Ok(())
+            })
+        }
+        let fake = run(pb);
+        assert_eq!(fake.reboots, [("web1".to_string(), 1)], "{}", fake.render());
+    }
 }

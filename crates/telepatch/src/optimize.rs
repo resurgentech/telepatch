@@ -331,6 +331,7 @@ impl Graph {
             if let (OpSpec::Pkg(a), OpSpec::Pkg(b)) = (&mut h.node.spec, &other.node.spec) {
                 a.merge(b);
             }
+            h.node.needs_reboot |= other.node.needs_reboot;
             h.node.reads.extend(other.node.reads);
             h.node.writes.extend(other.node.writes);
             h.node.post.extend(other.node.post);
@@ -434,6 +435,7 @@ impl Graph {
             (Some(a), Some(b)) => Some(a | b),
             (a, b) => a.or(b),
         };
+        h.node.needs_reboot |= other.node.needs_reboot;
         h.node.reads.extend(other.node.reads);
         h.node.writes.extend(other.node.writes);
         for (k, v) in other.node.post {
@@ -545,12 +547,14 @@ mod tests {
                 at_end: false,
                 timeout: None,
                 retry: 0,
+                needs_reboot: false,
                 spec,
             },
             members: vec![Member {
                 id: NodeId(id),
                 role: format!("r{id}"),
                 pkg_names: Vec::new(),
+                needs_reboot: false,
             }],
         })
     }

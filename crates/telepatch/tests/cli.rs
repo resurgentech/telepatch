@@ -893,3 +893,30 @@ fn check_works_over_an_inventory() {
     assert_eq!(code, 2, "{out}");
     assert_eq!(read(d.path(), "two/greeting"), None);
 }
+
+// ---- run --reboot ----
+
+#[test]
+fn reboot_takes_auto_or_never_and_a_bad_value_is_a_usage_error() {
+    let d = tempfile::tempdir().unwrap();
+    let dir = d.path().join("out");
+    std::fs::create_dir(&dir).unwrap();
+    let v = vars_file(
+        d.path(),
+        &format!("dir = {:?}\ngreeting = \"hello\"\n", dir.to_str().unwrap()),
+    );
+    for value in ["auto", "never"] {
+        let (out, code) = go(&["run", "greet", "--local", "--vars", &v, "--reboot", value]);
+        assert_eq!(code, 0, "--reboot {value}: {out}");
+    }
+    let (out, code) = go(&["run", "greet", "--local", "--vars", &v, "--reboot", "maybe"]);
+    assert_eq!(code, 2, "{out}");
+    assert!(
+        out.contains("--reboot") && out.contains("auto") && out.contains("never"),
+        "{out}"
+    );
+    // A check never reboots: the two together are a usage error.
+    let (out, code) = go(&["run", "greet", "--local", "--check", "--reboot", "auto"]);
+    assert_eq!(code, 2, "{out}");
+    assert!(out.contains("--reboot") && out.contains("--check"), "{out}");
+}

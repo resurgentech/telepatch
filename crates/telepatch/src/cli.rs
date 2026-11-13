@@ -2,7 +2,8 @@
 //! playbooks. Subcommands: `list`, `plan <name> [--distro D] [--vars f]`,
 //! `run <name> (--local | --host <dest>... | --inventory <file> [--limit n,..])
 //! [--ssh-key <path>] [--ssh-option K=V]... [--vars f] [--log f]
-//! [--serial n] [--max-fail n] [--only a,b] [--check [--diff]]`.
+//! [--serial n] [--max-fail n] [--only a,b] [--reboot auto|never]
+//! [--check [--diff]]`.
 //!
 //! `run` takes exactly one of `--local` (this machine), `--host`
 //! (repeatable; each `<dest>` goes to `ssh` verbatim, `user@host` or
@@ -24,6 +25,13 @@
 //! with it, and a name the playbook did not trace is an error on that host
 //! listing the roles it traced. All three also apply under `--check`.
 //!
+//! `--reboot auto|never` is about ops marked `.needs_reboot()` (see
+//! [`crate::executor`], "Reboot"): without it a pending
+//! `h.reboot().if_pending()` barrier reboots the host over SSH and the end of
+//! the run only reports what is still pending; `auto` also reboots once at the
+//! end; `never` stops a host at a pending barrier. A usage error with `--check`
+//! (a check never reboots).
+//!
 //! `--check` traces and prepares every host and applies nothing
 //! ([`crate::executor::run_check`]); `--diff` (only with `--check`) adds a
 //! unified diff per file that would change, none for a secret file. The
@@ -41,7 +49,9 @@ use std::rc::Rc;
 use clap::{ArgGroup, Parser, Subcommand};
 use serde::de::DeserializeOwned;
 
-use crate::executor::{CheckOpts, HostSpec, RunControls, RunOpts, Stdout, Target, run_with};
+use crate::executor::{
+    CheckOpts, HostSpec, RebootPolicy, RunControls, RunOpts, Stdout, Target, run_with,
+};
 use crate::facts::os::Os;
 use crate::inventory::{InvHost, Inventory};
 use crate::role::Playbook;
@@ -130,7 +140,22 @@ enum Cmd {
         /// the playbook did not trace is an error listing those it did.
         #[arg(long, value_delimiter = ',')]
         only: Vec<String>,
+        /// What to do about a pending reboot (ops marked `.needs_reboot()`):
+        /// `auto` also reboots once at the end of the run; `never` stops at
+        /// a pending `h.reboot().if_pending()` barrier instead of crossing
+        /// it. Without the flag a pending barrier reboots and the end only
+        /// reports. A reboot needs SSH: `--local` always stops at the
+        /// barrier. Not with `--check`, which never reboots.
+        #[arg(long, value_enum, conflicts_with = "check")]
+        reboot: Option<RebootArg>,
     },
+}
+
+/// The values of `--reboot`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+enum RebootArg {
+    Auto,
+    Never,
 }
 
 fn parse_serial(s: &str) -> Result<usize, String> {
@@ -283,6 +308,7 @@ fn dispatch<V: DeserializeOwned + Default + 'static>(
             serial,
             max_fail,
             only,
+            reboot,
             ..
         } => {
             let pb = match find(&name) {
@@ -359,6 +385,12 @@ fn dispatch<V: DeserializeOwned + Default + 'static>(
                 serial,
                 max_fail,
                 only,
+                reboot: match reboot {
+                    None => RebootPolicy::Barriers,
+                    Some(RebootArg::Auto) => RebootPolicy::Auto,
+                    Some(RebootArg::Never) => RebootPolicy::Never,
+                },
+                ..Default::default()
             };
             let report = run_with(
                 pb,

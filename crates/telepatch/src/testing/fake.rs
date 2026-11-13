@@ -4,7 +4,9 @@
 use std::collections::BTreeMap;
 use std::fmt::Write;
 
-use crate::engine::{Applied, Engine, Executor, HostInfo, Observation, Window, WindowKind};
+use crate::engine::{
+    Applied, Crossed, Engine, Executor, HostInfo, Observation, RebootAt, Window, WindowKind,
+};
 use crate::facts::query::{Fact, FactQuery};
 use crate::host::Host;
 use crate::key::Value;
@@ -40,6 +42,10 @@ pub enum Call {
         window: usize,
         answers: Vec<(FactQuery, Value)>,
     },
+    /// A reboot barrier the engine asked the executor to cross.
+    Reboot {
+        window: usize,
+    },
 }
 
 /// Records every call and answers reads from `(RunAs, Fact) -> Value`;
@@ -51,6 +57,9 @@ pub struct FakeExecutor {
     pub calls: Vec<(String, Call)>,
     /// Every window applied, with its host, as the engine prepared it.
     pub windows: Vec<(String, Window)>,
+    /// Every reboot barrier crossed, with its host and the number of the
+    /// last window applied before it (0: none).
+    pub reboots: Vec<(String, usize)>,
     /// A host with neither curl nor wget, where every download needs one:
     /// a window with a split candidate is declined for its head, unrecorded.
     no_downloader: bool,
@@ -112,6 +121,7 @@ impl FakeExecutor {
                 Call::Resolved { window, .. }
                 | Call::ImplicitBarrier { window, .. }
                 | Call::Apply { window, .. }
+                | Call::Reboot { window }
                 | Call::Read { window, .. } => *window,
             };
             if w != window {
@@ -147,6 +157,9 @@ impl FakeExecutor {
                             op.script.replace('\n', " ; ")
                         );
                     }
+                }
+                Call::Reboot { .. } => {
+                    let _ = writeln!(out, "  -- reboot if pending --");
                 }
                 Call::Read { answers, .. } => {
                     let _ = writeln!(out, "  round trip:");
@@ -224,6 +237,24 @@ impl Executor for FakeExecutor {
             },
         ));
         Ok(Applied::All)
+    }
+
+    async fn reboot(
+        &mut self,
+        host: &HostInfo,
+        window: usize,
+        _at: &RebootAt,
+    ) -> Result<Crossed, String> {
+        let last = self
+            .windows
+            .iter()
+            .rev()
+            .find(|(h, _)| *h == host.name)
+            .map_or(0, |(_, w)| w.number);
+        self.reboots.push((host.name.clone(), last));
+        self.calls
+            .push((host.name.clone(), Call::Reboot { window }));
+        Ok(Crossed::Continue)
     }
 
     fn observe(&mut self, host: &HostInfo, obs: &Observation) {

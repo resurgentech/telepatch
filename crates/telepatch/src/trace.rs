@@ -447,6 +447,10 @@ pub struct OpNode {
     /// controller, up to `n` more times, before it counts as failed. The
     /// op ends its pipelined run.
     pub retry: u32,
+    /// `.needs_reboot()`: when this op changes something, the change takes
+    /// effect only after a reboot. The executor writes a mark on the host
+    /// ([`crate::reboot`]); a `h.reboot().if_pending()` barrier reads it.
+    pub needs_reboot: bool,
 }
 
 /// Which login shells a changed op stales ([`OpNode::stales`]).
@@ -724,6 +728,13 @@ pub enum Node {
         source: Source,
     },
     Barrier,
+    /// `h.reboot().if_pending()`: a hard fence. Everything before it is
+    /// applied, the host reboots once if anything is pending, and what
+    /// follows runs on the rebooted host. Never part of a window: the
+    /// engine splits the pending ops at it ([`crate::engine`]).
+    Reboot {
+        site: Site,
+    },
     RoleBegin(String),
     RoleEnd(String),
 }
@@ -875,6 +886,7 @@ mod limit_tests {
             at_end: false,
             timeout: None,
             retry: 0,
+            needs_reboot: false,
         }
     }
 

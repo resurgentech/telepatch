@@ -295,3 +295,77 @@ fn two_as_user_ops_share_one_login_shell_and_start_no_bash_l() {
         "a bash child of the login shell: {others:?}"
     );
 }
+
+// ---- the reboot mark and the boot id (T102) ----
+
+/// A marked op's text reaches the host in the mark, and the mark is written
+/// by shell builtins from the root shell's stdin: `mkdir` is the only
+/// command run, with the directory alone. Shims for the commands the mark
+/// script could run log their argv; the op's token is in none of them, and
+/// `printf` is never run as a command at all.
+#[test]
+fn a_reboot_mark_is_written_by_builtins_and_no_op_text_is_on_a_command_line() {
+    use std::io::Write as _;
+    let d = tempfile::tempdir().unwrap();
+    let shims = d.path().join("shims");
+    std::fs::create_dir(&shims).unwrap();
+    let log = d.path().join("argv.log");
+    for name in ["mkdir", "printf", "cat"] {
+        let body = format!(
+            "#!/bin/sh\necho \"{name} $*\" >> '{}'\nexec /usr/bin/{name} \"$@\"\n",
+            log.display()
+        );
+        let mut c = std::process::Command::new("sh")
+            .arg("-c")
+            .arg("cat > \"$1\" && chmod 755 \"$1\"")
+            .arg("sh")
+            .arg(shims.join(name))
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        c.stdin.take().unwrap().write_all(body.as_bytes()).unwrap();
+        assert!(c.wait().unwrap().success());
+    }
+    let tok = token("mark");
+    let work = d.path().join(&tok);
+    std::fs::create_dir(&work).unwrap();
+    let run_dir = d.path().join("run");
+    let path = format!("{}:{}", shims.display(), std::env::var("PATH").unwrap());
+    let pb = Playbook::new("marked", |h: Host<PathBuf>| -> PlaybookFuture {
+        Box::pin(async move {
+            let f = h.vars.join("conf").display().to_string();
+            h.file(&f).content("x\n").needs_reboot();
+            Ok(())
+        })
+    });
+    let out = Rc::new(RefCell::new(String::new()));
+    let r = run(
+        &pb,
+        vec![HostSpec {
+            groups: Vec::new(),
+            name: "h1".into(),
+            target: Target::Local(
+                LocalTransport::new()
+                    .uid(0)
+                    .env("PATH", &path)
+                    .env("TP_RUN_DIR", run_dir.to_str().unwrap()),
+            ),
+            vars: work.clone(),
+        }],
+        RunOpts {
+            log: None,
+            stdout: Stdout::Capture(out.clone()),
+        },
+    );
+    assert_eq!(r.exit_code(), 0, "{}\n{}", r.render(), out.borrow());
+    let mark = std::fs::read_to_string(run_dir.join("reboot-pending")).unwrap();
+    assert!(mark.contains(&tok), "the mark names the op: {mark}");
+    let argv = std::fs::read_to_string(&log).unwrap_or_default();
+    assert!(!argv.contains(&tok), "op text on a command line: {argv}");
+    assert!(!argv.lines().any(|l| l.starts_with("printf ")), "{argv}");
+    assert!(
+        argv.lines()
+            .any(|l| l == format!("mkdir -p {}", run_dir.display())),
+        "{argv}"
+    );
+}

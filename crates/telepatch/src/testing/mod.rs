@@ -93,11 +93,13 @@ pub fn plan_with<V>(playbook: &Playbook<V>, host: &FixtureHost<V>, fake: FakeExe
         .iter()
         .map(|(_, w)| w.clone())
         .collect();
-    crate::plan::render_windows(
+    let reboots: Vec<usize> = engine.executor.reboots.iter().map(|(_, n)| *n).collect();
+    crate::plan::render_windows_with(
         &host.name,
         &host.os,
         engine.executor.blocking_reads(),
         &windows,
+        &reboots,
     )
 }
 

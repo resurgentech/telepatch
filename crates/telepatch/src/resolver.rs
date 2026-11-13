@@ -55,6 +55,24 @@ impl Resolver {
             .collect()
     }
 
+    /// Reboot nodes not yet crossed, in trace order.
+    pub fn pending_reboots(&self, trace: &Trace) -> Vec<NodeId> {
+        trace
+            .nodes
+            .iter()
+            .enumerate()
+            .filter_map(|(i, n)| match n {
+                Node::Reboot { .. } if !self.applied.contains(&NodeId(i)) => Some(NodeId(i)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// A reboot happened: nothing read before it is known any more.
+    pub fn forget_confirmed(&mut self) {
+        self.confirmed.clear();
+    }
+
     /// Resolve in order: confirmed, postcondition, block.
     ///
     /// A confirmed value is only trusted while no pending op writes the
@@ -170,6 +188,7 @@ mod tests {
             at_end: false,
             timeout: None,
             retry: 0,
+            needs_reboot: false,
         })
     }
 
