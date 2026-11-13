@@ -1749,3 +1749,21 @@ are appended, never edited in; a hook refuses rewrites.
 - Gate E green: telepatch 1014 passed, lint; tp_basic 52 passed, lint;
   check-sandbox unchanged.
 - Commits: telepatch c2e6aea; tp_basic 509b077
+
+## 2026-11-13 — T128 Sandbox gaps: login shells' `env -i`, and the live tests
+
+- Confirmed: `as_user("root")`'s login shell (`exec env -i … bash -l`)
+  lost `TP_SANDBOX_REQUIRED`, `TP_SANDBOX` and every path seam. No test
+  had hit the real stage only by luck (no login-shell op overwrote an
+  existing file; login_shell.rs's profile exported the seams).
+- `sandbox::CARRY` + `carry_words()`: the `env -i` line carries each of
+  ten variables the root shell has set, as `${N+N="$N"}`; none in
+  production. Note updated.
+- Tests: `login_shell::the_login_shell_keeps_the_sandbox_and_the_path_seams`
+  (RED: all unset at HEAD), a capture test, a unit test for the words.
+- `tests/live/inventory.rs`'s local factory is sandboxed; the other
+  live files open no local shell. `--ignored --list` compiles (44).
+- `check-sandbox.sh`: non-fixed mount points listed only when they
+  hold a `.telepatch` (host docker mounts made it fail falsely).
+- Gate E and check-sandbox green.
+- Commits: telepatch bce318b
