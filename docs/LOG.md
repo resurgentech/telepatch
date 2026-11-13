@@ -1575,3 +1575,21 @@ are appended, never edited in; a hook refuses rewrites.
   be pending. Note: reboot row and `#d-reboot` marked built.
 - Gate E green: 915 passed; lint clean; tp_basic 48 passed, unchanged.
 - Commits: telepatch fec9bd6
+
+## 2026-11-12 — T103 VM proof of reboot
+
+- tp_basic: test-only playbook `reboot_vm` (a file op marked
+  `.needs_reboot()`, `h.reboot().if_pending()`, a file op after it; vars
+  `[reboot_vm] marked`, `after`), plan snapshots on 13 distros.
+- `just test-vm ubuntu2404 reboot_vm` on veritech04, one 1 GiB `tp-*` VM,
+  PASS: run 1 crossed the barrier (boot id changed, down 8s, after-op
+  applied, mark gone); run 2 CHANGED 0, no reboot; run 3 with a fresh mark
+  and `--reboot never` exit 1, `reboot pending at barrier`, after-op not
+  run, mark present; run 4 rebooted from that mark and applied the
+  after-op; run 5 CHANGED 0. VM deleted, none left.
+- test-vm.sh: two-word STATUS parse; VM names map `_` to `-` (the
+  T97j name guard refused `tp-reboot_vm-…`, and would have refused
+  services_vm and dev_*).
+- Gate B green: tp_basic cargo test 50 passed, check-conversion ok,
+  test-oracle-selftest ok, test-vm.sh --self-test ok.
+- Commits: tp_basic fcc1643
