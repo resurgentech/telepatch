@@ -1767,3 +1767,23 @@ are appended, never edited in; a hook refuses rewrites.
   hold a `.telepatch` (host docker mounts made it fail falsely).
 - Gate E and check-sandbox green.
 - Commits: telepatch bce318b
+
+## 2026-11-13 — T119 Downloads land on their target's filesystem
+
+- An item follows its first consumer's target (`tp_fsroot` from the
+  nearest existing ancestor). On another root R: download into
+  `R/.telepatch/tmp/<run>/fetch/`, verified, renamed into
+  `R/.telepatch/cache/sha256/<sum>`; `<stage>/<run>/f-<sum>` (or
+  `u-<hash>`) links to it; R indexed in `fsroots`. Lookup: R's cache,
+  main cache, download onto R. Unwritable R blocks the host
+  (`cannot stage on <R>`), never a fallback to the stage.
+- New paths checked by `tp_sbx`; prepare script starts with the guard
+  line; nothing joined HELPERS. Op lookup stays one line and notes
+  `staged on <R>, target now on <R2>`. Stale sweep also runs at the
+  first fetching window (T106 A14). binary_release stages on its
+  install dir. A pkg-from-file consumer keeps the item on the stage (A1).
+- Tests: 9 in fetch.rs, 1 in binary_release.rs (red 8+1, green 48/21).
+  tp_basic `undo_fs` gains the VM fetch case (written; runs in T104).
+- Snapshots: tp_basic edge 13 lookup lines; undo_fs 13 files for the
+  new ops; telepatch none. Gate E and check-sandbox green.
+- Commits: telepatch 14e1987; tp_basic 573f0e6
