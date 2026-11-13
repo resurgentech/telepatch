@@ -8,8 +8,9 @@
 # The inventory:
 #   - `find` listings (names and mtimes) of the real stage, cache and run
 #     directory, where they exist;
-#   - whether `.telepatch` exists at `/`, `/tmp`, `/home`, `/var`, `/var/tmp`
-#     and every other mount point `findmnt -rno TARGET` lists.
+#   - whether `.telepatch` exists at `/`, `/tmp`, `/home`, `/var` and
+#     `/var/tmp`, and every other mount point `findmnt -rno TARGET` lists
+#     that holds one.
 set -euo pipefail
 
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
@@ -27,15 +28,19 @@ inventory() {
             echo "== $d (absent)"
         fi
     done
+    # The fixed roots say absent or exists; any other mount point is listed
+    # only when it holds a `.telepatch`, so mounts that come and go during
+    # the run (other containers on this machine) do not show as a
+    # difference (T128).
     {
-        printf '%s\n' / /tmp /home /var /var/tmp
-        findmnt -rno TARGET
-    } | LC_ALL=C sort -u | while IFS= read -r m; do
+        printf 'fixed %s\n' / /tmp /home /var /var/tmp
+        findmnt -rno TARGET | sed 's/^/mount /'
+    } | LC_ALL=C sort -s -k2 -u | while read -r kind m; do
         # findmnt -r escapes spaces as \x20.
         m=$(printf '%b' "$m")
         if [ -e "${m%/}/.telepatch" ] || [ -L "${m%/}/.telepatch" ]; then
             echo "${m%/}/.telepatch: exists"
-        else
+        elif [ "$kind" = fixed ]; then
             echo "${m%/}/.telepatch: absent"
         fi
     done

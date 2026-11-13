@@ -86,6 +86,10 @@ fn inventory_runs_two_containers_and_a_group_var_reaches_one() {
     let known = dir.path().join("known_hosts");
     let known_opt = format!("UserKnownHostsFile={}", known.display());
     let pbs = vec![Playbook::new("inv", entry)];
+    // No `--local` here, so the local factory never opens a shell; it is
+    // sandboxed anyway (T128), so a later `--local` case cannot reach the
+    // real stage.
+    let sb = telepatch::testing::sandbox();
     let go = |extra: &[&str]| -> (String, i32) {
         let mut args: Vec<String> = ["pb", "run", "inv", "--inventory"]
             .into_iter()
@@ -105,7 +109,12 @@ fn inventory_runs_two_containers_and_a_group_var_reaches_one() {
             args.push(val);
         }
         args.extend(extra.iter().map(|s| s.to_string()));
-        let (out, code) = run_with_args(&args, &pbs, LocalTransport::new, SshTransport::new);
+        let (out, code) = run_with_args(
+            &args,
+            &pbs,
+            || LocalTransport::new().sandboxed(&sb),
+            SshTransport::new,
+        );
         println!("{out}");
         (out, code)
     };

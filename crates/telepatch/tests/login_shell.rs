@@ -632,3 +632,97 @@ fn init_and_the_watchdog_work_in_a_reopened_shell() {
     // `init_shell` ran in the reopened shell: `__tp_run` is set there.
     assert!(!rig.read("run").trim().is_empty(), "{out}");
 }
+
+// ---- the sandbox in the login shell (T128) -----------------------------------
+
+/// What the login shell sees of the test switch and the path seams: `env`
+/// for the names, then each value the root shell carries.
+fn sandbox_env_pb(h: Host<PathBuf>) -> PlaybookFuture {
+    Box::pin(async move {
+        let o = p(&h, "sbx");
+        h.as_user("root").raw(format!(
+            "{{ env | sed -n 's/^\\(TP_[A-Z_]*\\)=.*/\\1/p' | sort | tr '\\n' ' '; echo; \
+             for v in TP_SANDBOX_REQUIRED TP_SANDBOX TP_FETCH_STAGE TP_FETCH_CACHE TP_RUN_DIR \
+             TP_FS_ROOTS TP_UNIT_DIR TP_SVC_RUNDIR; do echo \"$v=${{!v-unset}}\"; done; \
+             echo \"stage=$TP_FETCH_STAGE\"; }} > {o}"
+        ));
+        Ok(())
+    })
+}
+
+#[test]
+fn the_login_shell_keeps_the_sandbox_and_the_path_seams() {
+    let rig = Rig::new();
+    // A profile that exports none of the seams: what the login shell has
+    // comes from the root shell's `env -i` line alone.
+    let d = rig.dir();
+    std::fs::write(
+        d.join("home/.bash_profile"),
+        format!("export PATH={}/bin:$PATH\n", d.display()),
+    )
+    .unwrap();
+    let (r, out) = rig.run("sbxenv", sandbox_env_pb);
+    assert_eq!(r.exit_code(), 0, "{}\n{out}", r.render());
+    let got = rig.read("sbx");
+    let s = |n: &str| d.join(n).display().to_string();
+    // `Rig::run` sets the sandbox at the rig's dir, with its own stage, unit
+    // and svc dirs; nothing in the root shell's environment else leaks.
+    for want in [
+        "TP_SANDBOX_REQUIRED=1".to_string(),
+        format!("TP_SANDBOX={}", d.display()),
+        format!("TP_FETCH_STAGE={}", s("stage")),
+        format!("TP_FETCH_CACHE={}", s("cache")),
+        format!("TP_RUN_DIR={}", s("run")),
+        format!("TP_FS_ROOTS={}", s("fs")),
+        format!("TP_UNIT_DIR={}", s("etc-systemd-system")),
+        format!("TP_SVC_RUNDIR={}", s("run-systemd-system")),
+    ] {
+        assert!(
+            got.lines().any(|l| l == want),
+            "missing {want}:\n{got}\n{out}"
+        );
+    }
+    assert!(
+        !got.contains("TP_ROOTVAR"),
+        "a non-seam variable leaked:\n{got}"
+    );
+}
+
+/// A capturing op in the login shell over a file that exists, so its undo
+/// data is saved; the next op lists where that went.
+fn sandbox_capture_pb(h: Host<PathBuf>) -> PlaybookFuture {
+    Box::pin(async move {
+        let u = h.as_user("root");
+        u.file(&p(&h, "target")).content("new\n");
+        u.raw(format!(
+            "find \"$TP_FETCH_STAGE/$__tp_run\" -type f > {}",
+            p(&h, "listing")
+        ));
+        Ok(())
+    })
+}
+
+#[test]
+fn a_capturing_op_in_the_login_shell_saves_its_undo_data_in_the_sandbox() {
+    let rig = Rig::new();
+    let d = rig.dir();
+    std::fs::write(
+        d.join("home/.bash_profile"),
+        format!("export PATH={}/bin:$PATH\n", d.display()),
+    )
+    .unwrap();
+    std::fs::write(d.join("target"), "old\n").unwrap();
+    let (r, out) = rig.run("sbxcap", sandbox_capture_pb);
+    assert_eq!(r.exit_code(), 0, "{}\n{out}", r.render());
+    assert_eq!(rig.read("target"), "new\n");
+    let listing = rig.read("listing");
+    let stage = format!("{}/", d.join("stage").display());
+    assert!(
+        listing.lines().any(|l| l.ends_with("/old")),
+        "no undo data saved:\n{listing}\n{out}"
+    );
+    assert!(
+        listing.lines().all(|l| l.starts_with(&stage)),
+        "undo data outside the sandbox stage:\n{listing}"
+    );
+}

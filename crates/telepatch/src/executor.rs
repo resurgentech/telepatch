@@ -34,7 +34,9 @@
 //!   SHELL=.. PATH=.. bash -l` is typed (the values from `getent passwd`
 //!   read in that shell: short arguments, no script) and a hello, as
 //!   `Shell::exec` does for `sudo -n -H bash`. It has root's login
-//!   environment and nothing of the plain root shell's. A missing passwd
+//!   environment and nothing of the plain root shell's but the test switch
+//!   and the path seams that shell has set (`sandbox::CARRY`, T128; none
+//!   in production). A missing passwd
 //!   entry refuses to open it, and blocks the host.
 //!
 //! Consecutive ops with one [`RunAs`] form a run; a run is pipelined and
@@ -1070,8 +1072,10 @@ const LOGIN_PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbi
 const ROOT: &str = "root";
 
 /// Open root's login shell: one more root shell of the transport, then
-/// `exec env -i HOME=.. USER=.. LOGNAME=.. SHELL=.. PATH=.. bash -l` typed
-/// into it, the values read from `getent passwd` in that same shell. The
+/// `exec env -i HOME=.. USER=.. LOGNAME=.. SHELL=.. PATH=.. <carried> bash -l`
+/// typed into it, the values read from `getent passwd` in that same shell.
+/// `<carried>` is [`crate::sandbox::carry_words`]: the test switch and the
+/// path seams that shell has set, none in production (T128). The
 /// arguments are short and no script is on a command line. `Err` says why
 /// (a missing passwd entry is a refusal, said so).
 async fn open_root_login(target: &Target, host: &str) -> Result<(Shell, String), String> {
@@ -1106,9 +1110,10 @@ async fn open_root_login(target: &Target, host: &str) -> Result<(Shell, String),
     };
     let q = crate::sh::quote;
     let command = format!(
-        "env -i HOME={} USER={ROOT} LOGNAME={ROOT} SHELL={} PATH={LOGIN_PATH} bash -l",
+        "env -i HOME={} USER={ROOT} LOGNAME={ROOT} SHELL={} PATH={LOGIN_PATH} {} bash -l",
         q(&home),
         q(&login_shell),
+        crate::sandbox::carry_words(),
     );
     if let Err(e) = sh.exec(&command, ROOT).await {
         sh.close().await;

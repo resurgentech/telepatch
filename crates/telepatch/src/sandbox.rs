@@ -35,6 +35,35 @@ for tp_x in "${tp_r[@]}"; do [ -z "$tp_x" ] || tp_a+=("$tp_x"); done
 tp_sbx "${TP_FETCH_STAGE:-/var/tmp/telepatch}" "${TP_FETCH_CACHE:-/var/cache/telepatch/sha256}" "${TP_RUN_DIR:-/run/telepatch}" "${tp_a[@]}"
 "#;
 
+/// The variables a shell hands on to a login shell it starts with `env -i`
+/// (T128): the test switch, the sandbox and every engine path seam. A
+/// production shell has none of them set, so nothing is carried there.
+/// Their values are paths (or a number), never a script.
+pub(crate) const CARRY: &[&str] = &[
+    "TP_SANDBOX_REQUIRED",
+    "TP_SANDBOX",
+    "TP_FETCH_STAGE",
+    "TP_FETCH_CACHE",
+    "TP_RUN_DIR",
+    "TP_FS_ROOTS",
+    "TP_UNIT_DIR",
+    "TP_SVC_RUNDIR",
+    "TP_BOOT_ID",
+    "TP_CACHE_NOW",
+];
+
+/// The shell words, for an `env -i` command line, that pass each [`CARRY`]
+/// variable set in the shell that runs it as `NAME=value`, and nothing for
+/// one that is unset: `${NAME+NAME="$NAME"}` each, space-separated. The
+/// value is expanded by that shell, so it stays one word whatever it holds.
+pub(crate) fn carry_words() -> String {
+    CARRY
+        .iter()
+        .map(|n| format!("${{{n}+{n}=\"${n}\"}}"))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// Is this process one cargo started (`TP_SANDBOX_REQUIRED=1`)?
 pub(crate) fn required() -> bool {
     std::env::var("TP_SANDBOX_REQUIRED").is_ok_and(|v| v == "1")
@@ -60,6 +89,29 @@ mod tests {
             o.status.success(),
             String::from_utf8_lossy(&o.stderr).into_owned(),
         )
+    }
+
+    /// The words `carry_words` gives in a shell with `env` set, one per line.
+    fn carried(env: &[(&str, &str)]) -> String {
+        let mut c = std::process::Command::new("bash");
+        c.arg("-c")
+            .arg(format!("printf '%s\\n' {}", carry_words()))
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin");
+        for (k, v) in env {
+            c.env(k, v);
+        }
+        String::from_utf8(c.output().unwrap().stdout).unwrap()
+    }
+
+    #[test]
+    fn a_production_shell_carries_nothing_and_a_value_stays_one_word() {
+        // printf with no arguments prints one empty line.
+        assert_eq!(carried(&[]), "\n");
+        assert_eq!(
+            carried(&[("TP_SANDBOX", "/a b*"), ("TP_CACHE_NOW", "")]),
+            "TP_SANDBOX=/a b*\nTP_CACHE_NOW=\n"
+        );
     }
 
     #[test]
