@@ -1438,3 +1438,13 @@ are appended, never edited in; a hook refuses rewrites.
   All three work under `--check`.
 - 16 tests in `tests/run_controls.rs`. Gate E green; no snapshot moved.
 - Commits: telepatch d57755f
+
+## 2026-11-12 — T110 Set the rejected T101 aside; commit the T100 LOG entry
+
+- The rejected T101 build (15 tracked files and the untracked
+  `ops/wait.rs`) is saved twice: `tmp/t101-rejected/wip.patch` plus
+  `wait.rs`, and the stash "T101 rejected: bash -c wrapper
+  (2026-11-12)". Both checked equal; the patch applies on the new
+  HEAD. Nothing popped or dropped; T113 drops the stash.
+- The T100 entry committed alone on a clean tree. Gate green.
+- Commits: telepatch 736458c
