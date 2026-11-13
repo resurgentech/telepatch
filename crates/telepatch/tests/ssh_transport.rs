@@ -145,6 +145,7 @@ impl Stub {
 
     fn transport(&self) -> SshTransport {
         SshTransport::new()
+            .sandboxed_at(self.dir.path())
             .ssh(&self.ssh)
             .env("TP_STUB_DIR", &self.dir.path().display().to_string())
             .env("PATH", &self.path)

@@ -106,7 +106,11 @@ fn hosts(n: usize, log: &std::path::Path, fail: &[usize]) -> Vec<HostSpec<V>> {
         .map(|i| HostSpec {
             groups: Vec::new(),
             name: format!("h{i}"),
-            target: Target::Local(LocalTransport::new().uid(0)),
+            target: Target::Local(
+                LocalTransport::new()
+                    .uid(0)
+                    .sandboxed_at(log.parent().unwrap()),
+            ),
             vars: V {
                 log: log.to_path_buf(),
                 fail: fail.contains(&i),
@@ -437,10 +441,11 @@ fn cli(a: &[&str]) -> (String, i32) {
         .chain(a.iter().copied())
         .map(String::from)
         .collect();
+    let sb = telepatch::testing::sandbox();
     run_with_args(
         &args,
         &[Playbook::new("roles", roles_entry)],
-        || LocalTransport::new().uid(0),
+        || LocalTransport::new().uid(0).sandboxed(&sb),
         SshTransport::new,
     )
 }

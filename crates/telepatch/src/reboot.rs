@@ -110,6 +110,8 @@ const RUN_DIR: &str = "${TP_RUN_DIR:-/run/telepatch}";
 /// The mark file's name inside it.
 const MARK_FILE: &str = "reboot-pending";
 
+use crate::sandbox::SBX;
+
 /// The script that appends `lines` to the mark (shell builtins and one
 /// `mkdir -p`: no op text on a command line).
 fn mark_script(lines: &[String]) -> String {
@@ -118,7 +120,7 @@ fn mark_script(lines: &[String]) -> String {
         .map(|l| crate::sh::quote(&l.replace(['\n', '\r'], " ")))
         .collect();
     format!(
-        "d=\"{RUN_DIR}\"\nmkdir -p \"$d\" && printf '%s\\n' {} >> \"$d/{MARK_FILE}\"\n",
+        "{SBX}d=\"{RUN_DIR}\"\ntp_sbx \"$d\" || d=/dev/null/refused\nmkdir -p \"$d\" && printf '%s\\n' {} >> \"$d/{MARK_FILE}\"\n",
         q.join(" ")
     )
 }
@@ -126,7 +128,7 @@ fn mark_script(lines: &[String]) -> String {
 /// The script that prints the mark, one line per entry (builtins only).
 fn pending_script() -> String {
     format!(
-        "f=\"{RUN_DIR}/{MARK_FILE}\"\nif [ -s \"$f\" ]; then while IFS= read -r l || [ -n \"$l\" ]; do printf '%s\\n' \"$l\"; done < \"$f\"; fi\n"
+        "{SBX}f=\"{RUN_DIR}/{MARK_FILE}\"\ntp_sbx \"$f\" || f=/dev/null/refused\nif [ -s \"$f\" ]; then while IFS= read -r l || [ -n \"$l\" ]; do printf '%s\\n' \"$l\"; done < \"$f\"; fi\n"
     )
 }
 
@@ -546,13 +548,17 @@ mod tests {
     #[test]
     fn the_mark_script_uses_builtins_and_one_mkdir_and_keeps_a_line_a_line() {
         let s = mark_script(&["pkg a".into(), "sh echo 'x'\ny".into()]);
+        // The sandbox switch's function first (T124), then the script.
+        let s = s.strip_prefix(SBX).expect("starts with tp_sbx");
         assert!(
-            s.starts_with("d=\"${TP_RUN_DIR:-/run/telepatch}\"\nmkdir -p \"$d\" && printf"),
+            s.starts_with(
+                "d=\"${TP_RUN_DIR:-/run/telepatch}\"\ntp_sbx \"$d\" || d=/dev/null/refused\nmkdir -p \"$d\" && printf"
+            ),
             "{s}"
         );
         assert!(s.ends_with(">> \"$d/reboot-pending\"\n"), "{s}");
         // One line each: a newline in a subject is a space.
-        assert_eq!(s.matches('\n').count(), 2, "{s}");
+        assert_eq!(s.matches('\n').count(), 3, "{s}");
         assert_eq!(parse_marks("pkg a\n\npkg a\n pkg b \n"), ["pkg a", "pkg b"]);
     }
 }

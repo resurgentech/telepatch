@@ -27,12 +27,13 @@ fn kill_then_true(h: Host<()>) -> PlaybookFuture {
 fn a_shell_killed_by_its_op_fails_the_host_at_that_op() {
     let out = Rc::new(RefCell::new(String::new()));
     let pb = Playbook::new("death", kill_then_true);
+    let sb = telepatch::testing::sandbox();
     let report = run(
         &pb,
         vec![HostSpec {
             groups: Vec::new(),
             name: "local".into(),
-            target: Target::Local(LocalTransport::new().uid(0)),
+            target: Target::Local(LocalTransport::new().uid(0).sandboxed(&sb)),
             vars: (),
         }],
         RunOpts {

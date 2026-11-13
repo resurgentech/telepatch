@@ -160,6 +160,7 @@ impl Stub {
     /// The stub host whose stage and filesystem seam are inside `d`.
     fn target(&self, d: &Path, extra: &[(&str, &str)]) -> Target {
         let mut t = SshTransport::new()
+            .sandboxed_at(d)
             .ssh(&self.ssh)
             .env("TP_STUB_DIR", &self.dir.path().display().to_string())
             .env("PATH", &self.path)
@@ -167,10 +168,7 @@ impl Stub {
                 "TP_BOOT_ID",
                 &self.dir.path().join("boot_id").display().to_string(),
             )
-            .env(
-                "TP_RUN_DIR",
-                &self.dir.path().join("run").display().to_string(),
-            )
+            .env("TP_RUN_DIR", &d.join("run").display().to_string())
             .env("TP_FETCH_STAGE", &d.join("stage").display().to_string())
             .env("TP_FS_ROOTS", &d.join("fsB").display().to_string());
         for (k, v) in extra {
@@ -213,6 +211,7 @@ fn local(d: &Path) -> Target {
     Target::Local(
         LocalTransport::new()
             .uid(0)
+            .sandboxed_at(d)
             .env("TP_FETCH_STAGE", &d.join("stage").display().to_string())
             .env("TP_FS_ROOTS", &d.join("fsB").display().to_string()),
     )
@@ -465,6 +464,7 @@ fn an_as_user_root_op_and_a_root_op_both_capture_under_the_seam() {
     let target = Target::Local(
         LocalTransport::new()
             .uid(0)
+            .sandboxed_at(d.path())
             .env("PATH", &path)
             .env(
                 "TP_FETCH_STAGE",
@@ -762,6 +762,7 @@ fn a_reboot_pending_stop_is_cleaned() {
     let target = Target::Local(
         LocalTransport::new()
             .uid(0)
+            .sandboxed_at(d.path())
             .env("TP_RUN_DIR", &d.path().join("run").display().to_string())
             .env(
                 "TP_FETCH_STAGE",

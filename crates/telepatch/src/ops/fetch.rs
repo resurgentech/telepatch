@@ -225,7 +225,11 @@ pub fn cleanup_script() -> String {
 /// `tp_run`, this run's staging directory, from the shell's `$__tp_run`.
 pub(crate) const TP_RUN: &str = "tp_run=\"$tp_sd\"/\"$__tp_run\"\n";
 
-pub(crate) const LOCATE: &str = "tp_cd=\"${TP_FETCH_CACHE:-/var/cache/telepatch/sha256}\"\ntp_sd=\"${TP_FETCH_STAGE:-/var/tmp/telepatch}\"\n";
+pub(crate) const LOCATE: &str = concat!(
+    crate::sandbox::sbx_def!(),
+    "tp_cd=\"${TP_FETCH_CACHE:-/var/cache/telepatch/sha256}\"\ntp_sd=\"${TP_FETCH_STAGE:-/var/tmp/telepatch}\"\n",
+    "tp_sbx \"$tp_cd\" \"$tp_sd\" || { tp_cd=/dev/null/refused; tp_sd=/dev/null/refused; }\n"
+);
 
 /// `tp_magic <file>` prints gz, xz, zst, zip, tar or unknown.
 const MAGIC: &str = r#"tp_magic() {

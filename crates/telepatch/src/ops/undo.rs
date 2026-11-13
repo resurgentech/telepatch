@@ -31,7 +31,9 @@ use crate::trace::OpSpec;
 /// directory below it has another device (`find -printf %D`, stopping at
 /// the first, so a mounted tree is not walked), or `TP_FS_ROOTS` lists a
 /// directory strictly below it. Only directories are checked below.
-pub const HELPERS: &str = r#"tp_fsroot() {
+pub const HELPERS: &str = concat!(
+    crate::sandbox::sbx_def!(),
+    r#"tp_fsroot() {
   local d=$1 r s= q v a; case $d in /*) ;; *) d=$PWD/$d;; esac
   IFS=: read -ra a <<<"${TP_FS_ROOTS-}"
   for r in "${a[@]}"; do r=${r%/}; [ -n "$r" ] || continue; case "$d/" in "$r"/*) [ ${#r} -gt ${#s} ] && s=$r;; esac; done
@@ -51,6 +53,7 @@ tp_idx() { grep -qxF -- "$1" "$2" 2>/dev/null || (umask 077; printf '%s\n' "$1" 
 tp_undo() {
   tp_bd=; tp_bk=; [ -n "${__tp_run-}" ] || return 0
   local sd=${TP_FETCH_STAGE:-/var/tmp/telepatch} u r s t i n=
+  tp_sbx "$sd" || return 1
   tp_up=$1; u=$(id -un); r=$(tp_fsroot "$1"); s=$sd/$__tp_run; t=$r/.telepatch/tmp/$__tp_run
   [ -d "$r" ] || { echo "telepatch: file $1: is a mount point" >&2; return 1; }
   if [ "$r" != "$(tp_fsroot "$sd")" ] && [ ! -d "$t/undo/$u" ]; then
@@ -61,6 +64,7 @@ tp_undo() {
   if [ "$r" = "$(tp_fsroot "$sd")" ]; then tp_bd=$tp_bk
   else
     if [ ! -d "$t/undo/$u" ]; then
+      tp_sbx "$r/.telepatch" || return 1
       [ -d "$t" ] || n=1
       for i in "$r/.telepatch" "$r/.telepatch/tmp" "$t" "$t/undo"; do
         tp_mkd 711 "$i" || return 1
@@ -107,7 +111,8 @@ tp_cp() {
   tp_open || return 1; [ -z "$tp_bd" ] && return 0
   tp_try "$tp_p" "$tp_bd/old/$2" mkdir -p -- "$(dirname -- "$tp_bd/old/$2")" && tp_try "$tp_p" "$tp_bd/old/$2" cp -a -- "$1" "$tp_bd/old/$2"
 }
-"#;
+"#
+);
 
 /// The shell function that removes one run's data: the per-filesystem
 /// directory under each root the run's `fsroots` lists (a real directory
@@ -116,11 +121,15 @@ tp_cp() {
 /// empty (also when the run's directory is gone: a tmpfs a reboot emptied),
 /// then the stage directory and the links in it. `rm` never leaves its
 /// filesystem and never follows a link.
-const RMRUN: &str = r#"tp_rmrun() {
+const RMRUN: &str = concat!(
+    crate::sandbox::sbx_def!(),
+    r#"tp_rmrun() {
   local sd=${TP_FETCH_STAGE:-/var/tmp/telepatch}/$1 r t o
+  tp_sbx "$sd" || return 1
   if [ -f "$sd/fsroots" ]; then
     while IFS= read -r r; do
       t=$r/.telepatch/tmp/$1
+      tp_sbx "$r/.telepatch" || continue
       if [ -e "$t" ] || [ -L "$t" ]; then
         o=$(stat -c %u -- "$t" 2>/dev/null)
         if [ -d "$t" ] && [ ! -L "$t" ] && { [ "$o" = 0 ] || [ "$o" = "$(id -u)" ]; }; then
@@ -134,7 +143,8 @@ const RMRUN: &str = r#"tp_rmrun() {
   fi
   rm -rf --one-file-system -- "$sd"
 }
-"#;
+"#
+);
 
 /// The script that ends a host's run: [`RMRUN`] for `$__tp_run` (`:?` so an
 /// unset variable removes nothing).
@@ -149,7 +159,7 @@ pub fn cleanup_script() -> String {
 /// warning when younger (another controller may be running it).
 pub fn sweep_script() -> String {
     format!(
-        r#"{RMRUN}for tp_d in "${{TP_FETCH_STAGE:-/var/tmp/telepatch}}"/*/; do
+        r#"{RMRUN}tp_sbx "${{TP_FETCH_STAGE:-/var/tmp/telepatch}}" && for tp_d in "${{TP_FETCH_STAGE:-/var/tmp/telepatch}}"/*/; do
   tp_d=${{tp_d%/}}; tp_n=${{tp_d##*/}}
   [ "$tp_n" != "${{__tp_run:?}}" ] && [ -d "$tp_d" ] && [ ! -L "$tp_d" ] || continue
   [ -d "$tp_d/undo" ] || [ -f "$tp_d/fsroots" ] || continue
@@ -225,12 +235,13 @@ tp_pf() {{
   r=$(tp_fsroot "$1") && [ -d "$r" ] && [ "$r" != "$(tp_fsroot "$tp_sd")" ] || return 0
   case ":${{TP_FS_ROOTS-}}:" in *":$r:"*) ;; *) [ -n "$tp_z" ] || return 0;; esac
   t=$r/.telepatch/tmp/$__tp_run
+  tp_sbx "$r/.telepatch" || return 0
   [ -d "$t" ] || n=1
   for i in "$r/.telepatch" "$r/.telepatch/tmp" "$t" "$t/undo"; do tp_pm 711 "$i" || return 0; done
   [ -z "$n" ] || tp_idx "$r" "$tp_s/fsroots"
   tp_pm 700 "$t/undo/$tp_u" "$tp_u"
 }}
-mkdir -p -m 711 -- "$tp_s/undo" && tp_pm 700 "$tp_s/undo/$tp_u" "$tp_u" || echo "telepatch: undo preparation for $tp_u: $tp_s/undo: cannot create"
+tp_sbx "$tp_s" && mkdir -p -m 711 -- "$tp_s/undo" && tp_pm 700 "$tp_s/undo/$tp_u" "$tp_u" || echo "telepatch: undo preparation for $tp_u: $tp_s/undo: cannot create"
 "#,
         quote(user)
     ));

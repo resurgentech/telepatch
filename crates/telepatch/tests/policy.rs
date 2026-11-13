@@ -179,7 +179,7 @@ fn the_run_report_lists_every_allowance() {
         vec![HostSpec {
             groups: Vec::new(),
             name: "local".into(),
-            target: Target::Local(LocalTransport::new().uid(0)),
+            target: Target::Local(LocalTransport::new().uid(0).sandboxed_at(d.path())),
             vars: d.path().to_path_buf(),
         }],
         RunOpts {

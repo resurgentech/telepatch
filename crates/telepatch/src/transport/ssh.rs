@@ -190,6 +190,18 @@ impl SshTransport {
         self
     }
 
+    /// The environment of a test [`Sandbox`](crate::testing::Sandbox).
+    pub fn sandboxed(mut self, sb: &crate::testing::Sandbox) -> Self {
+        self.env.extend(sb.env());
+        self
+    }
+
+    /// [`SshTransport::sandboxed`] for a sandbox rooted at a directory the
+    /// test already owns ([`Sandbox::at`](crate::testing::Sandbox::at)).
+    pub fn sandboxed_at(self, dir: &std::path::Path) -> Self {
+        self.sandboxed(&crate::testing::Sandbox::at(dir))
+    }
+
     /// The ssh-side text behind the last [`Limit`] `open` returned for
     /// `host` (ssh's stderr, or what `sudo -n true` printed); `None` after
     /// an open that got everything it asked for.

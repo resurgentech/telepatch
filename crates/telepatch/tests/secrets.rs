@@ -154,6 +154,7 @@ echo "$name" > "$TP_D/created"
             target: Target::Local(
                 LocalTransport::new()
                     .uid(0)
+                    .sandboxed_at(d)
                     .env("PATH", &path)
                     .env("TP_D", &d.display().to_string()),
             ),

@@ -83,10 +83,11 @@ fn rev_and_latest_together_and_a_missing_path_are_trace_errors() {
     assert!(msgs.iter().any(|m| m.contains(".into(")), "{msgs:?}");
 }
 
-fn target() -> Target {
+fn target(sb: &telepatch::testing::Sandbox) -> Target {
     Target::Local(
         LocalTransport::new()
             .uid(0)
+            .sandboxed(sb)
             .env("GIT_CONFIG_GLOBAL", "/dev/null")
             .env("GIT_CONFIG_SYSTEM", "/dev/null"),
     )
@@ -94,13 +95,14 @@ fn target() -> Target {
 
 fn go<V: 'static>(name: &'static str, f: fn(Host<V>) -> PlaybookFuture, v: V) -> (Report, String) {
     let pb = Playbook::new(name, f);
+    let sb = telepatch::testing::sandbox();
     let out = Rc::new(RefCell::new(String::new()));
     let report = run(
         &pb,
         vec![HostSpec {
             groups: Vec::new(),
             name: "h".into(),
-            target: target(),
+            target: target(&sb),
             vars: v,
         }],
         RunOpts {

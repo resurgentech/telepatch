@@ -46,6 +46,7 @@ fn run_op(h: &Host<()>, id: NodeId, e: &Env) -> (String, FileResult) {
         .arg(script)
         .env_remove("TP_FS_ROOTS")
         .env_remove("__tp_run")
+        .env("TP_SANDBOX", e.stage.parent().unwrap())
         .env("TP_FETCH_STAGE", &e.stage);
     for (k, v) in &e.extra {
         c.env(k, v);
@@ -366,6 +367,7 @@ fn cleanup_removes_this_runs_data_and_leaves_other_runs() {
             target: Target::Local(
                 LocalTransport::new()
                     .uid(0)
+                    .sandboxed_at(d.path())
                     .env("TP_FETCH_STAGE", stage.to_str().unwrap())
                     .env("TP_FS_ROOTS", fsb.to_str().unwrap()),
             ),
@@ -422,6 +424,7 @@ fn cleanup_removes_telepatch_when_it_held_only_this_run() {
             target: Target::Local(
                 LocalTransport::new()
                     .uid(0)
+                    .sandboxed_at(d.path())
                     .env("TP_FETCH_STAGE", stage.to_str().unwrap())
                     .env("TP_FS_ROOTS", fsb.to_str().unwrap()),
             ),
@@ -1145,6 +1148,7 @@ fn exec(pb: &Playbook<W>, w: W, log: Option<PathBuf>) -> (telepatch::report::Rep
             target: Target::Local(
                 LocalTransport::new()
                     .uid(0)
+                    .sandboxed_at(&w.d)
                     .env("TP_FETCH_STAGE", w.d.join("stage").to_str().unwrap()),
             ),
             vars: w,
@@ -1400,6 +1404,7 @@ fn a_secret_write_prints_no_body_in_its_trailer_or_stream() {
     let out = Command::new("/bin/bash")
         .arg("-c")
         .arg(script)
+        .env("TP_SANDBOX", e.stage.parent().unwrap())
         .env("TP_FETCH_STAGE", &e.stage)
         .env("__tp_run", RUN)
         .output()

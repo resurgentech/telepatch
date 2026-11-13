@@ -223,12 +223,13 @@ fn entry(h: Host<Vars>) -> PlaybookFuture {
 fn run_vars(vars: Vars) -> (telepatch::report::Report, String) {
     let out = Rc::new(std::cell::RefCell::new(String::new()));
     let pb = Playbook::new("tpl", entry);
+    let sb = telepatch::testing::sandbox();
     let report = run(
         &pb,
         vec![HostSpec {
             groups: Vec::new(),
             name: "h1".into(),
-            target: Target::Local(LocalTransport::new().uid(0)),
+            target: Target::Local(LocalTransport::new().uid(0).sandboxed(&sb)),
             vars,
         }],
         RunOpts {

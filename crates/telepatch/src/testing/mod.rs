@@ -10,8 +10,10 @@ use crate::plan::render_host;
 use crate::role::Playbook;
 
 pub mod fake;
+mod sandbox;
 
 pub use fake::{FakeExecutor, run_engine};
+pub use sandbox::{Sandbox, sandbox};
 
 /// A host description for tests: a name, an `Os` and variables.
 pub struct FixtureHost<V> {

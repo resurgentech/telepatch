@@ -43,10 +43,11 @@ fn args(a: &[&str]) -> Vec<String> {
 }
 
 fn go(a: &[&str]) -> (String, i32) {
+    let sb = telepatch::testing::sandbox();
     run_with_args(
         &args(a),
         &pbs(),
-        || LocalTransport::new().uid(0),
+        || LocalTransport::new().uid(0).sandboxed(&sb),
         SshTransport::new,
     )
 }
@@ -307,11 +308,12 @@ impl Stub {
 }
 
 fn go_ssh(stub: &Stub, a: &[&str]) -> (String, i32) {
+    let sb = telepatch::testing::sandbox();
     run_with_args(
         &args(a),
         &pbs(),
-        || LocalTransport::new().uid(0),
-        || stub.transport(),
+        || LocalTransport::new().uid(0).sandboxed(&sb),
+        || stub.transport().sandboxed(&sb),
     )
 }
 
@@ -489,10 +491,11 @@ mod sectioned {
     }
 
     fn go_with(pbs: &[Playbook<Vars>], a: &[&str]) -> (String, i32) {
+        let sb = telepatch::testing::sandbox();
         run_with_args(
             &args(a),
             pbs,
-            || LocalTransport::new().uid(0),
+            || LocalTransport::new().uid(0).sandboxed(&sb),
             SshTransport::new,
         )
     }
@@ -579,10 +582,11 @@ mod sectioned {
             &["plan", "bad", "--distro", "arch"][..],
             &["run", "bad", "--local"][..],
         ] {
+            let sb = telepatch::testing::sandbox();
             let (out, code) = run_with_args(
                 &args(a),
                 &pbs,
-                || LocalTransport::new().uid(0),
+                || LocalTransport::new().uid(0).sandboxed(&sb),
                 SshTransport::new,
             );
             assert_eq!(code, 2, "{out}");

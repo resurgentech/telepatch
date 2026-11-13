@@ -1352,14 +1352,21 @@ fn source_vars(w: &WindowOp) -> String {
 /// What the executor sets once in every shell it opens (root and login):
 /// `__tp_run`, this process's staging subdirectory name, so scripts name
 /// the variable and the plan carries no per-process value. A login shell
-/// has it as a variable of its own, like the root shell.
+/// has it as a variable of its own, like the root shell. Under
+/// `TP_SANDBOX_REQUIRED=1` (the tests) the handshake also checks, once,
+/// that the stage, cache, run directory and `TP_FS_ROOTS` lie under
+/// `$TP_SANDBOX`, and the open fails with the refusal when they do not.
 async fn init_shell(shell: &mut Shell) -> Result<(), String> {
     // An op's wrapper runs its body in a subshell, so the assignment goes
     // in front of it, in the shell itself; the wrapped no-op is the
     // handshake that it ran.
     let ack = crate::trailer::wrap(
         crate::trailer::OpKind::Sh,
-        &crate::ops::shell::raw_body("true"),
+        &crate::ops::shell::raw_body(&format!(
+            "{}{}",
+            crate::sandbox::SBX,
+            crate::sandbox::INIT_CHECK
+        )),
         0,
         shell.nonce(),
     );
@@ -4200,8 +4207,12 @@ mod watchdog_tests {
         }
     }
 
-    fn local_target() -> Rc<Target> {
-        Rc::new(Target::Local(LocalTransport::new().uid(0)))
+    /// The target and the sandbox it lives in (T124): the caller keeps the
+    /// sandbox alive for the length of the test.
+    fn local_target() -> (Rc<Target>, crate::testing::Sandbox) {
+        let sb = crate::testing::sandbox();
+        let t = Rc::new(Target::Local(LocalTransport::new().uid(0).sandboxed(&sb)));
+        (t, sb)
     }
 
     async fn shell(t: &Target) -> Shell {
@@ -4291,7 +4302,7 @@ mod watchdog_tests {
 
     #[tokio::test]
     async fn a_probe_under_the_watchdog_returns_its_output_and_a_stuck_one_is_stopped() {
-        let t = local_target();
+        let (t, _sb) = local_target();
         let mut sh = shell(&t).await;
         let mut k = Killer::new(t.clone(), "local".into());
         let (ms, secs) = (Duration::from_millis, Duration::from_secs);
@@ -4321,7 +4332,7 @@ mod watchdog_tests {
 
     #[tokio::test]
     async fn expiry_kills_the_group_and_the_op_ends_with_its_own_rc_143_trailer() {
-        let t = local_target();
+        let (t, _sb) = local_target();
         let mut sh = shell(&t).await;
         let mut k = Killer::new(t.clone(), "local".into());
         let s = op(&sh, 1, "sleep 300 & sleep 301 & wait");
@@ -4340,7 +4351,7 @@ mod watchdog_tests {
 
     #[tokio::test]
     async fn an_op_that_ignores_term_is_killed_after_the_grace_and_the_result_is_made_up() {
-        let t = local_target();
+        let (t, _sb) = local_target();
         let mut sh = shell(&t).await;
         let mut k = Killer::new(t.clone(), "local".into());
         let s = op(&sh, 1, "trap '' TERM; sleep 302");
@@ -4366,7 +4377,7 @@ mod watchdog_tests {
 
     #[tokio::test]
     async fn a_lost_term_is_repeated_and_the_op_ends_inside_the_grace_with_its_own_trailer() {
-        let t = local_target();
+        let (t, _sb) = local_target();
         let mut sh = shell(&t).await;
         let mut k = Killer::new(t.clone(), "local".into());
         // The first TERM is absorbed (and re-arms the trap); the second ends
@@ -4392,7 +4403,7 @@ mod watchdog_tests {
 
     #[tokio::test]
     async fn an_op_with_no_trailer_that_is_gone_is_reported_as_ended_without_a_result() {
-        let t = local_target();
+        let (t, _sb) = local_target();
         let mut sh = shell(&t).await;
         let mut k = Killer::new(t.clone(), "local".into());
         // `exec` replaces the op's subshell: its EXIT trap never runs.
@@ -4408,7 +4419,7 @@ mod watchdog_tests {
 
     #[tokio::test]
     async fn an_op_inside_its_limit_is_untouched() {
-        let t = local_target();
+        let (t, _sb) = local_target();
         let mut sh = shell(&t).await;
         let mut k = Killer::new(t.clone(), "local".into());
         let s = op(&sh, 1, "sleep 0.2; echo quick");
@@ -4422,7 +4433,7 @@ mod watchdog_tests {
 
     #[tokio::test]
     async fn no_start_line_drops_the_shell_and_reports_never_started() {
-        let t = local_target();
+        let (t, _sb) = local_target();
         let mut sh = shell(&t).await;
         let mut k = Killer::new(t.clone(), "local".into());
         let mut reap = Reaper(vec!["sleep 3017".into()]);
@@ -4451,7 +4462,7 @@ mod watchdog_tests {
 
     #[tokio::test]
     async fn no_second_shell_drops_the_shell_and_says_so() {
-        let t = local_target();
+        let (t, _sb) = local_target();
         let mut sh = shell(&t).await;
         // A target that cannot open a shell: an ssh that does not exist.
         let dead = Rc::new(Target::Ssh(SshTransport::new().ssh("/nonexistent/tp-ssh")));

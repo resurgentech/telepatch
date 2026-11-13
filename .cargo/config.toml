@@ -1,0 +1,7 @@
+# T124: every process cargo runs (each test binary, and through inheritance
+# every shell a test spawns) refuses the real stage, cache, run dir and
+# filesystem roots unless they lie under $TP_SANDBOX (telepatch::testing::sandbox).
+# `cargo run -- run --local` refuses too: use the built binary or unset it.
+# A real run over ssh is unaffected (ssh does not pass the variable).
+[env]
+TP_SANDBOX_REQUIRED = "1"

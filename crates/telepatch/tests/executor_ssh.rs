@@ -154,6 +154,7 @@ impl Stub {
 
     fn transport(&self) -> SshTransport {
         SshTransport::new()
+            .sandboxed_at(self.dir.path())
             .ssh(&self.ssh)
             .env("TP_STUB_DIR", &self.dir.path().display().to_string())
             .env("PATH", &self.path)
@@ -468,6 +469,7 @@ fn root_limits_map_to_clear_blocked_reasons() {
         ),
     ] {
         let t = SshTransport::new()
+            .sandboxed_at(stub.dir.path())
             .ssh(&fail.display().to_string())
             .env("TP_STUB_MASTER_FAIL", stderr);
         let (r, _) = go(&pb, &stub, t);
@@ -485,6 +487,7 @@ fn root_limits_map_to_clear_blocked_reasons() {
     );
     write_exe(&sudo_fail.join("id"), ID);
     let t = SshTransport::new()
+        .sandboxed_at(stub.dir.path())
         .ssh(&stub.ssh)
         .env("TP_STUB_DIR", &stub.dir.path().display().to_string())
         .env(
@@ -530,7 +533,11 @@ fn local_target_blocks_a_user_window_with_the_transport_limit() {
             vec![HostSpec {
                 groups: Vec::new(),
                 name: "local".into(),
-                target: Target::Local(telepatch::transport::local::LocalTransport::new().uid(0)),
+                target: Target::Local(
+                    telepatch::transport::local::LocalTransport::new()
+                        .uid(0)
+                        .sandboxed_at(d.path()),
+                ),
                 vars: Vars {
                     dir: d.path().to_path_buf(),
                     user: me(),

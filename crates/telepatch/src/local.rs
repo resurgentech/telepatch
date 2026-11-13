@@ -331,7 +331,9 @@ pub fn human_size(n: u64) -> String {
 /// directory of a tree. The same text is used by the copy channel and
 /// the op, so both name one path.
 pub fn stage_vars(dest_word: &str) -> String {
-    let mut s = String::from("tp_sd=\"${TP_FETCH_STAGE:-/var/tmp/telepatch}\"\n");
+    let mut s = String::from(crate::sandbox::SBX);
+    s.push_str("tp_sd=\"${TP_FETCH_STAGE:-/var/tmp/telepatch}\"\n");
+    s.push_str("tp_sbx \"$tp_sd\" || tp_sd=/dev/null/refused\n");
     s.push_str(&format!("tp_p={dest_word}\n"));
     s.push_str("tp_base=\"$tp_sd/$__tp_run/c-$(printf %s \"$tp_p\" | sha256sum | cut -c1-16)\"\n");
     s

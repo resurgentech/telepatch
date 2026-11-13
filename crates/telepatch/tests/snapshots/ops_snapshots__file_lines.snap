@@ -22,6 +22,7 @@ tp_id=0
 printf '\n__tpS_testnonce 0 %s %s\n' "$BASHPID" "$$"
 rc=0; changed=0
 tp_p=~/'.zshrc'
+tp_sbx() { [ "${TP_SANDBOX_REQUIRED-}" = 1 ] || return 0; local p s=${TP_SANDBOX-}; s=${s%/}; for p; do case $p/ in */../*) ;; /*) [ -n "$s" ] && [ -d "$s" ] && case $p/ in "$s"/*) continue;; esac;; esac; echo "telepatch: sandbox: refusing $p (TP_SANDBOX_REQUIRED is set; tests must use telepatch::testing::sandbox)" >&2; return 1; done; }
 tp_fsroot() {
   local d=$1 r s= q v a; case $d in /*) ;; *) d=$PWD/$d;; esac
   IFS=: read -ra a <<<"${TP_FS_ROOTS-}"
@@ -42,6 +43,7 @@ tp_idx() { grep -qxF -- "$1" "$2" 2>/dev/null || (umask 077; printf '%s\n' "$1" 
 tp_undo() {
   tp_bd=; tp_bk=; [ -n "${__tp_run-}" ] || return 0
   local sd=${TP_FETCH_STAGE:-/var/tmp/telepatch} u r s t i n=
+  tp_sbx "$sd" || return 1
   tp_up=$1; u=$(id -un); r=$(tp_fsroot "$1"); s=$sd/$__tp_run; t=$r/.telepatch/tmp/$__tp_run
   [ -d "$r" ] || { echo "telepatch: file $1: is a mount point" >&2; return 1; }
   if [ "$r" != "$(tp_fsroot "$sd")" ] && [ ! -d "$t/undo/$u" ]; then
@@ -52,6 +54,7 @@ tp_undo() {
   if [ "$r" = "$(tp_fsroot "$sd")" ]; then tp_bd=$tp_bk
   else
     if [ ! -d "$t/undo/$u" ]; then
+      tp_sbx "$r/.telepatch" || return 1
       [ -d "$t" ] || n=1
       for i in "$r/.telepatch" "$r/.telepatch/tmp" "$t" "$t/undo"; do
         tp_mkd 711 "$i" || return 1

@@ -310,6 +310,7 @@ fn go(
     f: fn(Host<()>) -> PlaybookFuture,
 ) -> (telepatch::report::Report, String) {
     let pb = Playbook::new(name, f);
+    let sb = telepatch::testing::sandbox();
     let out = Rc::new(std::cell::RefCell::new(String::new()));
     let report = telepatch::executor::run(
         &pb,
@@ -317,7 +318,9 @@ fn go(
             groups: Vec::new(),
             name: "h".into(),
             target: telepatch::executor::Target::Local(
-                telepatch::transport::local::LocalTransport::new().uid(0),
+                telepatch::transport::local::LocalTransport::new()
+                    .uid(0)
+                    .sandboxed(&sb),
             ),
             vars: (),
         }],

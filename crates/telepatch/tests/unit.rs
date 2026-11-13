@@ -554,6 +554,7 @@ fn go(pb: &Playbook<()>, d: &Path, bin: &Path, booted: bool) -> (Report, String)
             target: Target::Local(
                 LocalTransport::new()
                     .uid(0)
+                    .sandboxed_at(d)
                     .env("PATH", &with_path(bin))
                     .env("TP_SVC_RUNDIR", &rundir(d, booted).display().to_string())
                     .env("TP_UNIT_DIR", &unit_dir(d).display().to_string())
@@ -982,6 +983,7 @@ fn executor_two_units_then_a_svc_op_reload_once_before_it_and_do_not_flush() {
             target: Target::Local(
                 LocalTransport::new()
                     .uid(0)
+                    .sandboxed_at(d.path())
                     .env("PATH", &with_path(&bin))
                     .env(
                         "TP_SVC_RUNDIR",

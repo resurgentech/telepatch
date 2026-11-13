@@ -735,6 +735,7 @@ fn run_capture(h: &Host<()>, id: NodeId, d: &Path, roots: Option<&Path>) -> (Rep
         .current_dir(d)
         .env("PATH", full_path(d))
         .env_remove("TP_FS_ROOTS")
+        .env("TP_SANDBOX", d)
         .env("TP_FETCH_STAGE", d.join("stage"))
         .env("__tp_run", RUN);
     if let Some(r) = roots {

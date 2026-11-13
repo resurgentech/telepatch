@@ -26,6 +26,7 @@ pub mod report;
 pub mod resolver;
 pub mod resource;
 pub mod role;
+pub(crate) mod sandbox;
 pub mod secret;
 pub mod sh;
 pub mod testing;

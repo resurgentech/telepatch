@@ -36,6 +36,7 @@ fn go(name: &'static str, f: fn(Host<PathBuf>) -> PlaybookFuture, dir: &std::pat
                 target: Target::Local(
                     LocalTransport::new()
                         .uid(0)
+                        .sandboxed_at(&vars)
                         .env("TP_FETCH_STAGE", &stage.display().to_string()),
                 ),
                 vars,
@@ -383,6 +384,7 @@ fn a_reboot_mark_is_written_by_builtins_and_no_op_text_is_on_a_command_line() {
             target: Target::Local(
                 LocalTransport::new()
                     .uid(0)
+                    .sandboxed_at(d.path())
                     .env("PATH", &path)
                     .env("TP_RUN_DIR", run_dir.to_str().unwrap()),
             ),

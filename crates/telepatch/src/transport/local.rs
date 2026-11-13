@@ -47,6 +47,18 @@ impl LocalTransport {
         self
     }
 
+    /// The environment of a test [`Sandbox`](crate::testing::Sandbox).
+    pub fn sandboxed(mut self, sb: &crate::testing::Sandbox) -> Self {
+        self.env.extend(sb.env());
+        self
+    }
+
+    /// [`LocalTransport::sandboxed`] for a sandbox rooted at a directory the
+    /// test already owns ([`Sandbox::at`](crate::testing::Sandbox::at)).
+    pub fn sandboxed_at(self, dir: &std::path::Path) -> Self {
+        self.sandboxed(&crate::testing::Sandbox::at(dir))
+    }
+
     async fn current_uid(&self) -> Result<u32, String> {
         if let Some(u) = self.uid {
             return Ok(u);
@@ -78,6 +90,19 @@ impl Transport for LocalTransport {
                 want,
                 Limit::Other(format!(
                     "principal user {u}: not supported by this transport yet"
+                )),
+            );
+        }
+        // Under the test switch, a root shell started by sudo would lose it
+        // (`env_reset`): refuse here, where this process still has it, a
+        // local run that names no sandbox. `cargo run -- run --local` lands
+        // here, since `.cargo/config.toml` sets the switch for it too.
+        if crate::sandbox::required() && !self.env.iter().any(|(k, _)| k == "TP_SANDBOX") {
+            return none(
+                want,
+                Limit::Other(format!(
+                    "{}; use the built binary (target/…/tp-basic, just dist) or unset TP_SANDBOX_REQUIRED",
+                    crate::sandbox::refusal("the local shell")
                 )),
             );
         }

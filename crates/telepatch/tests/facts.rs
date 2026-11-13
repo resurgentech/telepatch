@@ -20,8 +20,8 @@ fn ubuntu() -> Os {
     Os::parse("ID=ubuntu\nVERSION_ID=24.04\n").unwrap()
 }
 
-fn target() -> Target {
-    Target::Local(LocalTransport::new().uid(0))
+fn target(sb: &telepatch::testing::Sandbox) -> Target {
+    Target::Local(LocalTransport::new().uid(0).sandboxed(sb))
 }
 
 fn go<V: 'static>(
@@ -30,13 +30,14 @@ fn go<V: 'static>(
     v: V,
 ) -> (telepatch::report::Report, String) {
     let pb = Playbook::new(name, f);
+    let sb = telepatch::testing::sandbox();
     let out = Rc::new(std::cell::RefCell::new(String::new()));
     let report = run(
         &pb,
         vec![HostSpec {
             groups: Vec::new(),
             name: "h".into(),
-            target: target(),
+            target: target(&sb),
             vars: v,
         }],
         RunOpts {

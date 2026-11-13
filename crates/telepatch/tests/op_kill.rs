@@ -49,7 +49,10 @@ impl Drop for Reaper {
 }
 
 async fn open() -> Shell {
-    let t = LocalTransport::new().uid(0);
+    // No op of these tests names a stage or a cache; the sandbox is only
+    // what the switch needs to see (T124), so it may go with this function.
+    let sb = telepatch::testing::sandbox();
+    let t = LocalTransport::new().uid(0).sandboxed(&sb);
     let mut s = t.open("local", &Principal::Root, 1).await;
     assert!(s.limit.is_none(), "{:?}", s.limit);
     s.got.remove(0)
@@ -593,7 +596,7 @@ mod exec {
             vec![HostSpec {
                 groups: Vec::new(),
                 name: "h".into(),
-                target: Target::Local(LocalTransport::new().uid(0)),
+                target: Target::Local(LocalTransport::new().uid(0).sandboxed_at(d.path())),
                 vars: d.path().to_path_buf(),
             }],
             RunOpts {

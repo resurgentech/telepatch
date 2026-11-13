@@ -182,3 +182,9 @@ import-diff:
         diff -u "crates/tp/tests/emitted/src/$r.rs" "../tp_basic/src/roles/$r.rs" || true
     done
     exit 0
+
+# T124: record the real stage, cache, run dir and every mount point's
+# `.telepatch` before and after `cargo test --workspace` here and `cargo
+# test` in ../tp_basic; fail on any difference. Read-only.
+check-sandbox:
+    bash scripts/check-sandbox.sh

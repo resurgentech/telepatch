@@ -9,15 +9,15 @@ use telepatch::report::{HostStatus, Report};
 use telepatch::transport::local::LocalTransport;
 use telepatch::{Host, Playbook, PlaybookFuture, TraceError, role, sh};
 
-fn local() -> Target {
-    Target::Local(LocalTransport::new().uid(0))
+fn local(dir: &std::path::Path) -> Target {
+    Target::Local(LocalTransport::new().uid(0).sandboxed_at(dir))
 }
 
 fn spec(name: &str, dir: &std::path::Path) -> HostSpec<PathBuf> {
     HostSpec {
         groups: Vec::new(),
         name: name.into(),
-        target: local(),
+        target: local(dir),
         vars: dir.to_path_buf(),
     }
 }
@@ -583,7 +583,12 @@ fn cargo_host(name: &str, dir: &std::path::Path, path: &str) -> HostSpec<PathBuf
     HostSpec {
         groups: Vec::new(),
         name: name.into(),
-        target: Target::Local(LocalTransport::new().uid(0).env("PATH", path)),
+        target: Target::Local(
+            LocalTransport::new()
+                .uid(0)
+                .sandboxed_at(dir)
+                .env("PATH", path),
+        ),
         vars: dir.to_path_buf(),
     }
 }
@@ -995,6 +1000,7 @@ fn mise_host(name: &str, dir: &std::path::Path, path: &str) -> HostSpec<PathBuf>
         target: Target::Local(
             LocalTransport::new()
                 .uid(0)
+                .sandboxed_at(dir)
                 .env("PATH", path)
                 .env("MISE_SYSTEM_CONFIG_DIR", dir.join("etc").to_str().unwrap())
                 .env("MISE_SYSTEM_DATA_DIR", dir.join("sys").to_str().unwrap()),
@@ -1461,6 +1467,7 @@ fn rustup_host_with(
         target: Target::Local(
             LocalTransport::new()
                 .uid(0)
+                .sandboxed_at(dir)
                 .env("PATH", path)
                 .env("HOME", dir.join("home").to_str().unwrap())
                 .env("CARGO_HOME", cargo_home),
@@ -2446,7 +2453,7 @@ mod retry_and_wait {
             vec![HostSpec {
                 groups: Vec::new(),
                 name: "h1".into(),
-                target: local(),
+                target: local(d.path()),
                 vars: v,
             }],
             RunOpts {
@@ -2549,6 +2556,7 @@ fn reboot_local_host(d: &std::path::Path) -> HostSpec<PathBuf> {
         target: Target::Local(
             LocalTransport::new()
                 .uid(0)
+                .sandboxed_at(d)
                 .env("TP_RUN_DIR", d.join("run").to_str().unwrap()),
         ),
         vars: d.to_path_buf(),

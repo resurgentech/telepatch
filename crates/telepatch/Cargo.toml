@@ -15,11 +15,11 @@ sha2 = "0.10"
 serde_json = "1.0.154"
 similar = "2.7"
 telepatch-macros = { workspace = true }
+tempfile = "3"
 toml = "1"
 tokio = { version = "1.54.1", features = ["process", "io-util", "rt", "macros", "sync", "time"] }
 zeroize = "1"
 
 [dev-dependencies]
 insta = "1"
-tempfile = "3"
 trybuild = "1"

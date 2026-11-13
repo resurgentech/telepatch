@@ -137,6 +137,7 @@ esac"#,
                     target: Target::Local(
                         LocalTransport::new()
                             .uid(0)
+                            .sandboxed_at(&d)
                             .env("PATH", &path)
                             .env("TP_ROOTVAR", "x")
                             .env("TP_FETCH_STAGE", &d.join("stage").display().to_string())

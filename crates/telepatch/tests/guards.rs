@@ -22,6 +22,7 @@ use telepatch::{Guard, Host, NodeId, Playbook, PlaybookFuture, sh};
 fn local_spec(dir: &Path, path: Option<&str>) -> HostSpec<PathBuf> {
     let mut t = LocalTransport::new()
         .uid(0)
+        .sandboxed_at(dir)
         .env("TP_FETCH_STAGE", &dir.join("stage").display().to_string());
     if let Some(p) = path {
         t = t.env("PATH", p);
@@ -435,6 +436,7 @@ fn svc_spec(d: &Path) -> HostSpec<PathBuf> {
         target: Target::Local(
             LocalTransport::new()
                 .uid(0)
+                .sandboxed_at(d)
                 .env("PATH", &path)
                 .env("TP_SVC_RUNDIR", run.to_str().unwrap())
                 .env("TP_FETCH_STAGE", &d.join("stage").display().to_string()),
@@ -740,6 +742,7 @@ fn ssh_go(pb: &Playbook<Vars>, stub: &Path) -> (Report, String) {
     let bin = stub.join("bin");
     let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap());
     let t = SshTransport::new()
+        .sandboxed_at(stub)
         .ssh(&stub.join("ssh").display().to_string())
         .env("TP_STUB_DIR", &stub.display().to_string())
         .env("TP_FETCH_STAGE", &stub.join("stage").display().to_string())

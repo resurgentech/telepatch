@@ -382,6 +382,7 @@ if [ "$out" = - ]; then cat "$D/www/$n"; else cp "$D/www/$n" "$out"; fi"#
                 target: Target::Local(
                     LocalTransport::new()
                         .uid(0)
+                        .sandboxed_at(self.d.path())
                         .env("PATH", path)
                         .env("TMPDIR", &self.p("tmp").display().to_string())
                         .env("TP_FETCH_STAGE", &self.p("stage").display().to_string())
@@ -698,6 +699,7 @@ printf '{{\n  "url": "u",\n  "tag_name": "v4.5.6",\n  "name": "x"\n}}\n'
             target: Target::Local(
                 LocalTransport::new()
                     .uid(0)
+                    .sandboxed_at(d.path())
                     .env("PATH", &format!("{}:{}", bin.display(), farm.display())),
             ),
             vars: G {
@@ -978,7 +980,7 @@ fn a_merged_member_s_allowance_is_listed_in_the_plan_and_the_report() {
         vec![HostSpec {
             groups: Vec::new(),
             name: "h1".into(),
-            target: Target::Local(LocalTransport::new().uid(0).env(
+            target: Target::Local(LocalTransport::new().uid(0).sandboxed_at(d.path()).env(
                 "PATH",
                 &format!("{}:{}", bin.display(), std::env::var("PATH").unwrap()),
             )),
@@ -1166,6 +1168,7 @@ esac
                 target: Target::Local(
                     LocalTransport::new()
                         .uid(0)
+                        .sandboxed_at(self.d.path())
                         .env("PATH", path)
                         .env("TMPDIR", &self.p("tmp").display().to_string())
                         .env("TP_FETCH_STAGE", &self.p("stage").display().to_string())

@@ -19,7 +19,8 @@ fn host() -> Host<()> {
 }
 
 async fn open_root() -> Shell {
-    let t = LocalTransport::new().uid(0);
+    let sb = telepatch::testing::sandbox();
+    let t = LocalTransport::new().uid(0).sandboxed(&sb);
     let mut s = t.open("local", &Principal::Root, 3).await;
     assert!(s.limit.is_none(), "{:?}", s.limit);
     assert_eq!(s.got.len(), 1, "local gives exactly one shell");
@@ -270,7 +271,10 @@ async fn sudo_refusal_is_a_limit() {
         "sudo",
         "echo 'sudo: a password is required' >&2; exit 1",
     );
-    let t = LocalTransport::new().uid(1000).sudo(&sudo);
+    let t = LocalTransport::new()
+        .uid(1000)
+        .sandboxed_at(d.path())
+        .sudo(&sudo);
     let s = t.open("local", &Principal::Root, 1).await;
     assert!(s.got.is_empty());
     assert_eq!(s.limit, Some(Limit::SudoRefused));
@@ -287,7 +291,10 @@ async fn sudo_that_execs_bash_gives_a_working_shell() {
         "sudo",
         "[ \"$1\" = -n ] && [ \"$2\" = -H ] || exit 2\nshift 2\nHOME=/root; export HOME\nexec \"$@\"",
     );
-    let t = LocalTransport::new().uid(1000).sudo(&sudo);
+    let t = LocalTransport::new()
+        .uid(1000)
+        .sandboxed_at(d.path())
+        .sudo(&sudo);
     let mut s = t.open("local", &Principal::Root, 1).await;
     assert!(s.limit.is_none(), "{:?}", s.limit);
     let sh = &mut s.got[0];
@@ -303,7 +310,10 @@ async fn sudo_that_execs_bash_gives_a_working_shell() {
 async fn root_uid_does_not_call_sudo() {
     let d = tempfile::tempdir().unwrap();
     let sudo = script(d.path(), "sudo", "exit 1");
-    let t = LocalTransport::new().uid(0).sudo(&sudo);
+    let t = LocalTransport::new()
+        .uid(0)
+        .sandboxed_at(d.path())
+        .sudo(&sudo);
     let s = t.open("local", &Principal::Root, 1).await;
     assert!(s.limit.is_none());
     assert_eq!(s.got.len(), 1);
@@ -311,7 +321,8 @@ async fn root_uid_does_not_call_sudo() {
 
 #[tokio::test]
 async fn non_root_user_principal_is_not_supported_yet() {
-    let t = LocalTransport::new().uid(0);
+    let sb = telepatch::testing::sandbox();
+    let t = LocalTransport::new().uid(0).sandboxed(&sb);
     let s = t.open("local", &Principal::User("deploy".into()), 1).await;
     assert!(s.got.is_empty());
     match s.limit {
@@ -327,7 +338,8 @@ async fn non_root_user_principal_is_not_supported_yet() {
 #[tokio::test]
 async fn as_user_for_the_shells_own_user_is_a_plain_op_in_it() {
     let me = me();
-    let t = LocalTransport::new().uid(0);
+    let sb = telepatch::testing::sandbox();
+    let t = LocalTransport::new().uid(0).sandboxed(&sb);
     let mut s = t.open("local", &Principal::Root, 1).await;
     let sh = &mut s.got[0];
 

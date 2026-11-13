@@ -27,13 +27,14 @@ fn check(pb: &Playbook<PathBuf>, dir: &Path, diff: bool) -> (Report, String) {
 }
 
 fn check_vars<V: 'static>(pb: &Playbook<V>, vars: V, diff: bool) -> (Report, String) {
+    let sb = telepatch::testing::sandbox();
     let out = Rc::new(RefCell::new(String::new()));
     let report = run_check(
         pb,
         vec![HostSpec {
             groups: Vec::new(),
             name: "h1".into(),
-            target: Target::Local(LocalTransport::new().uid(0)),
+            target: Target::Local(LocalTransport::new().uid(0).sandboxed(&sb)),
             vars,
         }],
         RunOpts {
@@ -729,10 +730,11 @@ fn go(a: &[&str]) -> (String, i32) {
         .chain(a.iter().copied())
         .map(String::from)
         .collect();
+    let sb = telepatch::testing::sandbox();
     run_with_args(
         &args,
         &[Playbook::new("site", cli_entry)],
-        || LocalTransport::new().uid(0),
+        || LocalTransport::new().uid(0).sandboxed(&sb),
         SshTransport::new,
     )
 }

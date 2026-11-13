@@ -343,6 +343,7 @@ if [ -f "$D/www/$n" ]; then cp "$D/www/$n" "$out"; else echo "wget: server retur
                 target: Target::Local(
                     LocalTransport::new()
                         .uid(0)
+                        .sandboxed_at(self.d.path())
                         .env("PATH", path)
                         .env("TMPDIR", &self.p("tmp").display().to_string())
                         .env("TP_FETCH_STAGE", &self.p("stage").display().to_string())
@@ -964,6 +965,7 @@ fn two_ops_on_one_fetch_download_it_once() {
             target: Target::Local(
                 LocalTransport::new()
                     .uid(0)
+                    .sandboxed_at(e.d.path())
                     .env(
                         "PATH",
                         &format!("{}:{}", bin.display(), std::env::var("PATH").unwrap()),
@@ -1149,6 +1151,7 @@ esac
                 target: Target::Local(
                     LocalTransport::new()
                         .uid(0)
+                        .sandboxed_at(self.d.path())
                         .env("PATH", path)
                         .env("TMPDIR", &self.p("tmp").display().to_string())
                         .env("TP_FETCH_STAGE", &self.p("stage").display().to_string())
@@ -1700,6 +1703,7 @@ fn two_fetches_of_one_url_download_once_with_the_longest_timeout() {
             target: Target::Local(
                 LocalTransport::new()
                     .uid(0)
+                    .sandboxed_at(e.d.path())
                     .env("PATH", &path)
                     .env("TMPDIR", &e.p("tmp").display().to_string())
                     .env("TP_FETCH_STAGE", &e.p("stage").display().to_string())
