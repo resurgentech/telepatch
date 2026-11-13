@@ -1541,3 +1541,17 @@ are appended, never edited in; a hook refuses rewrites.
 - tests/no_argv.rs adapted; tests/login_shell.rs (17); note amended.
 - Gate E green: 884 passed; lint clean; tp_basic 48 passed, unchanged.
 - Commits: telepatch 7be0643
+
+## 2026-11-12 — T105 The shell-death test races its own send
+
+- The test was wrong, not the pool. `shell_death_fails_in_flight_ops`
+  accepts `Ok` or `Err(Died)` from a send after the kill; `wait` still
+  says `Died`. New `send_to_a_dead_shell_is_the_ops_failure`
+  (deterministic: waits for the process to be gone, since stdout's EOF
+  can precede the stdin pipe closing). New `tests/shell_death.rs`: a
+  `--local` window whose first op kills the shell (`kill -9 $$
+  $BASHPID`) fails the host at that op; the next op is not run.
+- Loop on top of T114: each binary 1000 runs, 8 at a time, 0 failures;
+  `cargo test --workspace` 5 times green (886 passed); lint clean;
+  tp_basic unchanged. No file under `src/`.
+- Commits: telepatch 257d92e
