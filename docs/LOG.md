@@ -1593,3 +1593,19 @@ are appended, never edited in; a hook refuses rewrites.
 - Gate B green: tp_basic cargo test 50 passed, check-conversion ok,
   test-oracle-selftest ok, test-vm.sh --self-test ok.
 - Commits: tp_basic fcc1643
+
+## 2026-11-13 — T115 `h.check` runs share one bash
+
+- A run (adjacent `check` reads in one fact round, same `RunAs`) is one
+  probe op and one fresh bash; a run of one is today's case. OS-1
+  settled by the user: "T115 agreed on bash per group", no bash kept
+  across awaits.
+- Each check is `tp_cN='…'`, run as `( eval "$tp_cN" ) >"$d/N"
+  2>/dev/null </dev/null`; rc, length and stdout per check; temp dir
+  removed before return. Script still on fd 9 from a quoted here-doc.
+- `facts` event gains `"probes": n`; answers stay one per query.
+- tests/facts.rs (6 new), tests/no_argv.rs run-of-three sweep; note
+  amended (facts paragraph and section).
+- Gate E green: 924 passed; lint clean; tp_basic 50 passed, unchanged.
+- tp_basic: stale `bash -l` comment in rust_build.rs corrected.
+- Commits: telepatch 9adc138; tp_basic 46c7aaf
