@@ -128,7 +128,20 @@ fn run_script(script: &str, d: &Path) -> (RepoResult, String) {
 }
 
 fn res(rc: i32, changed: bool) -> RepoResult {
-    RepoResult { rc, changed }
+    RepoResult {
+        rc,
+        changed,
+        ..Default::default()
+    }
+}
+
+/// `r` without the capture fields (T107), for the older tests.
+fn core(r: &RepoResult) -> RepoResult {
+    RepoResult {
+        rc: r.rc,
+        changed: r.changed,
+        ..Default::default()
+    }
 }
 
 fn curllog(d: &Path) -> String {
@@ -184,7 +197,7 @@ fn repo_apt_first_run_writes_key_and_source_then_rerun_makes_no_call() {
     let script = wrapped(&h, id);
 
     let (r, err) = run_script(&script, d.path());
-    assert_eq!(r, res(0, true), "{err}");
+    assert_eq!(core(&r), res(0, true), "{err}");
     assert_eq!(read(d.path(), KEY), format!("FETCHED {KEY_URL}\n"));
     assert_eq!(read(d.path(), SRC), want_source(d.path(), "amd64"));
     assert_eq!(mode(d.path(), KEY), 0o644);
@@ -198,7 +211,7 @@ fn repo_apt_first_run_writes_key_and_source_then_rerun_makes_no_call() {
     );
 
     let (r, _) = run_script(&script, d.path());
-    assert_eq!(r, res(0, false));
+    assert_eq!(core(&r), res(0, false));
     assert_eq!(curllog(d.path()).lines().count(), 1, "no network call");
 }
 
@@ -210,7 +223,7 @@ fn repo_apt_architecture_comes_from_the_host() {
     let h = host(ubuntu());
     let id = h.repo("docker").apt(docker_apt(&h)).id();
     let (r, err) = run_script(&wrapped(&h, id), d.path());
-    assert_eq!(r, res(0, true), "{err}");
+    assert_eq!(core(&r), res(0, true), "{err}");
     assert_eq!(read(d.path(), SRC), want_source(d.path(), "arm64"));
 }
 
@@ -225,7 +238,7 @@ fn repo_apt_changed_source_is_rewritten_without_a_fetch() {
     std::fs::write(d.path().join(SRC), "hand edited\n").unwrap();
     std::fs::write(d.path().join(KEY), "my own key\n").unwrap();
     let (r, _) = run_script(&script, d.path());
-    assert_eq!(r, res(0, true));
+    assert_eq!(core(&r), res(0, true));
     assert_eq!(read(d.path(), SRC), want_source(d.path(), "amd64"));
     assert_eq!(read(d.path(), KEY), "my own key\n", "an existing key stays");
     assert_eq!(curllog(d.path()).lines().count(), 1);
@@ -236,7 +249,7 @@ fn repo_apt_changed_source_is_rewritten_without_a_fetch() {
     )
     .unwrap();
     let (r, _) = run_script(&script, d.path());
-    assert_eq!(r, res(0, true));
+    assert_eq!(core(&r), res(0, true));
 }
 
 #[test]
@@ -249,7 +262,7 @@ fn repo_apt_missing_key_is_fetched_when_the_source_is_fine() {
     run_script(&script, d.path());
     std::fs::remove_file(d.path().join(KEY)).unwrap();
     let (r, _) = run_script(&script, d.path());
-    assert_eq!(r, res(0, true));
+    assert_eq!(core(&r), res(0, true));
     assert_eq!(curllog(d.path()).lines().count(), 2);
     assert_eq!(read(d.path(), KEY), format!("FETCHED {KEY_URL}\n"));
 }
@@ -262,7 +275,7 @@ fn repo_apt_failed_fetch_fails_and_leaves_nothing() {
     let h = host(ubuntu());
     let id = h.repo("docker").apt(docker_apt(&h)).id();
     let (r, _) = run_script(&wrapped(&h, id), d.path());
-    assert_eq!(r, res(1, false));
+    assert_eq!(core(&r), res(1, false));
     assert!(!exists(d.path(), KEY));
     assert!(!exists(d.path(), SRC), "no source without its key");
     assert!(listing(d.path(), "etc/apt/keyrings").is_empty(), "no temp");
@@ -309,7 +322,7 @@ fn repo_without_curl_errors_clearly_and_installs_nothing() {
         .unwrap();
     let stream = String::from_utf8(out.stdout).unwrap();
     let (_, t) = split_stream(&stream, NONCE).remove(0);
-    assert_eq!(t.typed::<RepoResult>().unwrap(), res(1, false));
+    assert_eq!(core(&t.typed::<RepoResult>().unwrap()), res(1, false));
     let err = String::from_utf8(out.stderr).unwrap();
     assert!(
         err.contains("telepatch: repo docker: curl not found"),
@@ -336,7 +349,7 @@ fn repo_apt_lists_and_quotes_render_as_deb822_words() {
         })
         .id();
     let (r, err) = run_script(&wrapped(&h, id), d.path());
-    assert_eq!(r, res(0, true), "{err}");
+    assert_eq!(core(&r), res(0, true), "{err}");
     assert_eq!(
         read(d.path(), "etc/apt/sources.list.d/multi.sources"),
         format!(
@@ -360,16 +373,16 @@ fn repo_dnf_url_fetches_only_when_absent() {
     let id = h.repo("docker").dnf_url(DNF_URL).id();
     let script = wrapped(&h, id);
     let (r, err) = run_script(&script, d.path());
-    assert_eq!(r, res(0, true), "{err}");
+    assert_eq!(core(&r), res(0, true), "{err}");
     assert_eq!(read(d.path(), REPOFILE), format!("FETCHED {DNF_URL}\n"));
     assert_eq!(mode(d.path(), REPOFILE), 0o644);
     assert_eq!(listing(d.path(), "etc/yum.repos.d"), ["docker.repo"]);
     let (r, _) = run_script(&script, d.path());
-    assert_eq!(r, res(0, false));
+    assert_eq!(core(&r), res(0, false));
     // Present but different: still untouched, no call.
     std::fs::write(d.path().join(REPOFILE), "local edit\n").unwrap();
     let (r, _) = run_script(&script, d.path());
-    assert_eq!(r, res(0, false));
+    assert_eq!(core(&r), res(0, false));
     assert_eq!(read(d.path(), REPOFILE), "local edit\n");
     assert_eq!(curllog(d.path()).lines().count(), 1);
 }
@@ -382,7 +395,7 @@ fn repo_dnf_url_failed_fetch_fails() {
     let h = host(fedora());
     let id = h.repo("docker").dnf_url(DNF_URL).id();
     let (r, _) = run_script(&wrapped(&h, id), d.path());
-    assert_eq!(r, res(1, false));
+    assert_eq!(core(&r), res(1, false));
     assert!(listing(d.path(), "etc/yum.repos.d").is_empty());
 }
 
@@ -403,14 +416,14 @@ fn repo_dnf_struct_is_written_and_compared_byte_for_byte() {
     let script = wrapped(&h, id);
     let want = "[docker]\nname=Docker CE\nbaseurl=https://download.docker.com/linux/rhel/$releasever/$basearch/stable\nenabled=1\ngpgcheck=1\ngpgkey=https://download.docker.com/linux/rhel/gpg\n";
     let (r, err) = run_script(&script, d.path());
-    assert_eq!(r, res(0, true), "{err}");
+    assert_eq!(core(&r), res(0, true), "{err}");
     assert_eq!(read(d.path(), REPOFILE), want, "no shell expansion");
     assert_eq!(mode(d.path(), REPOFILE), 0o644);
     let (r, _) = run_script(&script, d.path());
-    assert_eq!(r, res(0, false));
+    assert_eq!(core(&r), res(0, false));
     std::fs::write(d.path().join(REPOFILE), "changed\n").unwrap();
     let (r, _) = run_script(&script, d.path());
-    assert_eq!(r, res(0, true));
+    assert_eq!(core(&r), res(0, true));
     assert_eq!(read(d.path(), REPOFILE), want);
     assert_eq!(curllog(d.path()), "", "a known body needs no network");
     assert_eq!(listing(d.path(), "etc/yum.repos.d"), ["docker.repo"]);
@@ -534,7 +547,7 @@ fn repo_without_a_source_fails_when_run() {
     let h = host(ubuntu());
     let id = h.repo("docker").id();
     let (r, err) = run_script(&wrapped(&h, id), d.path());
-    assert_eq!(r, res(1, false));
+    assert_eq!(core(&r), res(1, false));
     assert!(err.contains("telepatch: repo docker:"), "{err}");
 }
 
@@ -684,8 +697,8 @@ fn repo_op_and_probe_need_no_cmp_or_diff_on_the_host() {
             String::from_utf8(out.stdout).unwrap()
         };
         assert!(!probed(d.path()).is_empty(), "absent: will add");
-        assert_eq!(run(d.path()), res(0, true));
-        assert_eq!(run(d.path()), res(0, false), "settled: quiet");
+        assert_eq!(core(&run(d.path())), res(0, true));
+        assert_eq!(core(&run(d.path())), res(0, false), "settled: quiet");
         assert_eq!(probed(d.path()), "", "settled: nothing to add");
         let file = if dnf {
             "etc/yum.repos.d/other.repo"
@@ -696,4 +709,198 @@ fn repo_op_and_probe_need_no_cmp_or_diff_on_the_host() {
         assert!(!probed(d.path()).is_empty(), "edited: will add");
         assert_eq!(run(d.path()), res(0, true), "edited: rewritten");
     }
+}
+
+// --- inverse capture (T107) ---
+
+const RUN: &str = "r1";
+const OP_ID: usize = 7;
+
+fn me() -> String {
+    let o = Command::new("id").arg("-un").output().unwrap();
+    String::from_utf8(o.stdout).unwrap().trim().to_string()
+}
+
+/// Run the op as a run's op: a stage in `d`, `__tp_run` set, and `roots` as
+/// `TP_FS_ROOTS`. (result, stderr)
+fn run_capture(h: &Host<()>, id: NodeId, d: &Path, roots: Option<&Path>) -> (RepoResult, String) {
+    let script = match &h.snapshot().nodes[id.0] {
+        Node::Op(op) => render_op(op, OP_ID, NONCE, &h.os),
+        _ => panic!("not an op"),
+    };
+    let mut c = Command::new("/usr/bin/env");
+    c.arg("bash")
+        .arg("-c")
+        .arg(redirect(&script, d))
+        .current_dir(d)
+        .env("PATH", full_path(d))
+        .env_remove("TP_FS_ROOTS")
+        .env("TP_FETCH_STAGE", d.join("stage"))
+        .env("__tp_run", RUN);
+    if let Some(r) = roots {
+        c.env("TP_FS_ROOTS", r);
+    }
+    let out = c.output().unwrap();
+    let stream = String::from_utf8(out.stdout).unwrap();
+    let mut v = split_stream(&stream, NONCE);
+    assert_eq!(v.len(), 1, "stream: {stream:?}");
+    (
+        v.remove(0).1.typed::<RepoResult>().unwrap(),
+        String::from_utf8(out.stderr).unwrap(),
+    )
+}
+
+fn stage_dir(d: &Path) -> PathBuf {
+    d.join("stage")
+        .join(RUN)
+        .join("undo")
+        .join(me())
+        .join(OP_ID.to_string())
+}
+
+#[test]
+fn repo_apt_on_a_bare_host_says_it_created_both_files() {
+    let d = tempfile::tempdir().unwrap();
+    stubs(d.path());
+    let h = host(ubuntu());
+    let id = h.repo("docker").apt(docker_apt(&h)).id();
+    let (r, err) = run_capture(&h, id, d.path(), None);
+    assert_eq!((r.rc, r.changed), (0, true), "{err}");
+    assert!(r.key_created && r.file_created, "{r:?}");
+    assert_eq!(r.backup, "");
+    assert!(!stage_dir(d.path()).exists(), "a new file saves nothing");
+}
+
+#[test]
+fn repo_apt_changed_source_is_backed_up_and_the_key_is_untouched() {
+    let d = tempfile::tempdir().unwrap();
+    stubs(d.path());
+    let h = host(ubuntu());
+    let id = h.repo("docker").apt(docker_apt(&h)).id();
+    run_script(&wrapped(&h, id), d.path());
+    std::fs::write(d.path().join(SRC), "hand edited\n").unwrap();
+    let (r, err) = run_capture(&h, id, d.path(), None);
+    assert_eq!((r.rc, r.changed), (0, true), "{err}");
+    assert!(!r.key_created && !r.file_created, "{r:?}");
+    assert_eq!(r.backup, stage_dir(d.path()).to_str().unwrap());
+    let meta = std::fs::symlink_metadata(stage_dir(d.path())).unwrap();
+    assert!(meta.is_dir() && !meta.file_type().is_symlink());
+    assert_eq!(
+        std::fs::read_to_string(stage_dir(d.path()).join("old")).unwrap(),
+        "hand edited\n"
+    );
+    assert_eq!(read(d.path(), SRC), want_source(d.path(), "amd64"));
+    assert_eq!(
+        curllog(d.path()).lines().count(),
+        1,
+        "the key is not fetched"
+    );
+    // Settled: nothing changes, nothing is saved.
+    std::fs::remove_dir_all(d.path().join("stage")).unwrap();
+    let (r, _) = run_capture(&h, id, d.path(), None);
+    assert_eq!((r.changed, r.backup.as_str()), (false, ""));
+    assert!(!d.path().join("stage").exists());
+}
+
+#[test]
+fn repo_source_on_another_filesystem_is_backed_up_there_and_linked() {
+    let d = tempfile::tempdir().unwrap();
+    stubs(d.path());
+    let h = host(ubuntu());
+    let id = h.repo("docker").apt(docker_apt(&h)).id();
+    run_script(&wrapped(&h, id), d.path());
+    std::fs::write(d.path().join(SRC), "hand edited\n").unwrap();
+    let etc = d.path().join("etc");
+    let (r, err) = run_capture(&h, id, d.path(), Some(&etc));
+    assert_eq!((r.rc, r.changed), (0, true), "{err}");
+    assert_eq!(r.backup, stage_dir(d.path()).to_str().unwrap());
+    let there = etc
+        .join(".telepatch/tmp")
+        .join(RUN)
+        .join("undo")
+        .join(me())
+        .join(OP_ID.to_string());
+    assert_eq!(std::fs::read_link(stage_dir(d.path())).unwrap(), there);
+    assert_eq!(
+        std::fs::read_to_string(there.join("old")).unwrap(),
+        "hand edited\n"
+    );
+    assert!(!d.path().join(".telepatch").exists());
+}
+
+#[test]
+fn repo_backup_failure_fails_the_op_before_the_source_is_rewritten() {
+    use std::os::unix::fs::PermissionsExt;
+    if Command::new("id").arg("-u").output().unwrap().stdout == b"0\n" {
+        return;
+    }
+    let d = tempfile::tempdir().unwrap();
+    stubs(d.path());
+    let h = host(ubuntu());
+    let id = h.repo("docker").apt(docker_apt(&h)).id();
+    run_script(&wrapped(&h, id), d.path());
+    std::fs::write(d.path().join(SRC), "hand edited\n").unwrap();
+    let etc = d.path().join("etc");
+    std::fs::set_permissions(&etc, std::fs::Permissions::from_mode(0o555)).unwrap();
+    let (r, err) = run_capture(&h, id, d.path(), Some(&etc));
+    std::fs::set_permissions(&etc, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!((r.rc, r.changed), (1, false), "{err}");
+    assert!(err.contains("cannot save undo data"), "{err}");
+    assert_eq!(read(d.path(), SRC), "hand edited\n");
+    assert_eq!(r.backup, "");
+}
+
+#[test]
+fn repo_dnf_url_says_whether_it_created_the_file() {
+    let d = tempfile::tempdir().unwrap();
+    stubs(d.path());
+    let h = host(fedora());
+    let id = h.repo("docker").dnf_url(DNF_URL).id();
+    let (r, err) = run_capture(&h, id, d.path(), None);
+    assert_eq!((r.rc, r.changed), (0, true), "{err}");
+    assert!(
+        r.file_created && !r.key_created && r.backup.is_empty(),
+        "{r:?}"
+    );
+    // Present but different: untouched, so neither created nor saved.
+    std::fs::write(d.path().join(REPOFILE), "local edit\n").unwrap();
+    let (r, _) = run_capture(&h, id, d.path(), None);
+    assert!(
+        !r.changed && !r.file_created && r.backup.is_empty(),
+        "{r:?}"
+    );
+    assert_eq!(read(d.path(), REPOFILE), "local edit\n");
+}
+
+#[test]
+fn repo_dnf_body_rewrite_backs_up_the_old_repo_file() {
+    let d = tempfile::tempdir().unwrap();
+    stubs(d.path());
+    let h = host(fedora());
+    let id = h.repo("docker").dnf(dnf_struct()).id();
+    let (r, err) = run_capture(&h, id, d.path(), None);
+    assert_eq!((r.rc, r.changed), (0, true), "{err}");
+    assert!(r.file_created && r.backup.is_empty(), "{r:?}");
+    std::fs::write(d.path().join(REPOFILE), "old body\n").unwrap();
+    let (r, err) = run_capture(&h, id, d.path(), None);
+    assert_eq!((r.rc, r.changed), (0, true), "{err}");
+    assert!(!r.file_created, "{r:?}");
+    assert_eq!(r.backup, stage_dir(d.path()).to_str().unwrap());
+    assert_eq!(
+        std::fs::read_to_string(stage_dir(d.path()).join("old")).unwrap(),
+        "old body\n"
+    );
+}
+
+#[test]
+fn repo_has_an_inverse_unless_it_has_no_source() {
+    let h = host(ubuntu());
+    let apt = h.repo("a").apt(docker_apt(&h)).id();
+    let none = h.repo("b").id();
+    let inv = |id: NodeId| match &h.snapshot().nodes[id.0] {
+        Node::Op(op) => op.spec.has_inverse(),
+        _ => panic!("not an op"),
+    };
+    assert!(inv(apt));
+    assert!(!inv(none));
 }

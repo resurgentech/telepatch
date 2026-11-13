@@ -2898,10 +2898,12 @@ impl Executor for HostExec {
                 self.fetch_staged = true;
             }
             if self.check.is_none()
-                && window
-                    .ops
-                    .iter()
-                    .any(|o| matches!(o.node.spec, OpSpec::File(_) | OpSpec::Unit(_)))
+                && window.ops.iter().any(|o| {
+                    matches!(
+                        o.node.spec,
+                        OpSpec::File(_) | OpSpec::Unit(_) | OpSpec::Repo(_)
+                    )
+                })
                 && !self.undo_used
             {
                 self.undo_used = true;

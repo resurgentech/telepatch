@@ -17,6 +17,13 @@
 //! `.dnf_url` file) is fetched only when absent, so a settled host makes no
 //! network call; refreshing a rotated key is not done.
 //!
+//! Inverse capture (T107): the result says whether this op created the key
+//! (`tp_kc`) and the source file (`tp_fc`); a source or `.repo` body that is
+//! rewritten is first backed up with [`crate::ops::undo`]'s `tp_save`, on
+//! its own filesystem, and the backup directory is the result's `backup`. A
+//! backup that cannot be saved fails the op before the rewrite, with the
+//! helper's `telepatch: file <path>: cannot save undo data: ...` line.
+//!
 //! The template does not install anything: a host without `curl` fails the
 //! op with `telepatch: repo <n>: curl not found` (the role installs `curl`
 //! and `ca-certificates` first, as its own `pkg` op).
@@ -30,6 +37,7 @@ use std::ops::Deref;
 use crate::facts::os::Family;
 use crate::host::{Host, OpHandle, TraceError};
 use crate::key::{Key, Value};
+use crate::ops::undo::HELPERS;
 use crate::sh::quote;
 use crate::trace::{OpSpec, Principal};
 
@@ -85,10 +93,13 @@ const FETCH: &str = "tp_fetch() {
 
 const PUT: &str = "tp_put() {
   if [ -f \"$1\" ] && [ \"$(tp_render \"$2\" | sha256sum | cut -d' ' -f1)\" = \"$(sha256sum < \"$1\" | cut -d' ' -f1)\" ]; then return 0; fi
+  tp_new=
+  if [ -e \"$1\" ] || [ -L \"$1\" ]; then tp_was \"$1\"; tp_save \"$1\" || return 1; else tp_new=1; fi
   (umask 022; mkdir -p -- \"$(dirname -- \"$1\")\") || return 1
   tp_t=$(mktemp \"$1.XXXXXX\") || return 1
   if tp_render \"$2\" > \"$tp_t\" && chmod 0644 \"$tp_t\" && mv -f -- \"$tp_t\" \"$1\"; then
     changed=1
+    [ -z \"$tp_new\" ] || tp_fc=1
     return 0
   fi
   rm -f -- \"$tp_t\"
@@ -171,6 +182,11 @@ impl RepoSpec {
 
     pub fn render(&self) -> String {
         let mut o = format!("tp_n={}\n", quote(&self.name));
+        if self.kind != RepoKind::Unset {
+            // T107: the capture helpers; `tp_kc` / `tp_fc` say this op
+            // created the key / the source file.
+            o.push_str(HELPERS);
+        }
         match &self.kind {
             RepoKind::Unset => {
                 o.push_str(
@@ -187,7 +203,7 @@ impl RepoSpec {
                     quote(&self.source_path())
                 ));
                 o.push_str(&format!(
-                    "if [ ! -e \"$tp_key\" ]; then\n  if tp_fetch {} \"$tp_key\"; then changed=1; else rc=1; fi\nfi\n",
+                    "if [ ! -e \"$tp_key\" ]; then\n  if tp_fetch {} \"$tp_key\"; then changed=1; tp_kc=1; else rc=1; fi\nfi\n",
                     quote(&a.key_url)
                 ));
                 o.push_str(
@@ -197,7 +213,7 @@ impl RepoSpec {
             RepoKind::DnfUrl(url) => {
                 o.push_str(FETCH);
                 o.push_str(&format!(
-                    "tp_f={}\nif [ ! -e \"$tp_f\" ]; then\n  if tp_fetch {} \"$tp_f\"; then changed=1; else rc=1; fi\nfi\n",
+                    "tp_f={}\nif [ ! -e \"$tp_f\" ]; then\n  if tp_fetch {} \"$tp_f\"; then changed=1; tp_fc=1; else rc=1; fi\nfi\n",
                     quote(&self.dnf_path()),
                     quote(url)
                 ));

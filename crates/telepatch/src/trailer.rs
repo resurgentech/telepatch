@@ -126,18 +126,42 @@ pub struct GroupResult {
     pub created: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
 pub struct UserResult {
     pub rc: i32,
     pub changed: bool,
     /// The account did not exist and this op made it.
     pub created: bool,
+    /// The login shell before `usermod -s` changed it (T107); `None` when
+    /// that did not run (a created account, a shell already right).
+    #[serde(default)]
+    pub was_shell: Option<String>,
+    /// The groups `usermod -aG` added: only those the account lacked.
+    /// Empty when it did not run. No password hash is ever captured: the
+    /// op sets one only on `useradd`, so there is nothing to restore.
+    #[serde(default)]
+    pub groups_added: Vec<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+/// A `repo` op (T107). The key and a `.dnf_url` file are fetched only when
+/// absent, so each is created or untouched; the apt source and the `.dnf`
+/// body are rewritten when they differ, and the previous bytes are saved.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
 pub struct RepoResult {
     pub rc: i32,
     pub changed: bool,
+    /// This op fetched the apt key (it was absent).
+    #[serde(default)]
+    pub key_created: bool,
+    /// This op created the apt `.sources` or the dnf `.repo` file (it was
+    /// absent).
+    #[serde(default)]
+    pub file_created: bool,
+    /// The stage path of the backup directory (as [`FileResult::backup`])
+    /// whose `old` is the source or `.repo` file this op rewrote; empty when
+    /// nothing was saved.
+    #[serde(default)]
+    pub backup: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -380,10 +404,14 @@ pub fn guard_skip(kind: OpKind, id: usize, nonce: &str) -> String {
     );
     let json = match kind {
         OpKind::Pkg => r#"{"rc":0,"changed":false,"installed":[],"when":false}"#,
-        OpKind::File | OpKind::Repo | OpKind::Resource => {
-            r#"{"rc":0,"changed":false,"when":false}"#
+        OpKind::File | OpKind::Resource => r#"{"rc":0,"changed":false,"when":false}"#,
+        OpKind::Repo => {
+            r#"{"rc":0,"changed":false,"key_created":false,"file_created":false,"backup":"","when":false}"#
         }
-        OpKind::Group | OpKind::User => r#"{"rc":0,"changed":false,"created":false,"when":false}"#,
+        OpKind::Group => r#"{"rc":0,"changed":false,"created":false,"when":false}"#,
+        OpKind::User => {
+            r#"{"rc":0,"changed":false,"created":false,"was_shell":null,"groups_added":[],"when":false}"#
+        }
         OpKind::Git => r#"{"rc":0,"changed":false,"created":false,"was_rev":"","when":false}"#,
         OpKind::Sh | OpKind::Svc => r#"{"rc":0,"changed":false,"skipped":true,"when":false}"#,
     };
@@ -442,8 +470,12 @@ fn wrap_framed(
         OpKind::File => {
             r#"{"rc":%s,"changed":%s,"existed":%s,"was_type":"%s","was_mode":"%s","was_owner":"%s","created_top":"%s","backup":"%s"}"#
         }
-        OpKind::Repo | OpKind::Resource => r#"{"rc":%s,"changed":%s}"#,
-        OpKind::Group | OpKind::User => r#"{"rc":%s,"changed":%s,"created":%s}"#,
+        OpKind::Resource => r#"{"rc":%s,"changed":%s}"#,
+        OpKind::Repo => {
+            r#"{"rc":%s,"changed":%s,"key_created":%s,"file_created":%s,"backup":"%s"}"#
+        }
+        OpKind::Group => r#"{"rc":%s,"changed":%s,"created":%s}"#,
+        OpKind::User => r#"{"rc":%s,"changed":%s,"created":%s,"was_shell":%s,"groups_added":[%s]}"#,
         OpKind::Git => r#"{"rc":%s,"changed":%s,"created":%s,"was_rev":"%s"}"#,
         OpKind::Sh => r#"{"rc":%s,"changed":%s,"skipped":%s}"#,
         OpKind::Svc => {
@@ -455,8 +487,10 @@ fn wrap_framed(
         OpKind::File => {
             r#""$rc" "$__tp_c" "$__tp_ex" "$(__tp_esc "${tp_wt-}")" "$(__tp_esc "${tp_wm-}")" "$(__tp_esc "${tp_wo-}")" "$(__tp_esc "${tp_ct-}")" "$(__tp_esc "${tp_bk-}")""#
         }
-        OpKind::Repo | OpKind::Resource => r#""$rc" "$__tp_c""#,
-        OpKind::Group | OpKind::User => r#""$rc" "$__tp_c" "$__tp_k""#,
+        OpKind::Resource => r#""$rc" "$__tp_c""#,
+        OpKind::Repo => r#""$rc" "$__tp_c" "$__tp_kc" "$__tp_k" "$(__tp_esc "${tp_bk-}")""#,
+        OpKind::Group => r#""$rc" "$__tp_c" "$__tp_k""#,
+        OpKind::User => r#""$rc" "$__tp_c" "$__tp_k" "${tp_wsj:-null}" "$__tp_ga""#,
         OpKind::Git => r#""$rc" "$__tp_c" "$__tp_k" "$(__tp_esc "${tp_was-}")""#,
         OpKind::Sh => r#""$rc" "$__tp_c" "$__tp_s""#,
         OpKind::Svc => {
@@ -473,6 +507,16 @@ fn wrap_framed(
     if matches!(kind, OpKind::Group | OpKind::User | OpKind::Git) {
         // Only a group or user op sets `created`; other kinds keep their bytes.
         o.push_str("  case \"$created\" in 1) __tp_k=true;; *) __tp_k=false;; esac\n");
+    }
+    if kind == OpKind::Repo {
+        // A repo op says which of its files it created: `tp_kc` the key,
+        // `tp_fc` the source (`__tp_k` here).
+        o.push_str("  case \"${tp_kc-}\" in 1) __tp_kc=true;; *) __tp_kc=false;; esac\n");
+        o.push_str("  case \"${tp_fc-}\" in 1) __tp_k=true;; *) __tp_k=false;; esac\n");
+    }
+    if kind == OpKind::User {
+        // The groups `usermod -aG` added (`tp_gaa`), as JSON strings.
+        o.push_str("  __tp_ga=\n  for __tp_x in \"${tp_gaa[@]}\"; do __tp_ga=\"$__tp_ga${__tp_ga:+,}\\\"$(__tp_esc \"$__tp_x\")\\\"\"; done\n");
     }
     if kind == OpKind::File {
         // A file op records what its path was (`tp_ex`, set by `tp_was`).
@@ -492,7 +536,10 @@ fn wrap_framed(
     let _ = writeln!(o, "  printf '\\n__tp_{nonce} {id} {}\\n' {args}", json);
     o.push_str("}\ntrap '__tp_emit $?' EXIT\ntrap 'exit 143' TERM\n");
     o.push_str("rc=0; changed=0; skipped=0; installed=()\n");
-    if kind == OpKind::File {
+    if kind == OpKind::User {
+        o.push_str("tp_gaa=()\n");
+    }
+    if matches!(kind, OpKind::File | OpKind::Repo) {
         // The id names the op's directory under the run's undo tree.
         let _ = writeln!(o, "tp_id={id}");
     }

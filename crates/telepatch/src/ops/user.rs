@@ -9,6 +9,12 @@
 //! differs and `usermod -aG` for the groups it lacks. `created` is true
 //! only when `useradd` ran.
 //!
+//! Inverse capture (T107): `usermod -s` on an existing account records the
+//! shell it replaced (`was_shell`), `usermod -aG` the groups the account
+//! lacked (`groups_added`, only those). No hash is captured: the password is
+//! set only on the `useradd` path, so an existing account's is never
+//! changed, and no shadow field or checksum of one is in the result.
+//!
 //! The password hash is a secret (hard rule 5). It is applied by
 //! `printf '%s:%s\n' user HASH | chpasswd -e`, a shell builtin feeding a
 //! pipe, so it is never in the argv of a process on the host. It exists
@@ -131,14 +137,14 @@ impl UserSpec {
         if let Some(sh) = &self.shell {
             let q = quote(sh);
             s.push_str(&format!(
-                "  tp_cur=$(getent passwd \"$tp_u\" | cut -d: -f7)\n  if [ \"$tp_cur\" != {q} ]; then\n    usermod -s {q} -- \"$tp_u\"\n    rc=$?\n    if [ \"$rc\" -eq 0 ]; then changed=1; fi\n  fi\n"
+                "  tp_cur=$(getent passwd \"$tp_u\" | cut -d: -f7)\n  if [ \"$tp_cur\" != {q} ]; then\n    usermod -s {q} -- \"$tp_u\"\n    rc=$?\n    if [ \"$rc\" -eq 0 ]; then changed=1; tp_wsj=\"\\\"$(__tp_esc \"$tp_cur\")\\\"\"; fi\n  fi\n"
             ));
         }
         if !self.groups_add.is_empty() {
             let words: Vec<String> = self.groups_add.iter().map(|g| quote(g)).collect();
             let words = words.join(" ");
             s.push_str(&format!(
-                "  if [ \"$rc\" -eq 0 ]; then\n    tp_have=\" $(id -nG \"$tp_u\") \"\n    tp_add=\n    for tp_g in {words}; do\n      case \"$tp_have\" in *\" $tp_g \"*) ;; *) tp_add=\"$tp_add,$tp_g\";; esac\n    done\n    if [ -n \"$tp_add\" ]; then\n      usermod -aG \"${{tp_add#,}}\" -- \"$tp_u\"\n      rc=$?\n      if [ \"$rc\" -eq 0 ]; then changed=1; fi\n    fi\n  fi\n"
+                "  if [ \"$rc\" -eq 0 ]; then\n    tp_have=\" $(id -nG \"$tp_u\") \"\n    tp_add=\n    tp_new=()\n    for tp_g in {words}; do\n      case \"$tp_have\" in *\" $tp_g \"*) ;; *) tp_add=\"$tp_add,$tp_g\"; tp_new+=(\"$tp_g\");; esac\n    done\n    if [ -n \"$tp_add\" ]; then\n      usermod -aG \"${{tp_add#,}}\" -- \"$tp_u\"\n      rc=$?\n      if [ \"$rc\" -eq 0 ]; then changed=1; tp_gaa=(\"${{tp_new[@]}}\"); fi\n    fi\n  fi\n"
             ));
         }
         s.push_str("fi\nfi\n");

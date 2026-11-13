@@ -178,6 +178,7 @@ fn res(rc: i32, changed: bool, created: bool) -> UserResult {
         rc,
         changed,
         created,
+        ..Default::default()
     }
 }
 
@@ -219,7 +220,13 @@ fn user_groups_are_appended_never_removed() {
     let h = host();
     let id = h.user("bot").groups_add(["a", "docker", "sudo"]).id();
     let (r, _) = run_script(&wrapped(&h, id), d.path(), &bin);
-    assert_eq!(r, res(0, true, false));
+    assert_eq!(
+        r,
+        UserResult {
+            groups_added: vec!["docker".into(), "sudo".into()],
+            ..res(0, true, false)
+        }
+    );
     assert_eq!(log(d.path()), "usermod -aG docker,sudo -- bot\n");
     let g = groups_of(d.path(), "bot");
     assert!(
@@ -240,7 +247,13 @@ fn user_shell_is_enforced_on_an_existing_account() {
     let h = host();
     let id = h.user("bot").shell("/bin/bash").id();
     let (r, _) = run_script(&wrapped(&h, id), d.path(), &bin);
-    assert_eq!(r, res(0, true, false));
+    assert_eq!(
+        r,
+        UserResult {
+            was_shell: Some("/bin/sh".into()),
+            ..res(0, true, false)
+        }
+    );
     assert_eq!(log(d.path()), "usermod -s /bin/bash -- bot\n");
     assert_eq!(shell_of(d.path(), "bot"), "/bin/bash");
     let (r, _) = run_script(&wrapped(&h, id), d.path(), &bin);
@@ -501,6 +514,12 @@ fn user_executor_prepare_lines_then_changed_0_and_no_hash_leak() {
     }
     assert!(ev.contains("<secret>"), "{ev}");
     assert!(r1.render().contains("<secret>"));
+    // Nor its checksum, nor any shadow field, in anything the run printed.
+    let sum = sha256_hex(&hash);
+    for (what, text) in [("stdout", &out1), ("report", &r1.render()), ("events", &ev)] {
+        assert!(!text.contains(&sum), "checksum leaked into {what}:\n{text}");
+        assert!(!text.contains("\"shadow\""), "shadow field in {what}");
+    }
 
     let (r2, out2) = go(&pb, d.path(), None);
     assert_eq!(r2.hosts[0].status, HostStatus::Ok, "{}", r2.render());
@@ -540,4 +559,111 @@ fn user_after_group_op_in_one_run_works() {
         r.render()
     );
     assert_eq!(groups_of(d.path(), "tpdev"), ["tpg"]);
+}
+
+// --- inverse capture (T107) ---
+
+#[test]
+fn user_new_shell_on_an_existing_account_records_the_old_one() {
+    let d = tempfile::tempdir().unwrap();
+    let bin = stubs(d.path());
+    add_user(d.path(), "bot", "/bin/sh", "bot");
+    let h = host();
+    let id = h.user("bot").shell("/bin/bash").id();
+    let (r, err) = run_script(&wrapped(&h, id), d.path(), &bin);
+    assert_eq!((r.rc, r.changed, r.created), (0, true, false), "{err}");
+    assert_eq!(r.was_shell.as_deref(), Some("/bin/sh"));
+    assert!(r.groups_added.is_empty());
+    // Already right: usermod does not run, nothing is recorded.
+    let (r, _) = run_script(&wrapped(&h, id), d.path(), &bin);
+    assert_eq!((r.changed, r.was_shell), (false, None));
+}
+
+#[test]
+fn user_groups_added_names_only_the_group_the_account_lacked() {
+    let d = tempfile::tempdir().unwrap();
+    let bin = stubs(d.path());
+    set_groups(d.path(), &["sudo", "docker"]);
+    add_user(d.path(), "bot", "/bin/sh", "bot sudo");
+    let h = host();
+    let id = h.user("bot").groups_add(["sudo", "docker"]).id();
+    let (r, err) = run_script(&wrapped(&h, id), d.path(), &bin);
+    assert_eq!((r.rc, r.changed), (0, true), "{err}");
+    assert_eq!(r.groups_added, ["docker"]);
+    assert_eq!(r.was_shell, None);
+    let (r, _) = run_script(&wrapped(&h, id), d.path(), &bin);
+    assert!(!r.changed && r.groups_added.is_empty());
+}
+
+#[test]
+fn user_created_records_neither_shell_nor_groups() {
+    let d = tempfile::tempdir().unwrap();
+    let bin = stubs(d.path());
+    set_groups(d.path(), &["sudo"]);
+    let h = host();
+    let id = h.user("new").shell("/bin/bash").groups_add(["sudo"]).id();
+    let (r, err) = run_script(&wrapped(&h, id), d.path(), &bin);
+    assert_eq!((r.rc, r.created), (0, true), "{err}");
+    assert_eq!((r.was_shell, r.groups_added.len()), (None, 0));
+}
+
+fn sha256_hex(s: &str) -> String {
+    let o = Command::new("bash")
+        .arg("-c")
+        .arg("printf %s \"$1\" | sha256sum | cut -d' ' -f1")
+        .arg("_")
+        .arg(s)
+        .output()
+        .unwrap();
+    String::from_utf8(o.stdout).unwrap().trim().to_string()
+}
+
+#[test]
+fn user_created_with_a_password_carries_no_hash_material() {
+    let d = tempfile::tempdir().unwrap();
+    let bin = stubs(d.path());
+    let hash = fixture_hash("t");
+    let h = host();
+    let id = h.user("tpdev").password_hash(&pw(&hash)).id();
+    let script = wrapped(&h, id);
+    let out = Command::new("bash")
+        .arg("-c")
+        .arg(&script)
+        .current_dir(d.path())
+        .env(
+            "PATH",
+            format!("{}:{}", bin.display(), std::env::var("PATH").unwrap()),
+        )
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    let mut v = split_stream(&stdout, NONCE);
+    let (_, t) = v.remove(0);
+    let r = t.typed::<UserResult>().unwrap();
+    assert!(r.created, "{stderr}");
+    // The shadow field is read on the host to check it, then dropped.
+    assert_eq!(shadow(d.path()), format!("tpdev:{hash}\n"));
+    let sum = sha256_hex(&hash);
+    for (what, text) in [
+        ("stdout", &stdout),
+        ("stderr", &stderr),
+        ("trailer", &t.json),
+    ] {
+        assert!(!text.contains(&hash), "hash in {what}: {text}");
+        assert!(!text.contains(&sum), "checksum in {what}: {text}");
+    }
+    for word in ["shadow", "hash", "checksum", "password"] {
+        assert!(!t.json.contains(word), "{word} in the trailer: {}", t.json);
+    }
+}
+
+#[test]
+fn user_has_an_inverse() {
+    let h = host();
+    let id = h.user("a").id();
+    match &h.snapshot().nodes[id.0] {
+        Node::Op(op) => assert!(op.spec.has_inverse()),
+        _ => panic!("not an op"),
+    }
 }

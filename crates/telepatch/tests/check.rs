@@ -390,6 +390,15 @@ fn which_ops_have_an_inverse() {
     h.file("/etc/a").content("a");
     h.file("/etc/b").absent();
     h.unit("a.service").content("[Service]\n");
+    h.user("u");
+    h.repo("r").apt(telepatch::ops::repo::AptRepo {
+        uris: vec!["https://x.example/deb".into()],
+        suites: vec!["stable".into()],
+        components: vec!["main".into()],
+        key_url: "https://x.example/key".into(),
+    });
+    // No source given: it fails when it runs, so it has no inverse.
+    h.repo("none");
     sh!(h, "true");
     let flags: Vec<(&'static str, bool)> = h
         .snapshot()
@@ -409,6 +418,9 @@ fn which_ops_have_an_inverse() {
             ("file", true),
             ("file", true),
             ("unit", true),
+            ("user", true),
+            ("repo", true),
+            ("repo", false),
             ("sh", false),
         ]
     );

@@ -13,11 +13,14 @@ __tp_emit() {
   __tp_i=
   for __tp_x in "${installed[@]}"; do __tp_i="$__tp_i${__tp_i:+,}\"$(__tp_esc "$__tp_x")\""; done
   case "$created" in 1) __tp_k=true;; *) __tp_k=false;; esac
-  printf '\n__tp_t0n 0 {"rc":%s,"changed":%s,"created":%s}\n' "$rc" "$__tp_c" "$__tp_k"
+  __tp_ga=
+  for __tp_x in "${tp_gaa[@]}"; do __tp_ga="$__tp_ga${__tp_ga:+,}\"$(__tp_esc "$__tp_x")\""; done
+  printf '\n__tp_t0n 0 {"rc":%s,"changed":%s,"created":%s,"was_shell":%s,"groups_added":[%s]}\n' "$rc" "$__tp_c" "$__tp_k" "${tp_wsj:-null}" "$__tp_ga"
 }
 trap '__tp_emit $?' EXIT
 trap 'exit 143' TERM
 rc=0; changed=0; skipped=0; installed=()
+tp_gaa=()
 printf '\n__tpS_t0n 0 %s %s\n' "$BASHPID" "$$"
 created=0
 tp_u='tpdev'
@@ -44,11 +47,14 @@ __tp_emit() {
   __tp_i=
   for __tp_x in "${installed[@]}"; do __tp_i="$__tp_i${__tp_i:+,}\"$(__tp_esc "$__tp_x")\""; done
   case "$created" in 1) __tp_k=true;; *) __tp_k=false;; esac
-  printf '\n__tp_t0n 1 {"rc":%s,"changed":%s,"created":%s}\n' "$rc" "$__tp_c" "$__tp_k"
+  __tp_ga=
+  for __tp_x in "${tp_gaa[@]}"; do __tp_ga="$__tp_ga${__tp_ga:+,}\"$(__tp_esc "$__tp_x")\""; done
+  printf '\n__tp_t0n 1 {"rc":%s,"changed":%s,"created":%s,"was_shell":%s,"groups_added":[%s]}\n' "$rc" "$__tp_c" "$__tp_k" "${tp_wsj:-null}" "$__tp_ga"
 }
 trap '__tp_emit $?' EXIT
 trap 'exit 143' TERM
 rc=0; changed=0; skipped=0; installed=()
+tp_gaa=()
 printf '\n__tpS_t0n 1 %s %s\n' "$BASHPID" "$$"
 created=0
 tp_u='tpdev'
@@ -69,18 +75,19 @@ else
   if [ "$tp_cur" != '/bin/bash' ]; then
     usermod -s '/bin/bash' -- "$tp_u"
     rc=$?
-    if [ "$rc" -eq 0 ]; then changed=1; fi
+    if [ "$rc" -eq 0 ]; then changed=1; tp_wsj="\"$(__tp_esc "$tp_cur")\""; fi
   fi
   if [ "$rc" -eq 0 ]; then
     tp_have=" $(id -nG "$tp_u") "
     tp_add=
+    tp_new=()
     for tp_g in 'sudo' 'docker'; do
-      case "$tp_have" in *" $tp_g "*) ;; *) tp_add="$tp_add,$tp_g";; esac
+      case "$tp_have" in *" $tp_g "*) ;; *) tp_add="$tp_add,$tp_g"; tp_new+=("$tp_g");; esac
     done
     if [ -n "$tp_add" ]; then
       usermod -aG "${tp_add#,}" -- "$tp_u"
       rc=$?
-      if [ "$rc" -eq 0 ]; then changed=1; fi
+      if [ "$rc" -eq 0 ]; then changed=1; tp_gaa=("${tp_new[@]}"); fi
     fi
   fi
 fi
@@ -99,11 +106,14 @@ __tp_emit() {
   __tp_i=
   for __tp_x in "${installed[@]}"; do __tp_i="$__tp_i${__tp_i:+,}\"$(__tp_esc "$__tp_x")\""; done
   case "$created" in 1) __tp_k=true;; *) __tp_k=false;; esac
-  printf '\n__tp_t0n 2 {"rc":%s,"changed":%s,"created":%s}\n' "$rc" "$__tp_c" "$__tp_k"
+  __tp_ga=
+  for __tp_x in "${tp_gaa[@]}"; do __tp_ga="$__tp_ga${__tp_ga:+,}\"$(__tp_esc "$__tp_x")\""; done
+  printf '\n__tp_t0n 2 {"rc":%s,"changed":%s,"created":%s,"was_shell":%s,"groups_added":[%s]}\n' "$rc" "$__tp_c" "$__tp_k" "${tp_wsj:-null}" "$__tp_ga"
 }
 trap '__tp_emit $?' EXIT
 trap 'exit 143' TERM
 rc=0; changed=0; skipped=0; installed=()
+tp_gaa=()
 printf '\n__tpS_t0n 2 %s %s\n' "$BASHPID" "$$"
 created=0
 tp_u='tpdev'
@@ -137,18 +147,19 @@ else
   if [ "$tp_cur" != '/bin/bash' ]; then
     usermod -s '/bin/bash' -- "$tp_u"
     rc=$?
-    if [ "$rc" -eq 0 ]; then changed=1; fi
+    if [ "$rc" -eq 0 ]; then changed=1; tp_wsj="\"$(__tp_esc "$tp_cur")\""; fi
   fi
   if [ "$rc" -eq 0 ]; then
     tp_have=" $(id -nG "$tp_u") "
     tp_add=
+    tp_new=()
     for tp_g in 'sudo'; do
-      case "$tp_have" in *" $tp_g "*) ;; *) tp_add="$tp_add,$tp_g";; esac
+      case "$tp_have" in *" $tp_g "*) ;; *) tp_add="$tp_add,$tp_g"; tp_new+=("$tp_g");; esac
     done
     if [ -n "$tp_add" ]; then
       usermod -aG "${tp_add#,}" -- "$tp_u"
       rc=$?
-      if [ "$rc" -eq 0 ]; then changed=1; fi
+      if [ "$rc" -eq 0 ]; then changed=1; tp_gaa=("${tp_new[@]}"); fi
     fi
   fi
 fi

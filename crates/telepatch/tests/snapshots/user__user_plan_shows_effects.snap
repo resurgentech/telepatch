@@ -47,18 +47,19 @@ role (none)
       |   if [ "$tp_cur" != '/bin/bash' ]; then
       |     usermod -s '/bin/bash' -- "$tp_u"
       |     rc=$?
-      |     if [ "$rc" -eq 0 ]; then changed=1; fi
+      |     if [ "$rc" -eq 0 ]; then changed=1; tp_wsj="\"$(__tp_esc "$tp_cur")\""; fi
       |   fi
       |   if [ "$rc" -eq 0 ]; then
       |     tp_have=" $(id -nG "$tp_u") "
       |     tp_add=
+      |     tp_new=()
       |     for tp_g in 'docker'; do
-      |       case "$tp_have" in *" $tp_g "*) ;; *) tp_add="$tp_add,$tp_g";; esac
+      |       case "$tp_have" in *" $tp_g "*) ;; *) tp_add="$tp_add,$tp_g"; tp_new+=("$tp_g");; esac
       |     done
       |     if [ -n "$tp_add" ]; then
       |       usermod -aG "${tp_add#,}" -- "$tp_u"
       |       rc=$?
-      |       if [ "$rc" -eq 0 ]; then changed=1; fi
+      |       if [ "$rc" -eq 0 ]; then changed=1; tp_gaa=("${tp_new[@]}"); fi
       |     fi
       |   fi
       | fi

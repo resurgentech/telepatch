@@ -119,9 +119,12 @@ impl OpSpec {
     ///   owner, the topmost directory the op created, and the backup of
     ///   what it overwrites or removes (`FileResult`), saved on the
     ///   target's own filesystem, indexed under the run's directory.
-    /// - Not yet: `repo` (T107), `user` (only the created case is
-    ///   captured, not the fields of an existing account) and `sh` (no
-    ///   `.undo`).
+    /// - `repo` (T107; not `RepoKind::Unset`, which fails when it runs):
+    ///   whether the op created the key and the source file, and the backup
+    ///   of a source it rewrote (`RepoResult`).
+    /// - `user` (T107): `created`, the shell `usermod -s` replaced and the
+    ///   groups `usermod -aG` added; never a password hash.
+    /// - Not yet: `sh` (no `.undo`).
     ///
     /// Exhaustive on purpose: a new op kind must decide.
     pub fn has_inverse(&self) -> bool {
@@ -134,11 +137,13 @@ impl OpSpec {
             | OpSpec::Svc(_)
             | OpSpec::Git(_)
             | OpSpec::File(_)
-            | OpSpec::Unit(_) => true,
+            | OpSpec::Unit(_)
+            | OpSpec::User(_) => true,
+            OpSpec::Repo(r) => r.kind != crate::ops::repo::RepoKind::Unset,
             OpSpec::Resource(r) => r.inverse.is_some(),
             // Changes nothing, so there is nothing to undo: not a hole.
             OpSpec::Wait(_) | OpSpec::Relogin(_) => true,
-            OpSpec::Raw { .. } | OpSpec::Shell(_) | OpSpec::User(_) | OpSpec::Repo(_) => false,
+            OpSpec::Raw { .. } | OpSpec::Shell(_) => false,
         }
     }
 
