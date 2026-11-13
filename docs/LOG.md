@@ -1787,3 +1787,18 @@ are appended, never edited in; a hook refuses rewrites.
 - Snapshots: tp_basic edge 13 lookup lines; undo_fs 13 files for the
   new ops; telepatch none. Gate E and check-sandbox green.
 - Commits: telepatch 14e1987; tp_basic 573f0e6
+
+## 2026-11-13 — T121 Cache registry, usage record and 90-day expiry
+
+- `tp_one` reports `fuse <sum> <dir>` per hit or download and registers
+  a new per-fs cache in `<main>/../caches` (lock `.caches.lock`).
+- End-of-run root-shell probe before `cleanup_stage`: per directory,
+  `flock -x -w 30`, merge uses into `.telepatch-usage` (v1, sum, time,
+  owners), adopt unrecorded files, drop gone lines, tmp+mv, then remove
+  lowercase-64-hex regular files unused > 90 days. Corrupt record set
+  aside, nothing removed. Only the main cache or
+  `*/.telepatch/cache/sha256` lines are processed. `--check` and a dead
+  root shell record nothing. Shared run lock in the root shell's init.
+- Tests: tests/cache_usage.rs (15). Red 12/14 (impl.), FOREMAN red
+  reruns; green. No snapshot moved. Gate E and check-sandbox green.
+- Commits: telepatch 2fe54c4
