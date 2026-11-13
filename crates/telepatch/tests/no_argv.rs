@@ -23,6 +23,7 @@ use telepatch::{Host, Playbook, PlaybookFuture};
 fn go(name: &'static str, f: fn(Host<PathBuf>) -> PlaybookFuture, dir: &std::path::Path) -> Report {
     let (tx, rx) = std::sync::mpsc::channel();
     let vars = dir.to_path_buf();
+    let stage = dir.join("stage");
     std::thread::spawn(move || {
         let pb = Playbook::new(name, f);
         let out = Rc::new(RefCell::new(String::new()));
@@ -31,7 +32,12 @@ fn go(name: &'static str, f: fn(Host<PathBuf>) -> PlaybookFuture, dir: &std::pat
             vec![HostSpec {
                 groups: Vec::new(),
                 name: "h1".into(),
-                target: Target::Local(LocalTransport::new().uid(0)),
+                // The undo directories of a user's run go in a temp stage.
+                target: Target::Local(
+                    LocalTransport::new()
+                        .uid(0)
+                        .env("TP_FETCH_STAGE", &stage.display().to_string()),
+                ),
                 vars,
             }],
             RunOpts {

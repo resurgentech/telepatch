@@ -101,20 +101,41 @@ impl FileSpec {
     /// `reveal` puts secret values into the body. Without it a secret file
     /// carries `# (secret)` and not the rendered text.
     pub(crate) fn render_mode(&self, reveal: bool) -> String {
+        self.render_with(reveal, "", None, "")
+    }
+
+    /// The script with `head` before `rc=0`, `tp_p` set to `path` (a shell
+    /// word) when given, and `pre` after the capture helpers and `tp_was`
+    /// (a unit makes its drop-in directory there).
+    pub(crate) fn render_with(
+        &self,
+        reveal: bool,
+        head: &str,
+        path: Option<&str>,
+        pre: &str,
+    ) -> String {
         let body = self.content.as_ref().map(|c| c.script_body(reveal));
-        let mut o = format!("rc=0; changed=0\ntp_p={}\n", self.path_word());
+        let word = path.map_or_else(|| self.path_word(), str::to_string);
+        let mut o = format!("{head}rc=0; changed=0\ntp_p={word}\n");
         if matches!(body, Some(ScriptBody::Hidden)) {
             o.push_str("# (secret)\n");
         }
+        // Every form records what the path was before it changes anything,
+        // and may save it: one copy of the helpers per script.
+        o.push_str(crate::ops::undo::HELPERS);
+        o.push_str("tp_was \"$tp_p\"\n");
+        o.push_str(pre);
         match self.kind {
             FileKind::Absent => {
+                // Moved aside into the backup dir, not deleted; with no run to
+                // save under, removed as before.
                 o.push_str(
-                    "if [ -e \"$tp_p\" ] || [ -L \"$tp_p\" ]; then\n  rm -rf -- \"$tp_p\"\n  rc=$?\n  if [ \"$rc\" -eq 0 ]; then changed=1; fi\nfi\n",
+                    "if [ -e \"$tp_p\" ] || [ -L \"$tp_p\" ]; then\n  tp_gate \"$tp_p\" || rc=1\n  if [ \"$rc\" -eq 0 ]; then\n    if [ -n \"$tp_bd\" ]; then tp_try \"$tp_p\" \"$tp_bd/old\" mv -- \"$tp_p\" \"$tp_bd/old\"; else rm -rf -- \"$tp_p\"; fi\n    rc=$?\n    if [ \"$rc\" -eq 0 ]; then changed=1; else tp_bk=; fi\n  fi\nfi\n",
                 );
                 return o;
             }
             FileKind::Dir => o.push_str(
-                "if [ -d \"$tp_p\" ]; then :\nelif [ -e \"$tp_p\" ] || [ -L \"$tp_p\" ]; then\n  echo \"telepatch: $tp_p exists and is not a directory\" >&2; rc=1\nelse\n  (umask 022; mkdir -p -- \"$tp_p\")\n  rc=$?\n  if [ \"$rc\" -eq 0 ]; then changed=1; fi\nfi\n",
+                "if [ -d \"$tp_p\" ]; then :\nelif [ -e \"$tp_p\" ] || [ -L \"$tp_p\" ]; then\n  echo \"telepatch: $tp_p exists and is not a directory\" >&2; rc=1\nelse\n  tp_mk \"$tp_p\"\n  rc=$?\n  if [ \"$rc\" -eq 0 ]; then changed=1; tp_ct=$tp_cx; fi\nfi\n",
             ),
             FileKind::File if self.local.is_some() => self.render_controller(&mut o),
             FileKind::File if self.src.is_some() => {
@@ -210,7 +231,7 @@ impl FileSpec {
             quote(&validate.replace("%s", "\"$tp_c\""))
         ));
         o.push_str(
-            "    if [ \"$rc\" -eq 0 ]; then\n      mv -f \"$tp_c\" \"$tp_p\"; rc=$?\n      if [ \"$rc\" -eq 0 ]; then changed=1; fi\n    fi\n  fi\n  rm -f \"$tp_c\"\nfi\n",
+            "    if [ \"$rc\" -eq 0 ]; then tp_save \"$tp_p\" || rc=1; fi\n    if [ \"$rc\" -eq 0 ]; then\n      mv -f \"$tp_c\" \"$tp_p\"; rc=$?\n      if [ \"$rc\" -eq 0 ]; then changed=1; fi\n    fi\n  fi\n  rm -f \"$tp_c\"\nfi\n",
         );
     }
 
@@ -225,7 +246,7 @@ impl FileSpec {
         }
         match body {
             Some(ScriptBody::Bytes(c)) => o.push_str(&format!(
-                "tp_b={}\nif [ \"$rc\" -eq 0 ] && ! {{ [ -f \"$tp_p\" ] && [ \"$(printf %s \"$tp_b\" | base64 -d | sha256sum | cut -d' ' -f1)\" = \"$(sha256sum < \"$tp_p\" | cut -d' ' -f1)\" ]; }}; then\n  tp_t=$(mktemp \"$tp_p.tpXXXXXX\") || rc=$?\n  if [ \"$rc\" -eq 0 ]; then\n    if printf %s \"$tp_b\" | base64 -d > \"$tp_t\"; then\n      if [ -e \"$tp_p\" ]; then\n        chmod --reference=\"$tp_p\" \"$tp_t\"; chown --reference=\"$tp_p\" \"$tp_t\" 2>/dev/null\n      else\n        chmod 644 \"$tp_t\"\n      fi\n      mv -f \"$tp_t\" \"$tp_p\"; rc=$?\n    else\n      rc=$?\n    fi\n    if [ \"$rc\" -eq 0 ]; then changed=1; else rm -f \"$tp_t\"; fi\n  fi\nfi\n",
+                "tp_b={}\nif [ \"$rc\" -eq 0 ] && ! {{ [ -f \"$tp_p\" ] && [ \"$(printf %s \"$tp_b\" | base64 -d | sha256sum | cut -d' ' -f1)\" = \"$(sha256sum < \"$tp_p\" | cut -d' ' -f1)\" ]; }}; then\n  if [ -e \"$tp_p\" ] || [ -L \"$tp_p\" ]; then tp_save \"$tp_p\" || rc=1; fi\n  if [ \"$rc\" -eq 0 ]; then tp_t=$(mktemp \"$tp_p.tpXXXXXX\") || rc=$?; fi\n  if [ \"$rc\" -eq 0 ]; then\n    if printf %s \"$tp_b\" | base64 -d > \"$tp_t\"; then\n      if [ -e \"$tp_p\" ]; then\n        chmod --reference=\"$tp_p\" \"$tp_t\"; chown --reference=\"$tp_p\" \"$tp_t\" 2>/dev/null\n      else\n        chmod 644 \"$tp_t\"\n      fi\n      mv -f \"$tp_t\" \"$tp_p\"; rc=$?\n    else\n      rc=$?\n    fi\n    if [ \"$rc\" -eq 0 ]; then changed=1; else rm -f \"$tp_t\"; fi\n  fi\nfi\n",
                 quote(&STANDARD.encode(c))
             )),
             Some(ScriptBody::Hidden) => {}
@@ -234,10 +255,18 @@ impl FileSpec {
             }
             None => {}
         }
-        self.render_lines(o);
+        self.render_lines_with(o, true);
     }
 
+    /// The line edits, aimed at `$tp_p` and not saving (the dry run's and
+    /// the validated candidate's).
     pub(crate) fn render_lines(&self, o: &mut String) {
+        self.render_lines_with(o, false)
+    }
+
+    /// `save`: back the file up (in place edits) before the first change.
+    fn render_lines_with(&self, o: &mut String, save: bool) {
+        let sv = if save { "tp_save \"$tp_p\" L && " } else { "" };
         if !self.lines.is_empty() {
             o.push_str(
                 "tp_append() {\n  if [ -s \"$1\" ] && [ -n \"$(tail -c1 \"$1\")\" ]; then printf '\\n' >> \"$1\"; fi\n  printf '%s\\n' \"$2\" >> \"$1\"\n}\n",
@@ -261,11 +290,11 @@ impl FileSpec {
                 quote(line)
             ));
             match re {
-                None => o.push_str(
-                    "  if [ \"$rc\" -eq 0 ] && ! grep -qxF -- \"$tp_l\" \"$tp_p\"; then\n    if tp_append \"$tp_p\" \"$tp_l\"; then changed=1; else rc=$?; fi\n  fi\nfi\n",
-                ),
+                None => o.push_str(&format!(
+                    "  if [ \"$rc\" -eq 0 ] && ! grep -qxF -- \"$tp_l\" \"$tp_p\"; then\n    if {sv}tp_append \"$tp_p\" \"$tp_l\"; then changed=1; else rc=$?; fi\n  fi\nfi\n"
+                )),
                 Some(re) => o.push_str(&format!(
-                    "  tp_n=$(grep -nE -- {} \"$tp_p\" | tail -n 1 | cut -d: -f1)\n  if [ \"$rc\" -ne 0 ]; then :\n  elif [ -z \"$tp_n\" ]; then\n    if tp_append \"$tp_p\" \"$tp_l\"; then changed=1; else rc=$?; fi\n  elif [ \"$(sed -n \"${{tp_n}}p\" \"$tp_p\")\" != \"$tp_l\" ]; then\n    tp_t=$(mktemp) && TP_L=\"$tp_l\" awk -v n=\"$tp_n\" 'NR==n {{ print ENVIRON[\"TP_L\"]; next }} {{ print }}' \"$tp_p\" > \"$tp_t\" && cat \"$tp_t\" > \"$tp_p\"\n    rc=$?\n    rm -f \"$tp_t\"\n    if [ \"$rc\" -eq 0 ]; then changed=1; fi\n  fi\nfi\n",
+                    "  tp_n=$(grep -nE -- {} \"$tp_p\" | tail -n 1 | cut -d: -f1)\n  if [ \"$rc\" -ne 0 ]; then :\n  elif [ -z \"$tp_n\" ]; then\n    if {sv}tp_append \"$tp_p\" \"$tp_l\"; then changed=1; else rc=$?; fi\n  elif [ \"$(sed -n \"${{tp_n}}p\" \"$tp_p\")\" != \"$tp_l\" ]; then\n    {sv}tp_t=$(mktemp) && TP_L=\"$tp_l\" awk -v n=\"$tp_n\" 'NR==n {{ print ENVIRON[\"TP_L\"]; next }} {{ print }}' \"$tp_p\" > \"$tp_t\" && cat \"$tp_t\" > \"$tp_p\"\n    rc=$?\n    rm -f \"$tp_t\"\n    if [ \"$rc\" -eq 0 ]; then changed=1; fi\n  fi\nfi\n",
                     quote(re)
                 )),
             }
@@ -286,8 +315,9 @@ impl FileSpec {
             o.push_str(
                 "if [ -e \"$tp_p\" ] && [ ! -d \"$tp_p\" ]; then echo \"telepatch: $tp_p exists and is not a directory\" >&2; rc=1; fi\n",
             );
+            // The top directory, when the op makes it: opened for the manifest.
             o.push_str(
-                "if [ \"$rc\" -eq 0 ] && [ ! -d \"$tp_p\" ]; then mkdir -p -- \"$tp_p\" && changed=1 || rc=$?; fi\n",
+                "if [ \"$rc\" -eq 0 ] && [ ! -d \"$tp_p\" ]; then tp_open && tp_mk \"$tp_p\" && tp_note d \"$tp_cx\" && tp_ct=$tp_cx && changed=1 || rc=$?; fi\n",
             );
         } else {
             o.push_str(
@@ -298,7 +328,7 @@ impl FileSpec {
             if f.is_dir {
                 let dest = local::host_path(&f.rel);
                 o.push_str(&format!(
-                    "if [ \"$rc\" -eq 0 ] && [ ! -d {dest} ]; then mkdir -p -- {dest} && changed=1 || rc=$?; fi\n"
+                    "if [ \"$rc\" -eq 0 ] && [ ! -d {dest} ]; then tp_open && tp_mk {dest} && tp_note d \"$tp_cx\" && changed=1 || rc=$?; fi\n"
                 ));
                 continue;
             }
@@ -309,8 +339,25 @@ impl FileSpec {
                 format!("\"$tp_base\"/{}", quote(&f.rel))
             };
             let sum = quote(&f.sha256);
+            // A parent the op makes is part of it: the single file's goes to
+            // `created_top`, a tree's to the manifest. An existing file the
+            // op replaces is copied first; a new one is listed after.
+            let (par, cap) = if place.is_dir() {
+                (
+                    "tp_open && tp_mk \"$tp_par\" && tp_note d \"$tp_cx\"".to_string(),
+                    format!(
+                        "tp_nw=; if [ -e \"$tp_dest\" ] || [ -L \"$tp_dest\" ]; then tp_cp \"$tp_dest\" {} || rc=$?; else tp_nw=1; tp_open || rc=$?; fi",
+                        quote(&f.rel)
+                    ),
+                )
+            } else {
+                (
+                    "tp_mk \"$tp_par\" && tp_ct=$tp_cx".to_string(),
+                    "tp_save \"$tp_dest\" || rc=1".to_string(),
+                )
+            };
             o.push_str(&format!(
-                "if [ \"$rc\" -eq 0 ]; then\n  tp_dest={dest}\n  tp_stage={stage}\n  tp_sum={sum}\n  if [ -f \"$tp_stage\" ]; then\n    tp_got=$(sha256sum \"$tp_stage\" | cut -d' ' -f1)\n    if [ \"$tp_got\" != \"$tp_sum\" ]; then echo \"telepatch: streamed $tp_dest sha256 is $tp_got\" >&2; rc=1\n    else\n      mkdir -p -- \"$(dirname -- \"$tp_dest\")\" || rc=$?\n      if [ \"$rc\" -eq 0 ]; then mv -f -- \"$tp_stage\" \"$tp_dest\" && changed=1 || rc=$?; fi\n    fi\n  elif [ -f \"$tp_dest\" ]; then\n    tp_got=$(sha256sum \"$tp_dest\" | cut -d' ' -f1)\n    if [ \"$tp_got\" != \"$tp_sum\" ]; then echo \"telepatch: $tp_dest was not streamed\" >&2; rc=1; fi\n  else\n    echo \"telepatch: $tp_dest was not streamed\" >&2; rc=1\n  fi\nfi\n"
+                "if [ \"$rc\" -eq 0 ]; then\n  tp_dest={dest}\n  tp_stage={stage}\n  tp_sum={sum}\n  if [ -f \"$tp_stage\" ]; then\n    tp_got=$(sha256sum \"$tp_stage\" | cut -d' ' -f1)\n    if [ \"$tp_got\" != \"$tp_sum\" ]; then echo \"telepatch: streamed $tp_dest sha256 is $tp_got\" >&2; rc=1\n    else\n      tp_par=$(dirname -- \"$tp_dest\")\n      if [ ! -d \"$tp_par\" ]; then {par} || rc=$?; fi\n      if [ \"$rc\" -eq 0 ]; then {cap}; fi\n      if [ \"$rc\" -eq 0 ]; then mv -f -- \"$tp_stage\" \"$tp_dest\" && changed=1 || rc=$?; fi\n      if [ \"$rc\" -eq 0 ] && [ -n \"${{tp_nw-}}\" ]; then tp_note f \"$tp_dest\" || rc=$?; fi\n    fi\n  elif [ -f \"$tp_dest\" ]; then\n    tp_got=$(sha256sum \"$tp_dest\" | cut -d' ' -f1)\n    if [ \"$tp_got\" != \"$tp_sum\" ]; then echo \"telepatch: $tp_dest was not streamed\" >&2; rc=1; fi\n  else\n    echo \"telepatch: $tp_dest was not streamed\" >&2; rc=1\n  fi\nfi\n"
             ));
         }
     }
@@ -352,7 +399,8 @@ mod render_tests {
         );
         assert!(script.contains("sub/b.txt"), "{script}");
         assert!(script.contains("a.txt"), "{script}");
-        assert!(script.len() < 4000, "op script grew to {}", script.len());
+        let own = script.len() - crate::ops::undo::HELPERS.len();
+        assert!(own < 5000, "op script grew to {own}");
     }
 }
 

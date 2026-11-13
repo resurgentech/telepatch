@@ -12,15 +12,21 @@ use telepatch::report::{HostStatus, Report};
 use telepatch::transport::local::LocalTransport;
 use telepatch::{Host, Playbook, PlaybookFuture, TraceError, role};
 
-fn target() -> Target {
-    Target::Local(LocalTransport::new().uid(0))
+/// A fake-root local host whose undo data stays under `d` (the temp dir may
+/// be on another filesystem than `/var/tmp`).
+fn target(d: &std::path::Path) -> Target {
+    Target::Local(
+        LocalTransport::new()
+            .uid(0)
+            .env("TP_FETCH_STAGE", &d.join("stage").display().to_string()),
+    )
 }
 
 fn spec(name: &str, dir: &std::path::Path) -> HostSpec<PathBuf> {
     HostSpec {
         groups: Vec::new(),
         name: name.into(),
-        target: target(),
+        target: target(dir),
         vars: dir.to_path_buf(),
     }
 }
@@ -296,7 +302,7 @@ fn via_controller_downloads_on_the_controller_and_streams() {
         vec![HostSpec {
             groups: Vec::new(),
             name: "h".into(),
-            target: target(),
+            target: target(d.path()),
             vars: Via {
                 dest: root.join("blob"),
                 url,

@@ -87,7 +87,8 @@ esac"#,
              export TP_MARK={mark}\n\
              export PATH={d}/bin:$PATH\n\
              export TP_SVC_RUNDIR={d}/run-systemd-system\n\
-             export TP_UNIT_DIR={d}/etc-systemd-system\n"
+             export TP_UNIT_DIR={d}/etc-systemd-system\n\
+             export TP_FETCH_STAGE={d}/stage\n"
         )
     }
 
@@ -138,6 +139,7 @@ esac"#,
                             .uid(0)
                             .env("PATH", &path)
                             .env("TP_ROOTVAR", "x")
+                            .env("TP_FETCH_STAGE", &d.join("stage").display().to_string())
                             .env(
                                 "TP_SVC_RUNDIR",
                                 &d.join("run-systemd-system").display().to_string(),
@@ -417,7 +419,8 @@ fn profile2(h: &Host<PathBuf>) -> String {
          export TP_MARK=2\n\
          export PATH={d}/bin:$PATH\n\
          export TP_SVC_RUNDIR={d}/run-systemd-system\n\
-         export TP_UNIT_DIR={d}/etc-systemd-system\n"
+         export TP_UNIT_DIR={d}/etc-systemd-system\n\
+             export TP_FETCH_STAGE={d}/stage\n"
     )
 }
 

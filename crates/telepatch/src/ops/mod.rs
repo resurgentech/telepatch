@@ -13,6 +13,7 @@ pub mod pkg;
 pub mod repo;
 pub mod shell;
 pub mod svc;
+pub mod undo;
 pub mod unit;
 pub mod user;
 pub mod wait;

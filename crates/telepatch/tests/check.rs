@@ -366,13 +366,13 @@ fn a_blocked_host_is_exit_1() {
 fn a_coverage_line_per_role_counts_ops_and_inverses() {
     let d = tempfile::tempdir().unwrap();
     let (_, out) = check(&Playbook::new("demo", demo_entry), d.path(), false);
-    // demo: file, group, sh; only the group has an inverse today.
+    // demo: file, group, sh; the file (its capture) and the group have one.
     assert!(
-        out.contains("== h1 [coverage] demo: 3 ops, 1 reversible =="),
+        out.contains("== h1 [coverage] demo: 3 ops, 2 reversible =="),
         "{out}"
     );
     assert!(
-        out.contains("== h1 [coverage] quiet: 1 ops, 0 reversible =="),
+        out.contains("== h1 [coverage] quiet: 1 ops, 1 reversible =="),
         "{out}"
     );
 }
@@ -389,6 +389,7 @@ fn which_ops_have_an_inverse() {
     h.pkg(["curl"]);
     h.file("/etc/a").content("a");
     h.file("/etc/b").absent();
+    h.unit("a.service").content("[Service]\n");
     sh!(h, "true");
     let flags: Vec<(&'static str, bool)> = h
         .snapshot()
@@ -405,8 +406,9 @@ fn which_ops_have_an_inverse() {
             ("group", true),
             ("svc", true),
             ("pkg", true),
-            ("file", false),
-            ("file", false),
+            ("file", true),
+            ("file", true),
+            ("unit", true),
             ("sh", false),
         ]
     );

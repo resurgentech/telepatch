@@ -1111,6 +1111,9 @@ pub struct HostExec {
     /// A window had a fetch, so the run's staging directory may exist on
     /// the host: it is removed when the host is done.
     fetch_staged: bool,
+    /// A file or unit op was sent to be applied: it may have saved undo
+    /// data under the run's directories ([`crate::ops::undo`]).
+    undo_used: bool,
     /// `--check`: what the run has found so far.
     check: Option<CheckState>,
     /// Reboot policy and state ([`reboot`]).
@@ -1784,6 +1787,7 @@ impl HostExec {
             starts: Vec::new(),
             suppress: HashMap::new(),
             fetch_staged: false,
+            undo_used: false,
             check,
             reboot: reboot::RebootState::default(),
         }
@@ -2506,19 +2510,106 @@ impl HostExec {
         Ok(())
     }
 
-    /// Remove the run's staging directory on the host (what a fetch with no
-    /// checksum left there). Best effort: a failure is not the run's.
+    /// Remove what the run left on the host: its staging directory and the
+    /// undo data it made, on every filesystem the run's `fsroots` lists
+    /// ([`crate::ops::undo::cleanup_script`]). Best effort: a failure is not
+    /// the run's, but when the root shell is gone a fresh one is opened for
+    /// it, and when that cannot be, the data left is said.
     async fn cleanup_stage(&mut self) {
-        if !self.fetch_staged {
+        if !self.fetch_staged && !self.undo_used {
             return;
         }
+        let script = crate::ops::undo::cleanup_script();
         self.seq += 1;
-        let _ = prepare::probe(
+        let out = match prepare::probe(&mut self.shells.root, self.seq, &script).await {
+            Ok((_, out)) => Ok(out),
+            Err(_) => self.cleanup_fresh(&script).await,
+        };
+        match out {
+            Ok(out) => {
+                for l in out.lines().filter(|l| l.starts_with("telepatch: ")) {
+                    self.say(l.to_string());
+                }
+            }
+            Err(why) => self.say(format!(
+                "telepatch: cleanup: no root shell to remove the run's undo data ({why}); left under <stage>/{} on the host",
+                crate::ops::fetch::run_id()
+            )),
+        }
+    }
+
+    /// `script` in a fresh root shell, for a host whose own is gone.
+    async fn cleanup_fresh(&mut self, script: &str) -> Result<String, String> {
+        let who = Principal::Root;
+        let mut s = self.shells.target.open(&self.shells.host, &who, 1).await;
+        if s.got.is_empty() {
+            return Err(refusal(
+                &self.shells.target,
+                &self.shells.host,
+                &who,
+                s.limit,
+            ));
+        }
+        let mut sh = s.got.remove(0);
+        for extra in s.got {
+            extra.close().await;
+        }
+        if let Err(e) = init_shell(&mut sh).await {
+            sh.close().await;
+            return Err(e);
+        }
+        self.seq += 1;
+        let r = prepare::probe(&mut sh, self.seq, script).await;
+        sh.close().await;
+        r.map(|(_, out)| out)
+    }
+
+    /// The root shell's preparation op for one run of a login shell's ops
+    /// (T106): the undo directories those ops need that only root can make.
+    /// Nothing is sent when no op of the run captures at a path it can name.
+    async fn prepare_undo(&mut self, who: &RunAs, ops: &[WindowOp]) -> Result<(), String> {
+        let user = match &who.principal {
+            Principal::User(u) => u.clone(),
+            Principal::Root => ROOT.to_string(),
+        };
+        let mut words: Vec<String> = Vec::new();
+        for w in ops {
+            if let Some(word) = crate::ops::undo::capture_word(&w.node.spec, &user)
+                && !words.contains(&word)
+            {
+                words.push(word);
+            }
+        }
+        if words.is_empty() {
+            return Ok(());
+        }
+        self.seq += 1;
+        let script = crate::ops::undo::prepare_script(&user, &words);
+        let (_, out) = prepare::probe(&mut self.shells.root, self.seq, &script).await?;
+        self.sink.event(json!({"ev":"undo_prepare","host":self.name,
+            "user":user,"paths":words.len()}));
+        for l in out.lines().filter(|l| l.starts_with("telepatch: ")) {
+            self.say(l.to_string());
+        }
+        Ok(())
+    }
+
+    /// The stale sweep, once per host before the first window that holds a
+    /// capturing op ([`crate::ops::undo::sweep_script`]): a run of a dead
+    /// controller older than 24 hours is removed, a younger one is named.
+    async fn sweep_stale(&mut self) {
+        self.seq += 1;
+        if let Ok((_, out)) = prepare::probe(
             &mut self.shells.root,
             self.seq,
-            &crate::ops::fetch::cleanup_script(),
+            &crate::ops::undo::sweep_script(),
         )
-        .await;
+        .await
+        {
+            for l in out.lines().filter(|l| l.starts_with("telepatch: ")) {
+                self.say(l.to_string());
+            }
+        }
     }
 
     fn finish(mut self, res: Result<(), EngineError>) -> (HostReport, HostShells) {
@@ -2805,6 +2896,16 @@ impl Executor for HostExec {
             });
             if binary_release || !crate::ops::fetch::items(&window).is_empty() {
                 self.fetch_staged = true;
+            }
+            if self.check.is_none()
+                && window
+                    .ops
+                    .iter()
+                    .any(|o| matches!(o.node.spec, OpSpec::File(_) | OpSpec::Unit(_)))
+                && !self.undo_used
+            {
+                self.undo_used = true;
+                self.sweep_stale().await;
             }
             // Prepare: nothing is sent to be applied until all of it passes.
             self.check_filter(&mut window);
@@ -3156,6 +3257,15 @@ impl Executor for HostExec {
                         }
                     }
                 }
+            }
+
+            // A user's capturing ops need directories only root can make:
+            // the root shell prepares them first.
+            if who.login
+                && let Err(why) = self.prepare_undo(&who, &window.ops[start..end]).await
+            {
+                self.block(why.clone());
+                return Err(why);
             }
 
             // Send the run, gated on the shell's halt flag and each op's

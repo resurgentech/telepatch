@@ -191,20 +191,20 @@ impl UnitSpec {
     }
 
     pub(crate) fn render_mode(&self, reveal: bool) -> String {
-        let mut o = String::from("tp_ud=\"${TP_UNIT_DIR:-/etc/systemd/system}\"\n");
+        let head = "tp_ud=\"${TP_UNIT_DIR:-/etc/systemd/system}\"\n";
+        let mut pre = String::new();
         if !self.absent {
             let dir = match &self.drop_in {
                 Some(_) => format!("\"$tp_ud\"/{}", quote(&format!("{}.d", self.file_name()))),
                 None => "\"$tp_ud\"".to_string(),
             };
-            o.push_str(&format!("[ -d {dir} ] || (umask 022; mkdir -p -- {dir})\n"));
+            // A drop-in's directory, when the op makes it, is recorded.
+            pre.push_str(&format!(
+                "[ -d {dir} ] || {{ tp_mk {dir} && tp_ct=$tp_cx; }}\n"
+            ));
         }
-        let body = self.file_spec().render_mode(reveal);
-        let from = format!("tp_p={}\n", quote(&self.path()));
-        let to = format!("tp_p=\"$tp_ud\"/{}\n", quote(&self.rel()));
-        debug_assert!(body.contains(&from), "file body: {body}");
-        o.push_str(&body.replacen(&from, &to, 1));
-        o
+        let to = format!("\"$tp_ud\"/{}", quote(&self.rel()));
+        self.file_spec().render_with(reveal, head, Some(&to), &pre)
     }
 }
 

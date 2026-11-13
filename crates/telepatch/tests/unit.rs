@@ -250,7 +250,16 @@ fn run_script(script: &str, d: &Path, bin: &Path) -> (String, FileResult) {
     let (o, t) = v.remove(0);
     let mut text = o;
     text.push_str(&String::from_utf8_lossy(&out.stderr));
-    (text, t.typed::<FileResult>().unwrap())
+    let r = t.typed::<FileResult>().unwrap();
+    // The undo fields are undo_capture.rs's; these tests compare rc and changed.
+    (
+        text,
+        FileResult {
+            rc: r.rc,
+            changed: r.changed,
+            ..Default::default()
+        },
+    )
 }
 
 fn wrapped(h: &Host<()>, id: NodeId) -> String {
@@ -262,7 +271,11 @@ fn log(d: &Path) -> String {
 }
 
 fn res(rc: i32, changed: bool) -> FileResult {
-    FileResult { rc, changed }
+    FileResult {
+        rc,
+        changed,
+        ..Default::default()
+    }
 }
 
 fn mode(p: &Path) -> u32 {
@@ -543,7 +556,8 @@ fn go(pb: &Playbook<()>, d: &Path, bin: &Path, booted: bool) -> (Report, String)
                     .uid(0)
                     .env("PATH", &with_path(bin))
                     .env("TP_SVC_RUNDIR", &rundir(d, booted).display().to_string())
-                    .env("TP_UNIT_DIR", &unit_dir(d).display().to_string()),
+                    .env("TP_UNIT_DIR", &unit_dir(d).display().to_string())
+                    .env("TP_FETCH_STAGE", &d.join("stage").display().to_string()),
             ),
             vars: (),
         }],
@@ -973,7 +987,11 @@ fn executor_two_units_then_a_svc_op_reload_once_before_it_and_do_not_flush() {
                         "TP_SVC_RUNDIR",
                         &rundir(d.path(), true).display().to_string(),
                     )
-                    .env("TP_UNIT_DIR", &unit_dir(d.path()).display().to_string()),
+                    .env("TP_UNIT_DIR", &unit_dir(d.path()).display().to_string())
+                    .env(
+                        "TP_FETCH_STAGE",
+                        &d.path().join("stage").display().to_string(),
+                    ),
             ),
             vars: (),
         }],

@@ -193,7 +193,7 @@ impl<V> Host<V> {
 /// ([`shell_init`]) and the scripts name that variable. A `run` drives
 /// every host on the thread that called it, so those hosts share one id;
 /// they do not share a filesystem unless they are the same machine.
-fn run_id() -> String {
+pub(crate) fn run_id() -> String {
     thread_local! {
         static ID: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
     }
@@ -620,14 +620,21 @@ pub fn render(f: &FileSpec, src: &FileSrc, o: &mut String) {
         o.push_str("if [ \"$rc\" -eq 0 ]; then tp_s=$(sha256sum \"$tp_f\" | cut -d' ' -f1); fi\n");
     }
     match src.unpack {
-        None => render_place(f, o),
-        Some(strip) => render_unpack(f, strip, o),
+        None => place(f, o, true),
+        Some(strip) => unpack(f, strip, o, true),
     }
 }
 
 /// `.from`: the candidate beside `tp_p`, renamed over it when its sum is
 /// not `tp_s` (one rename). Needs `rc`, `changed`, `tp_p`, `tp_f`, `tp_s`.
 pub(crate) fn render_place(f: &FileSpec, o: &mut String) {
+    place(f, o, false)
+}
+
+/// `capture`: the op is a file op, whose script has the undo helpers; the
+/// old file is copied just before the rename over it. (`pkg[binary_release]`
+/// is not, and renders without.)
+fn place(f: &FileSpec, o: &mut String, capture: bool) {
     o.push_str(
         "if [ \"$rc\" -eq 0 ] && [ -d \"$tp_p\" ]; then echo \"telepatch: $tp_p is a directory\" >&2; rc=1; fi\n",
     );
@@ -651,22 +658,36 @@ pub(crate) fn render_place(f: &FileSpec, o: &mut String) {
             "    if [ \"$rc\" -eq 0 ] && [ -e \"$tp_p\" ]; then chown --reference=\"$tp_p\" \"$tp_t\" 2>/dev/null; fi\n",
         ),
     }
-    o.push_str(
-        "    if [ \"$rc\" -eq 0 ]; then mv -f \"$tp_t\" \"$tp_p\"; rc=$?; fi\n    if [ \"$rc\" -eq 0 ]; then changed=1; else rm -f \"$tp_t\"; fi\n  fi\nfi\n",
-    );
+    let save = if capture { "tp_save \"$tp_p\" && " } else { "" };
+    o.push_str(&format!(
+        "    if [ \"$rc\" -eq 0 ]; then {save}mv -f \"$tp_t\" \"$tp_p\"; rc=$?; fi\n    if [ \"$rc\" -eq 0 ]; then changed=1; else rm -f \"$tp_t\"; fi\n  fi\nfi\n"
+    ));
 }
 
 /// `.unpack`: a sibling tree swapped in (see the module doc for the
 /// renames). Needs `rc`, `changed`, `tp_p`, `tp_f`, `tp_s`.
 pub(crate) fn render_unpack(f: &FileSpec, strip: u32, o: &mut String) {
+    unpack(f, strip, o, false)
+}
+
+/// `capture`: as for [`place`]. The old tree is then moved into the backup
+/// dir (mount points refused first), not removed.
+fn unpack(f: &FileSpec, strip: u32, o: &mut String, capture: bool) {
     let strip_flag = if strip > 0 {
         format!(" --strip-components={strip}")
     } else {
         String::new()
     };
     o.push_str(MAGIC);
+    // A mount point (or a tree holding one) is refused before the scratch
+    // tree is built.
+    let gate = if capture {
+        "    if [ -d \"$tp_p\" ]; then tp_gate \"$tp_p\" check || rc=1; fi\n    if [ \"$rc\" -eq 0 ]; then tp_n=$(mktemp -d \"$tp_p.tpXXXXXX\") || rc=$?; fi\n"
+    } else {
+        "    tp_n=$(mktemp -d \"$tp_p.tpXXXXXX\") || rc=$?\n"
+    };
     o.push_str(&format!(
-        "tp_n=\nif [ \"$rc\" -eq 0 ]; then\n  tp_k=$(tp_magic \"$tp_f\")\n  tp_mk=\"$tp_s strip={strip}\"\n  if [ -e \"$tp_p\" ] && [ ! -d \"$tp_p\" ]; then\n    echo \"telepatch: $tp_p exists and is not a directory\" >&2; rc=1\n  elif [ -d \"$tp_p\" ] && [ \"$(cat \"$tp_p/.telepatch-fetch\" 2>/dev/null)\" = \"$tp_mk\" ]; then\n    :\n  else\n    tp_n=$(mktemp -d \"$tp_p.tpXXXXXX\") || rc=$?\n    if [ \"$rc\" -eq 0 ]; then\n      case \"$tp_k\" in\n        zip)\n          tp_z=\"$tp_n.raw\"\n          mkdir \"$tp_z\" || rc=$?\n          if [ \"$rc\" -eq 0 ]; then\n            if command -v unzip >/dev/null 2>&1; then unzip -q -o \"$tp_f\" -d \"$tp_z\" || rc=$?; else bsdtar -xf \"$tp_f\" -C \"$tp_z\" || rc=$?; fi\n          fi\n"
+        "tp_n=\nif [ \"$rc\" -eq 0 ]; then\n  tp_k=$(tp_magic \"$tp_f\")\n  tp_mk=\"$tp_s strip={strip}\"\n  if [ -e \"$tp_p\" ] && [ ! -d \"$tp_p\" ]; then\n    echo \"telepatch: $tp_p exists and is not a directory\" >&2; rc=1\n  elif [ -d \"$tp_p\" ] && [ \"$(cat \"$tp_p/.telepatch-fetch\" 2>/dev/null)\" = \"$tp_mk\" ]; then\n    :\n  else\n{gate}    if [ \"$rc\" -eq 0 ]; then\n      case \"$tp_k\" in\n        zip)\n          tp_z=\"$tp_n.raw\"\n          mkdir \"$tp_z\" || rc=$?\n          if [ \"$rc\" -eq 0 ]; then\n            if command -v unzip >/dev/null 2>&1; then unzip -q -o \"$tp_f\" -d \"$tp_z\" || rc=$?; else bsdtar -xf \"$tp_f\" -C \"$tp_z\" || rc=$?; fi\n          fi\n"
     ));
     if strip == 0 {
         o.push_str(
@@ -697,9 +718,16 @@ pub(crate) fn render_unpack(f: &FileSpec, strip: u32, o: &mut String) {
             "    if [ \"$rc\" -eq 0 ] && [ -d \"$tp_p\" ]; then chown --reference=\"$tp_p\" \"$tp_n\" 2>/dev/null; fi\n",
         ),
     }
-    o.push_str(
-        "    if [ \"$rc\" -eq 0 ]; then\n      if [ -d \"$tp_p\" ]; then\n        tp_o=\"$tp_n.old\"\n        if mv -- \"$tp_p\" \"$tp_o\" && mv -- \"$tp_n\" \"$tp_p\"; then\n          rm -rf -- \"$tp_o\"; changed=1\n        else\n          rc=$?\n          if [ ! -e \"$tp_p\" ]; then mv -- \"$tp_o\" \"$tp_p\"; fi\n        fi\n      elif mv -- \"$tp_n\" \"$tp_p\"; then\n        changed=1\n      else\n        rc=$?\n      fi\n    fi\n    if [ -n \"$tp_n\" ]; then rm -rf -- \"$tp_n\" \"$tp_n.raw\"; fi\n  fi\nfi\n",
-    );
+    // The old tree goes to the backup dir (or, with no run to save under,
+    // beside the scratch tree and is removed once the swap is done).
+    let swap = if capture {
+        "        tp_undo \"$tp_p\" || { tp_bk=; rc=1; }\n        if [ \"$rc\" -ne 0 ]; then :\n        elif { if [ -n \"$tp_bd\" ]; then tp_o=$tp_bd/old; tp_try \"$tp_p\" \"$tp_o\" mv -- \"$tp_p\" \"$tp_o\"; else tp_o=\"$tp_n.old\"; mv -- \"$tp_p\" \"$tp_o\"; fi; } && mv -- \"$tp_n\" \"$tp_p\"; then\n          if [ -z \"$tp_bd\" ]; then rm -rf -- \"$tp_o\"; fi; changed=1\n        else\n          rc=$?\n          if [ ! -e \"$tp_p\" ]; then mv -- \"$tp_o\" \"$tp_p\"; tp_bk=; fi\n        fi\n"
+    } else {
+        "        tp_o=\"$tp_n.old\"\n        if mv -- \"$tp_p\" \"$tp_o\" && mv -- \"$tp_n\" \"$tp_p\"; then\n          rm -rf -- \"$tp_o\"; changed=1\n        else\n          rc=$?\n          if [ ! -e \"$tp_p\" ]; then mv -- \"$tp_o\" \"$tp_p\"; fi\n        fi\n"
+    };
+    o.push_str(&format!(
+        "    if [ \"$rc\" -eq 0 ]; then\n      if [ -d \"$tp_p\" ]; then\n{swap}      elif mv -- \"$tp_n\" \"$tp_p\"; then\n        changed=1\n      else\n        rc=$?\n      fi\n    fi\n    if [ -n \"$tp_n\" ]; then rm -rf -- \"$tp_n\" \"$tp_n.raw\"; fi\n  fi\nfi\n"
+    ));
 }
 
 #[cfg(test)]

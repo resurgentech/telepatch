@@ -115,10 +115,13 @@ impl OpSpec {
     /// - `group`: `created`. `svc`: `was_enabled`, `was_active`,
     ///   `was_masked`. `git`: `created`, `was_rev`. `resource`: its
     ///   `inverse` script, when it defined one.
-    /// - Not yet: `file`, `unit` and `repo` (the note's table captures the
-    ///   previous content; no template does yet), `user` (only the
-    ///   created case is captured, not the fields of an existing account)
-    ///   and `sh` (no `.undo`).
+    /// - `file` and `unit` (T106): `existed`, the previous type, mode and
+    ///   owner, the topmost directory the op created, and the backup of
+    ///   what it overwrites or removes (`FileResult`), saved on the
+    ///   target's own filesystem, indexed under the run's directory.
+    /// - Not yet: `repo` (T107), `user` (only the created case is
+    ///   captured, not the fields of an existing account) and `sh` (no
+    ///   `.undo`).
     ///
     /// Exhaustive on purpose: a new op kind must decide.
     pub fn has_inverse(&self) -> bool {
@@ -127,16 +130,15 @@ impl OpSpec {
             OpSpec::Pkg(p) => {
                 p.mode == PkgMode::Install && matches!(p.source, Source::Distro(_) | Source::Pip)
             }
-            OpSpec::Group(_) | OpSpec::Svc(_) | OpSpec::Git(_) => true,
+            OpSpec::Group(_)
+            | OpSpec::Svc(_)
+            | OpSpec::Git(_)
+            | OpSpec::File(_)
+            | OpSpec::Unit(_) => true,
             OpSpec::Resource(r) => r.inverse.is_some(),
             // Changes nothing, so there is nothing to undo: not a hole.
             OpSpec::Wait(_) | OpSpec::Relogin(_) => true,
-            OpSpec::Raw { .. }
-            | OpSpec::Shell(_)
-            | OpSpec::File(_)
-            | OpSpec::User(_)
-            | OpSpec::Repo(_)
-            | OpSpec::Unit(_) => false,
+            OpSpec::Raw { .. } | OpSpec::Shell(_) | OpSpec::User(_) | OpSpec::Repo(_) => false,
         }
     }
 

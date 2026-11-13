@@ -20,7 +20,9 @@ use telepatch::{Guard, Host, NodeId, Playbook, PlaybookFuture, sh};
 // ---- harness: local ------------------------------------------------------
 
 fn local_spec(dir: &Path, path: Option<&str>) -> HostSpec<PathBuf> {
-    let mut t = LocalTransport::new().uid(0);
+    let mut t = LocalTransport::new()
+        .uid(0)
+        .env("TP_FETCH_STAGE", &dir.join("stage").display().to_string());
     if let Some(p) = path {
         t = t.env("PATH", p);
     }
@@ -434,7 +436,8 @@ fn svc_spec(d: &Path) -> HostSpec<PathBuf> {
             LocalTransport::new()
                 .uid(0)
                 .env("PATH", &path)
-                .env("TP_SVC_RUNDIR", run.to_str().unwrap()),
+                .env("TP_SVC_RUNDIR", run.to_str().unwrap())
+                .env("TP_FETCH_STAGE", &d.join("stage").display().to_string()),
         ),
         vars: d.to_path_buf(),
     }
@@ -739,6 +742,7 @@ fn ssh_go(pb: &Playbook<Vars>, stub: &Path) -> (Report, String) {
     let t = SshTransport::new()
         .ssh(&stub.join("ssh").display().to_string())
         .env("TP_STUB_DIR", &stub.display().to_string())
+        .env("TP_FETCH_STAGE", &stub.join("stage").display().to_string())
         .env("PATH", &path);
     let work = stub.join("work");
     std::fs::create_dir_all(&work).unwrap();

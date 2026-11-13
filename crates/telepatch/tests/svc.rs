@@ -480,7 +480,8 @@ fn go_log(
                 LocalTransport::new()
                     .uid(0)
                     .env("PATH", &path_s)
-                    .env("TP_SVC_RUNDIR", &rundir(d, booted).display().to_string()),
+                    .env("TP_SVC_RUNDIR", &rundir(d, booted).display().to_string())
+                    .env("TP_FETCH_STAGE", &d.join("stage").display().to_string()),
             ),
             vars: d.to_path_buf(),
         }],

@@ -93,10 +93,29 @@ pub struct PkgResult {
     pub installed: Vec<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
 pub struct FileResult {
     pub rc: i32,
     pub changed: bool,
+    /// The path existed before the op.
+    #[serde(default)]
+    pub existed: bool,
+    /// What it was: `file`, `dir` or `symlink`; empty when it did not exist.
+    #[serde(default)]
+    pub was_type: String,
+    /// Its mode before the op, octal (`640`); empty when it did not exist.
+    #[serde(default)]
+    pub was_mode: String,
+    /// Its owner before the op, `user:group`; empty when it did not exist.
+    #[serde(default)]
+    pub was_owner: String,
+    /// The topmost directory the op's `mkdir -p` created; empty when none.
+    #[serde(default)]
+    pub created_top: String,
+    /// The stage path of the backup directory (`<stage>/<run>/undo/<user>/
+    /// <id>`), whose `old` is the saved object; empty when nothing was saved.
+    #[serde(default)]
+    pub backup: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -420,7 +439,10 @@ fn wrap_framed(
     );
     let json = match kind {
         OpKind::Pkg => r#"{"rc":%s,"changed":%s,"installed":[%s]}"#,
-        OpKind::File | OpKind::Repo | OpKind::Resource => r#"{"rc":%s,"changed":%s}"#,
+        OpKind::File => {
+            r#"{"rc":%s,"changed":%s,"existed":%s,"was_type":"%s","was_mode":"%s","was_owner":"%s","created_top":"%s","backup":"%s"}"#
+        }
+        OpKind::Repo | OpKind::Resource => r#"{"rc":%s,"changed":%s}"#,
         OpKind::Group | OpKind::User => r#"{"rc":%s,"changed":%s,"created":%s}"#,
         OpKind::Git => r#"{"rc":%s,"changed":%s,"created":%s,"was_rev":"%s"}"#,
         OpKind::Sh => r#"{"rc":%s,"changed":%s,"skipped":%s}"#,
@@ -430,7 +452,10 @@ fn wrap_framed(
     };
     let args = match kind {
         OpKind::Pkg => r#""$rc" "$__tp_c" "$__tp_i""#,
-        OpKind::File | OpKind::Repo | OpKind::Resource => r#""$rc" "$__tp_c""#,
+        OpKind::File => {
+            r#""$rc" "$__tp_c" "$__tp_ex" "$(__tp_esc "${tp_wt-}")" "$(__tp_esc "${tp_wm-}")" "$(__tp_esc "${tp_wo-}")" "$(__tp_esc "${tp_ct-}")" "$(__tp_esc "${tp_bk-}")""#
+        }
+        OpKind::Repo | OpKind::Resource => r#""$rc" "$__tp_c""#,
         OpKind::Group | OpKind::User => r#""$rc" "$__tp_c" "$__tp_k""#,
         OpKind::Git => r#""$rc" "$__tp_c" "$__tp_k" "$(__tp_esc "${tp_was-}")""#,
         OpKind::Sh => r#""$rc" "$__tp_c" "$__tp_s""#,
@@ -449,6 +474,10 @@ fn wrap_framed(
         // Only a group or user op sets `created`; other kinds keep their bytes.
         o.push_str("  case \"$created\" in 1) __tp_k=true;; *) __tp_k=false;; esac\n");
     }
+    if kind == OpKind::File {
+        // A file op records what its path was (`tp_ex`, set by `tp_was`).
+        o.push_str("  case \"${tp_ex-}\" in 1) __tp_ex=true;; *) __tp_ex=false;; esac\n");
+    }
     if kind == OpKind::Svc {
         // Only a svc op sets `tp_started` (a start that ran).
         o.push_str("  case \"${tp_started-}\" in 1) __tp_st=true;; *) __tp_st=false;; esac\n");
@@ -463,6 +492,10 @@ fn wrap_framed(
     let _ = writeln!(o, "  printf '\\n__tp_{nonce} {id} {}\\n' {args}", json);
     o.push_str("}\ntrap '__tp_emit $?' EXIT\ntrap 'exit 143' TERM\n");
     o.push_str("rc=0; changed=0; skipped=0; installed=()\n");
+    if kind == OpKind::File {
+        // The id names the op's directory under the run's undo tree.
+        let _ = writeln!(o, "tp_id={id}");
+    }
     if killable {
         o.push_str(&start_line(nonce, id));
     }

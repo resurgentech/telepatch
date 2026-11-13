@@ -55,12 +55,22 @@ fn run(h: &Host<()>, id: NodeId, d: &Path) -> (String, FileResult) {
     assert_eq!(v.len(), 1, "stream: {stream:?}\n{err}");
     let (_, t) = v.remove(0);
     let r = t.typed::<FileResult>().unwrap();
+    // The undo fields are undo_capture.rs's; these tests compare rc and changed.
+    let r = FileResult {
+        rc: r.rc,
+        changed: r.changed,
+        ..Default::default()
+    };
     assert!(!err.contains("command not found"), "{err}");
     (err, r)
 }
 
 fn res(rc: i32, changed: bool) -> FileResult {
-    FileResult { rc, changed }
+    FileResult {
+        rc,
+        changed,
+        ..Default::default()
+    }
 }
 
 fn leftovers(d: &Path) -> Vec<String> {
