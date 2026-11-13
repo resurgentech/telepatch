@@ -1461,3 +1461,22 @@ are appended, never edited in; a hook refuses rewrites.
   third production site.
 - Gate E green; no snapshot moved in either repo.
 - Commits: telepatch 8ba9bb2
+
+## 2026-11-12 — T112 Start marker, one process group per op, and the kill proof
+
+- The persistent shell runs under `set -m`: each op subshell is its own
+  process group (pgid = `$BASHPID`). Proved locally in
+  `tests/op_kill.rs`: a group kill from a second shell clears the op
+  (TERM, then KILL for TERM-ignorers), a `setsid` child survives, and
+  the shell runs the next op. No `/proc` fallback was needed.
+- An op prints a start line `__tpS_<nonce> <id> <pid> <shell_pid>`,
+  which becomes `Event::Started` and is never output; guard and halt
+  skips print none. `trap 'exit 143' TERM`; the parent's stderr goes to
+  /dev/null around each op, so a signalled op's job notice (the whole
+  script) never reaches the stream. A killed op still trips
+  `__tp_halt`.
+- Finding for T101: under load a TERM can be lost; the watchdog must
+  re-send or escalate.
+- 12 tests in `tests/op_kill.rs`. Gate E green. 42 telepatch snapshots
+  re-accepted (wrapper lines only); none moved in tp_basic.
+- Commits: telepatch 540ceac
