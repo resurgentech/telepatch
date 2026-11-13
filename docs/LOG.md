@@ -1681,3 +1681,23 @@ are appended, never edited in; a hook refuses rewrites.
   `op_kill::a_termed_op_still_prints_its_trailer_with_rc_143` (5 s
   wait); five isolated reruns ok; the retry passed.
 - Commits: telepatch 4b78b5c
+
+## 2026-11-13 — T124 No test touches the real stage, cache, run dir or a real filesystem root
+
+- `.cargo/config.toml` in both repos: `[env] TP_SANDBOX_REQUIRED = "1"`.
+  Under it `tp_sbx` (`src/sandbox.rs`) refuses a stage, cache, run dir
+  or `<root>/.telepatch` not under `$TP_SANDBOX`: `init_shell` fails the
+  shell open; `tp_undo`, `tp_pf`, `tp_rmrun`, the sweep, `LOCATE`,
+  `stage_vars` and the reboot scripts refuse before touching anything.
+  `LocalTransport::open` refuses controller-side (Q-H2: `cargo run
+  --local`).
+- `telepatch::testing::sandbox()` / `Sandbox::at(dir)`,
+  `LocalTransport::sandboxed(_at)`, `SshTransport::sandboxed(_at)`;
+  every shell-opening test moved; `tempfile` is a normal dependency.
+- `tests/sandbox.rs` (7 proofs); `just check-sandbox` (read-only
+  inventory before/after both repos' tests).
+- Snapshots: additions only, four `tp_sbx` line shapes (telepatch 15
+  files +66; tp_basic 140 files +1273); T126 moves them into init.
+- Gate E green: telepatch+tp_basic 1058 passed, lint clean;
+  check-sandbox unchanged.
+- Commits: telepatch c1bb04f; tp_basic e947ef8
