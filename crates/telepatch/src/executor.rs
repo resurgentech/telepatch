@@ -1995,6 +1995,7 @@ impl HostExec {
                             role: role.to_string(),
                             ops: 0,
                             reversible: 0,
+                            sh_without_undo: 0,
                         });
                         ck.info.coverage.len() - 1
                     }
@@ -2003,6 +2004,8 @@ impl HostExec {
                 c.ops += 1;
                 if w.node.spec.has_inverse() {
                     c.reversible += 1;
+                } else if w.node.spec.kind() == "sh" {
+                    c.sh_without_undo += 1;
                 }
             }
         }

@@ -330,15 +330,22 @@ pub struct Coverage {
     pub role: String,
     pub ops: usize,
     pub reversible: usize,
+    /// `sh` ops (`sh!` or the toy `Raw`) without an inverse: the holes.
+    pub sh_without_undo: usize,
 }
 
 impl Coverage {
-    /// `docker: 6 ops, 6 reversible`.
+    /// `docker: 6 ops, 6 reversible`, or `rust_build: 14 ops, 12
+    /// reversible, 2 sh without undo` when there are holes.
     pub fn line(&self) -> String {
-        format!(
+        let mut s = format!(
             "{}: {} ops, {} reversible",
             self.role, self.ops, self.reversible
-        )
+        );
+        if self.sh_without_undo > 0 {
+            s.push_str(&format!(", {} sh without undo", self.sh_without_undo));
+        }
+        s
     }
 }
 

@@ -19,6 +19,9 @@ pub struct ShellSpec {
     pub creates: Option<String>,
     /// Regex (`grep -E`) over combined output; the op changed iff it matches.
     pub changed_if: Option<String>,
+    /// The command that reverses this op, from `.undo("..")`. Recorded
+    /// only: nothing runs it yet and nothing is captured on the host.
+    pub undo: Option<String>,
     /// Where the `sh!` was written (`file!()`, `line!()` of the macro call);
     /// the plan and the run report warn about every such site. `None` for a
     /// spec built by hand.

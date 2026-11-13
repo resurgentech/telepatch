@@ -124,7 +124,8 @@ impl OpSpec {
     ///   of a source it rewrote (`RepoResult`).
     /// - `user` (T107): `created`, the shell `usermod -s` replaced and the
     ///   groups `usermod -aG` added; never a password hash.
-    /// - Not yet: `sh` (no `.undo`).
+    /// - `sh` (T108): only with `.undo(..)`; the command is recorded, not
+    ///   run. `Raw` (the toy op) never.
     ///
     /// Exhaustive on purpose: a new op kind must decide.
     pub fn has_inverse(&self) -> bool {
@@ -143,7 +144,9 @@ impl OpSpec {
             OpSpec::Resource(r) => r.inverse.is_some(),
             // Changes nothing, so there is nothing to undo: not a hole.
             OpSpec::Wait(_) | OpSpec::Relogin(_) => true,
-            OpSpec::Raw { .. } | OpSpec::Shell(_) => false,
+            // The supplied command, or none.
+            OpSpec::Shell(s) => s.undo.is_some(),
+            OpSpec::Raw { .. } => false,
         }
     }
 

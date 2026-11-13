@@ -368,12 +368,86 @@ fn a_coverage_line_per_role_counts_ops_and_inverses() {
     let (_, out) = check(&Playbook::new("demo", demo_entry), d.path(), false);
     // demo: file, group, sh; the file (its capture) and the group have one.
     assert!(
-        out.contains("== h1 [coverage] demo: 3 ops, 2 reversible =="),
+        out.contains("== h1 [coverage] demo: 3 ops, 2 reversible, 1 sh without undo =="),
         "{out}"
     );
     assert!(
         out.contains("== h1 [coverage] quiet: 1 ops, 1 reversible =="),
         "{out}"
+    );
+}
+
+#[role]
+async fn undoable(h: &Host<PathBuf>) -> Result<(), TraceError> {
+    sh!(h, "echo one").undo("echo undo one");
+    sh!(h, "echo two");
+    Ok(())
+}
+
+fn undoable_entry(h: Host<PathBuf>) -> PlaybookFuture {
+    Box::pin(async move { undoable(&h).await })
+}
+
+#[test]
+fn sh_with_undo_counts_reversible_and_without_is_named() {
+    let d = tempfile::tempdir().unwrap();
+    let (_, out) = check(&Playbook::new("u", undoable_entry), d.path(), false);
+    assert!(
+        out.contains("== h1 [coverage] undoable: 2 ops, 1 reversible, 1 sh without undo =="),
+        "{out}"
+    );
+}
+
+#[test]
+fn undo_on_an_op_that_is_not_sh_is_a_trace_error() {
+    let h: Host<()> = Host::new(
+        "t",
+        Os::parse("ID=debian\nVERSION_ID=12\n").unwrap(),
+        Rc::new(()),
+    );
+    h.file("/etc/x").content("a").undo("rm /etc/x");
+    let errs: Vec<String> = h
+        .snapshot()
+        .errors
+        .iter()
+        .map(|e| e.message.clone())
+        .collect();
+    assert_eq!(errs.len(), 1, "{errs:?}");
+    assert!(errs[0].contains(".undo"), "{errs:?}");
+    sh!(h, "true").undo("echo back");
+    assert_eq!(h.snapshot().errors.len(), 1);
+}
+
+#[test]
+fn undo_is_on_the_trace_and_does_not_silence_the_warning() {
+    let h: Host<()> = Host::new(
+        "t",
+        Os::parse("ID=debian\nVERSION_ID=12\n").unwrap(),
+        Rc::new(()),
+    );
+    sh!(h, "true").undo("echo back");
+    sh!(h, "false");
+    let snap = h.snapshot();
+    let ops: Vec<_> = snap
+        .nodes
+        .iter()
+        .filter_map(|n| match n {
+            Node::Op(op) => Some(op),
+            _ => None,
+        })
+        .collect();
+    match &ops[0].spec {
+        telepatch::trace::OpSpec::Shell(s) => assert_eq!(s.undo.as_deref(), Some("echo back")),
+        o => panic!("{o:?}"),
+    }
+    assert!(ops[0].spec.has_inverse());
+    assert!(!ops[1].spec.has_inverse());
+    assert!(!telepatch::trace::OpSpec::Raw { script: "x".into() }.has_inverse());
+    let plan = telepatch::plan::render_host("t", &h.os, &snap);
+    assert_eq!(
+        plan.matches("warning: sh! in a role body").count(),
+        2,
+        "{plan}"
     );
 }
 

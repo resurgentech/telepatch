@@ -658,7 +658,9 @@ fn check_applies_nothing_on_any_host_and_exits_2() {
             "{h}: {out}"
         );
         assert!(
-            out.contains(&format!("== {h} [coverage] greet: 2 ops, 1 reversible ==")),
+            out.contains(&format!(
+                "== {h} [coverage] greet: 2 ops, 1 reversible, 1 sh without undo =="
+            )),
             "{h}: {out}"
         );
     }

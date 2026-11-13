@@ -496,6 +496,25 @@ impl OpHandle {
             .clone()
     }
 
+    /// The command that reverses a `sh!` op, stored on the trace. Nothing
+    /// runs it yet; it makes the op count as reversible in `[coverage]`.
+    /// It does not silence the `sh!` warning. On any other op it is a trace
+    /// error: their templates capture their own inverse.
+    #[track_caller]
+    pub fn undo(&self, cmd: &str) -> OpHandle {
+        let mut kind = None;
+        self.edit(|op| match &mut op.spec {
+            crate::trace::OpSpec::Shell(s) => s.undo = Some(cmd.to_string()),
+            o => kind = Some(o.kind()),
+        });
+        if let Some(k) = kind {
+            self.record_error(TraceError::new(format!(
+                "{k}: .undo(..) is for sh! ops only"
+            )));
+        }
+        self.clone()
+    }
+
     /// A non-zero exit of this op does not fail the run.
     #[track_caller]
     pub fn allow_fail(&self) -> OpHandle {
