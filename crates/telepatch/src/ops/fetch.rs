@@ -25,6 +25,28 @@
 //!   zst, plain tar, zip; the url's extension is not consulted) and the
 //!   tool that unpacks it must exist, else the host is blocked here.
 //!
+//! Where the bytes land (T119): an item's filesystem is the one its first
+//! consumer's target is on, in window order (`tp_fsroot` from the nearest
+//! existing ancestor; "same filesystem" is root equality; a consumer with no
+//! target path, a package from a file, counts as the stage's, and keeps the
+//! item there). On the stage's filesystem the above is unchanged. On another
+//! filesystem `F` with root `R` prepare (the root shell) downloads to
+//! `R/.telepatch/tmp/<run>/fetch/<i>.part`, verifies it there, and renames a
+//! checksummed file into `F`'s own cache `R/.telepatch/cache/sha256/<sum>`
+//! (directories root-owned 0755, files 0644); an unverified one stays at
+//! `R/.telepatch/tmp/<run>/fetch/u-<hash>`. `<stage>/<run>/f-<sum>` (or
+//! `u-<hash>`) is a symlink to it, so the stage is still the run's one
+//! index, and `R` is appended to `<stage>/<run>/fsroots`, so cleanup and the
+//! stale sweep remove `R/.telepatch/tmp/<run>` (never the cache). Lookup
+//! order: `F`'s cache, then the main cache (read in place, nothing copied
+//! onto `F`), else a download onto `F`. A root that cannot be written (or
+//! that a non-root shell may not make a `.telepatch` in) blocks the host,
+//! `fetch <url>: cannot stage on <R>: <error>`, before any download: there
+//! is no fallback to the stage's filesystem. Every new path goes through
+//! `tp_sbx` first. The prepare script starts with
+//! [`crate::ops::undo::guard_line`] and calls `tp_fsroot` and `tp_idx` from
+//! the shell's helpers.
+//!
 //! `<cache>` is `/var/cache/telepatch/sha256` and `<stage>` is
 //! `/var/tmp/telepatch`; `TP_FETCH_CACHE` and `TP_FETCH_STAGE` override them
 //! (tests). `<run>` is `"$__tp_run"`, set by the executor in each shell
@@ -32,7 +54,7 @@
 //! lives in the staging directory or beside its target.
 //!
 //! The op scripts ([`render`]) read only the cache entry (or the staged
-//! file): `.from` copies it to a candidate beside the target, with the
+//! file; on another filesystem the `f-<sum>` link, [`lookup`]): `.from` copies it to a candidate beside the target, with the
 //! final mode and owner, and renames that over the target when the
 //! target's `sha256sum` differs from the fetch's (no `cmp`: Rocky's minimal
 //! image has no diffutils). `.unpack` unpacks into a sibling `<target>.tpXXXXXX`, sets mode
@@ -257,9 +279,27 @@ pub struct Item {
     /// The longest any op's fetch of it asks for ([`Fetched::timeout`]);
     /// `None` when none set one.
     pub timeout: Option<Duration>,
+    /// The shell word of each consumer's target path, in window order
+    /// ([`crate::ops::undo::capture_word`]); `None` for a consumer with no
+    /// path the prepare shell can name (a relative one).
+    pub targets: Vec<Option<String>>,
+    /// A package op installs it from the file. It reads the main cache or
+    /// the stage's own `u-` file only, never a link to another filesystem,
+    /// so it keeps the item on the stage's filesystem.
+    pub pkg_file: bool,
 }
 
 impl Item {
+    /// The word of the path whose filesystem the download lands on: the
+    /// first consumer's target, in window order. `None`: the stage's own
+    /// filesystem (no consumer with a path, or a package op reads it).
+    pub fn first_target(&self) -> Option<&str> {
+        if self.pkg_file {
+            return None;
+        }
+        self.targets.first().and_then(|t| t.as_deref())
+    }
+
     /// The limit of one attempt: the fetch's own, else the default.
     pub fn attempt_timeout(&self) -> Duration {
         self.timeout.unwrap_or(DEFAULT_TIMEOUT)
@@ -287,13 +327,19 @@ fn op_fetch(spec: &OpSpec) -> Option<Want<'_>> {
 }
 
 /// The distinct `(url, sum)` the window's file ops and package-file ops
-/// fetch, first-seen order.
+/// fetch, first-seen order, each with its consumers' targets.
 pub fn items(window: &Window) -> Vec<Item> {
     let mut out: Vec<Item> = Vec::new();
     for op in &window.ops {
         let Some((url, sum, unpack, retry, timeout)) = op_fetch(&op.node.spec) else {
             continue;
         };
+        let pkg = matches!(op.node.spec, OpSpec::Pkg(_));
+        let user = match &op.node.run_as.principal {
+            crate::trace::Principal::User(u) => u.as_str(),
+            crate::trace::Principal::Root => "root",
+        };
+        let target = crate::ops::undo::capture_word(&op.node.spec, user);
         match out
             .iter_mut()
             .find(|i| i.url == url && i.sum.as_ref() == sum.as_ref())
@@ -302,6 +348,8 @@ pub fn items(window: &Window) -> Vec<Item> {
                 i.unpack |= unpack;
                 i.retry = i.retry.max(retry);
                 i.timeout = i.timeout.max(timeout);
+                i.targets.push(target);
+                i.pkg_file |= pkg;
             }
             None => out.push(Item {
                 url: url.to_string(),
@@ -309,6 +357,8 @@ pub fn items(window: &Window) -> Vec<Item> {
                 unpack,
                 retry,
                 timeout,
+                targets: vec![target],
+                pkg_file: pkg,
             }),
         }
     }
@@ -428,18 +478,23 @@ fn secs_arg(d: Duration) -> String {
 
 /// The prepare script for `items`, one `fetch <i> <word> ..` line each:
 /// `cached`, `fetched`, `staged`, `mismatch <got>`, `fail <tool> <rc>
-/// <message>`, `notool`, `badarchive`, `needtool <name>`.
+/// <message>`, `notool`, `badarchive`, `needtool <name>`, `nostage <root>:
+/// <error>`. It starts with [`crate::ops::undo::guard_line`]: it calls
+/// `tp_fsroot` and `tp_idx` from the shell's helpers.
 pub fn prepare_script(items: &[Item]) -> String {
     let mut s = prelude();
     s.push_str(LIMITS);
     for (i, it) in items.iter().enumerate() {
         s.push_str(&format!(
-            "tp_lt={} tp_lr={}\ntp_one {i} {} {} {}\n",
+            "tp_lt={} tp_lr={}\ntp_one {i} {} {} {}{}\n",
             secs_arg(it.attempt_timeout()),
             it.retry,
             quote(&it.url),
             quote(it.sum.as_deref().unwrap_or("")),
-            if it.unpack { 1 } else { 0 }
+            if it.unpack { 1 } else { 0 },
+            it.first_target()
+                .map(|t| format!(" {t}"))
+                .unwrap_or_default()
         ));
     }
     s.push_str("if [ \"$tp_keep\" = 0 ]; then rm -rf -- \"$tp_run\"; fi\n");
@@ -454,7 +509,8 @@ pub fn prepare_script(items: &[Item]) -> String {
 /// and moved into the cache (with no sum: staged under `u-<hash of the
 /// url>`, and `tp_keep=1`).
 pub(crate) fn prelude() -> String {
-    let mut s = String::from(LOCATE);
+    let mut s = crate::ops::undo::guard_line();
+    s.push_str(LOCATE);
     s.push_str(&format!(
         "{TP_RUN}tp_dl=\nif command -v curl >/dev/null 2>&1; then tp_dl=curl; elif command -v wget >/dev/null 2>&1; then tp_dl=wget; fi\ntp_keep=0\n",
     ));
@@ -477,9 +533,37 @@ pub(crate) fn prelude() -> String {
   esac
   return 0
 }
+tp_link() { (umask 022; mkdir -p -- "$tp_run") && ln -sfn -- "$1" "$tp_run/$2" && tp_keep=1; }
+tp_stg() {
+  local i=$1 r=$2 b e x
+  b=$r/.telepatch; tp_t=$b/tmp/$__tp_run; tp_c=$b/cache/sha256
+  tp_sbx "$b" || { b=/dev/null/refused; tp_t=$b; tp_c=$b; }
+  tp_sbx "$tp_c" || tp_c=/dev/null/refused
+  if [ ! -d "$tp_t/fetch" ]; then
+    case ":${TP_FS_ROOTS-}:" in *":$r:"*) ;; *) [ "$(id -u)" = 0 ] || { echo "fetch $i nostage $r: not root, so no .telepatch is made there"; return 1; };; esac
+  fi
+  e=$(umask 022; mkdir -p -- "$tp_run" 2>&1) || { echo "fetch $i nostage $r: cannot create $tp_run: ${e##*: }"; return 1; }
+  for x in "$b" "$b/tmp" "$tp_t" "$tp_t/fetch"; do
+    [ -d "$x" ] || e=$(umask 022; mkdir -m 711 -- "$x" 2>&1) || { echo "fetch $i nostage $r: ${e##*: }"; return 1; }
+  done
+  e=$(tp_idx "$r" "$tp_run/fsroots" 2>&1) || { echo "fetch $i nostage $r: ${e##*: }"; return 1; }
+  tp_keep=1
+}
 tp_one() {
-  local i=$1 u=$2 s=$3 up=$4 f p rc err got
+  local i=$1 u=$2 s=$3 up=$4 t=${5-} f p rc err got r= h
+  if [ -n "$t" ]; then
+    r=$(tp_fsroot "$t")
+    if [ -z "$r" ] || [ "$r" = "$(tp_fsroot "$tp_sd")" ]; then r=; fi
+  fi
   if [ -n "$s" ]; then
+    if [ -n "$r" ]; then
+      f="$r/.telepatch/cache/sha256/$s"
+      if [ -f "$f" ] && [ "$(sha256sum "$f" 2>/dev/null | cut -d' ' -f1)" = "$s" ]; then
+        tp_check "$i" "$f" "$up" || return 0
+        tp_link "$f" "f-$s" || { echo "fetch $i fail ${tp_dl:-sh} 1 cannot create $tp_run"; return 0; }
+        echo "fetch $i cached"; return 0
+      fi
+    fi
     f="$tp_cd/$s"
     if [ -f "$f" ] && [ "$(sha256sum "$f" 2>/dev/null | cut -d' ' -f1)" = "$s" ]; then
       tp_check "$i" "$f" "$up" || return 0
@@ -487,8 +571,13 @@ tp_one() {
     fi
   fi
   if [ -z "$tp_dl" ]; then echo "fetch $i notool"; return 0; fi
-  (umask 022; mkdir -p -- "$tp_run") || { echo "fetch $i fail $tp_dl 1 cannot create $tp_run"; return 0; }
-  p="$tp_run/$i.part"
+  if [ -n "$r" ]; then
+    tp_stg "$i" "$r" || return 0
+    p="$tp_t/fetch/$i.part"
+  else
+    (umask 022; mkdir -p -- "$tp_run") || { echo "fetch $i fail $tp_dl 1 cannot create $tp_run"; return 0; }
+    p="$tp_run/$i.part"
+  fi
   if [ "$tp_dl" = curl ]; then
     err=$(curl -fsSL -o "$p" -- "$u" 2>&1); rc=$?
   else
@@ -503,7 +592,14 @@ tp_one() {
   if [ -n "$s" ]; then
     if [ "$got" != "$s" ]; then rm -f -- "$p"; echo "fetch $i mismatch $got"; return 0; fi
     tp_check "$i" "$p" "$up" || { rm -f -- "$p"; return 0; }
-    if (umask 022; mkdir -p -- "$tp_cd") && mv -f -- "$p" "$tp_cd/.$s.part" && chmod 644 "$tp_cd/.$s.part" && mv -f -- "$tp_cd/.$s.part" "$tp_cd/$s"; then
+    if [ -n "$r" ]; then
+      if (umask 022; mkdir -p -- "$tp_c") && chmod 644 "$p" && mv -f -- "$p" "$tp_c/$s" && tp_link "$tp_c/$s" "f-$s"; then
+        echo "fetch $i fetched"
+      else
+        rm -f -- "$p"
+        echo "fetch $i fail $tp_dl 1 cannot write the cache $tp_c"
+      fi
+    elif (umask 022; mkdir -p -- "$tp_cd") && mv -f -- "$p" "$tp_cd/.$s.part" && chmod 644 "$tp_cd/.$s.part" && mv -f -- "$tp_cd/.$s.part" "$tp_cd/$s"; then
       echo "fetch $i fetched"
     else
       rm -f -- "$p" "$tp_cd/.$s.part"
@@ -512,7 +608,12 @@ tp_one() {
   else
     tp_check "$i" "$p" "$up" || { rm -f -- "$p"; return 0; }
     chmod 644 "$p"
-    mv -f -- "$p" "$tp_run/u-$(printf %s "$u" | sha256sum | cut -c1-32)" && tp_keep=1
+    h=u-$(printf %s "$u" | sha256sum | cut -c1-32)
+    if [ -n "$r" ]; then
+      mv -f -- "$p" "$tp_t/fetch/$h" && tp_link "$tp_t/fetch/$h" "$h" || { rm -f -- "$p"; echo "fetch $i fail $tp_dl 1 cannot stage on $r"; return 0; }
+    else
+      mv -f -- "$p" "$tp_run/$h" && tp_keep=1
+    fi
     echo "fetch $i staged"
   fi
 }
@@ -566,6 +667,7 @@ pub fn parse(items: &[Item], out: &str) -> Vec<Found> {
                     it.url,
                     it.sum.as_deref().unwrap_or("")
                 )),
+                "nostage" => Found::Blocked(format!("fetch {}: cannot stage on {tail}", it.url)),
                 "notool" => Found::NoDownloader(format!("fetch {}: {NO_DOWNLOADER}", it.url)),
                 "badarchive" => Found::Blocked(format!(
                     "unpack {}: not a tar (gz, xz, zst) or zip archive",
@@ -604,6 +706,16 @@ pub fn parse(items: &[Item], out: &str) -> Vec<Found> {
         .collect()
 }
 
+/// An op's `tp_f` for a checksummed fetch: the main cache entry, or, when
+/// prepare staged it on another filesystem (a cache hit or a download
+/// there), the stage's link `f-<sum>` to it. One line.
+pub(crate) fn lookup(url: &str) -> String {
+    let say = quote(&format!("telepatch: fetch {url}: staged on "));
+    format!(
+        "tp_f=\"$tp_cd/$tp_s\"; if [ -L \"$tp_sd/$__tp_run/f-$tp_s\" ]; then tp_f=\"$tp_sd/$__tp_run/f-$tp_s\"; tp_r=$(readlink \"$tp_f\"); tp_r=${{tp_r%/.telepatch/*}}; tp_q=$(tp_fsroot \"$tp_p\"); [ \"$tp_q\" = \"$tp_r\" ] || echo {say}\"$tp_r, target now on $tp_q\" >&2; fi\n"
+    )
+}
+
 /// The file op's body for a fetched source: appended after `tp_p=<path>`
 /// ([`FileSpec::render`]); the mode and owner the spec names are on the
 /// candidate before it replaces the target, and the usual mode and owner
@@ -611,7 +723,7 @@ pub fn parse(items: &[Item], out: &str) -> Vec<Found> {
 pub fn render(f: &FileSpec, src: &FileSrc, o: &mut String) {
     o.push_str(LOCATE);
     match &src.fetched.sha256 {
-        Some(s) => o.push_str(&format!("tp_s={}\ntp_f=\"$tp_cd/$tp_s\"\n", quote(s))),
+        Some(s) => o.push_str(&format!("tp_s={}\n{}", quote(s), lookup(&src.fetched.url))),
         None => o.push_str(&format!(
             "tp_f=\"$tp_sd\"/\"$__tp_run\"/\"u-$(printf %s {} | sha256sum | cut -c1-32)\"\n",
             quote(&src.fetched.url)
@@ -772,6 +884,8 @@ mod tests {
             unpack: false,
             retry,
             timeout,
+            targets: Vec::new(),
+            pkg_file: false,
         }
     }
 
@@ -857,6 +971,8 @@ mod tests {
             unpack: false,
             retry: 0,
             timeout: None,
+            targets: Vec::new(),
+            pkg_file: false,
         };
         let items = [
             it(Some("w")),

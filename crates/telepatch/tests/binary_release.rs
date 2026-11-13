@@ -371,6 +371,10 @@ if [ "$out" = - ]; then cat "$D/www/$n"; else cp "$D/www/$n" "$out"; fi"#
         )
     }
     fn go_path(&self, v: &V, path: &str) -> (Report, String) {
+        self.go_roots(v, path, None)
+    }
+    /// With `roots` (`TP_FS_ROOTS`) as filesystems of their own.
+    fn go_roots(&self, v: &V, path: &str, roots: Option<&str>) -> (Report, String) {
         let _ = std::fs::remove_file(self.p("log"));
         let pb = Playbook::new("binary_release", pb);
         let out = Rc::new(RefCell::new(String::new()));
@@ -379,15 +383,19 @@ if [ "$out" = - ]; then cat "$D/www/$n"; else cp "$D/www/$n" "$out"; fi"#
             vec![HostSpec {
                 groups: Vec::new(),
                 name: "h1".into(),
-                target: Target::Local(
-                    LocalTransport::new()
+                target: Target::Local({
+                    let t = LocalTransport::new()
                         .uid(0)
                         .sandboxed_at(self.d.path())
                         .env("PATH", path)
                         .env("TMPDIR", &self.p("tmp").display().to_string())
                         .env("TP_FETCH_STAGE", &self.p("stage").display().to_string())
-                        .env("TP_FETCH_CACHE", &self.p("cache").display().to_string()),
-                ),
+                        .env("TP_FETCH_CACHE", &self.p("cache").display().to_string());
+                    match roots {
+                        Some(r) => t.env("TP_FS_ROOTS", r),
+                        None => t,
+                    }
+                }),
                 vars: v.clone(),
             }],
             RunOpts {
@@ -1375,4 +1383,60 @@ fn a_login_op_names_the_run_variable_and_renders_like_a_root_op() {
     let b = telepatch::trailer::render_for(b, 1, "n0nce", &h.os, "root").unwrap();
     assert_eq!(a, b);
     assert!(!a.contains("env -i"), "{a}");
+}
+
+// --- T119: the release lands on its install directory's filesystem ---
+
+#[test]
+fn a_tarball_installed_on_another_filesystem_is_downloaded_and_cached_there_and_the_sweep_runs() {
+    let e = Env::new();
+    let fsb = e.p("fsB");
+    std::fs::create_dir_all(&fsb).unwrap();
+    let s2 = e.go_release("1.27.2", "amd64");
+    e.go_json(&[("go1.27.2.linux-amd64.tar.gz", &s2)]);
+    e.serve("VERSION", b"go1.27.2\n");
+    let mut v = e.go_v(Want::Latest);
+    v.br =
+        v.br.unpack_to(fsb.join("go").display().to_string())
+            .bin(fsb.join("go/bin/go").display().to_string());
+    // a dead controller's run, older than 24 hours, with tmp on fsB, and a
+    // cache entry that must stay
+    let old = fsb.join(".telepatch/tmp/old");
+    std::fs::create_dir_all(old.join("fetch")).unwrap();
+    std::fs::create_dir_all(fsb.join(".telepatch/cache/sha256")).unwrap();
+    std::fs::write(fsb.join(".telepatch/cache/sha256").join(SUM), "keep").unwrap();
+    let so = e.p("stage/old");
+    std::fs::create_dir_all(&so).unwrap();
+    std::fs::write(so.join("fsroots"), format!("{}\n", fsb.display())).unwrap();
+    assert!(
+        Command::new("touch")
+            .args(["-d", "3 days ago"])
+            .arg(&so)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let path = format!(
+        "{}:{}",
+        e.p("bin").display(),
+        std::env::var("PATH").unwrap()
+    );
+    let (r, out) = e.go_roots(&v, &path, Some(&fsb.display().to_string()));
+    assert_eq!(status(&r), &HostStatus::Changed, "{out}\n{}", r.render());
+    assert_eq!(
+        run_bin(&fsb.join("go/bin/go"), "version"),
+        "go version go1.27.2 linux/amd64"
+    );
+    // the download is on fsB, in its cache, and the main cache is unused
+    assert_eq!(e.cache(), Vec::<String>::new());
+    assert!(fsb.join(".telepatch/cache/sha256").join(&s2).is_file());
+    // the old run is swept by this fetch-only window, the cache stays
+    assert!(!old.exists(), "the old run's tmp");
+    assert!(!so.exists(), "the old run's stage");
+    assert_eq!(
+        std::fs::read(fsb.join(".telepatch/cache/sha256").join(SUM)).unwrap(),
+        b"keep"
+    );
+    assert!(!fsb.join(".telepatch/tmp").exists(), "tmp goes when empty");
+    e.assert_clean();
 }

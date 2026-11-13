@@ -31,6 +31,11 @@
 //! download; a mismatch or a failed download blocks the host before apply.
 //! Prepare then records `<sum> <wanted version or -> <file>` in
 //! `<stage>/<run>/br-<hash of the name>`, which the op reads and removes.
+//! A tarball with an `unpack_to` lands on that directory's filesystem (T119,
+//! [`crate::ops::fetch::prelude`]): on another one the download and its cache
+//! entry are under `<root>/.telepatch/`, the record names the stage's link
+//! `f-<sum>` to it, and a single binary (no install directory) stays on the
+//! stage's filesystem.
 //! With no record the op changes nothing. The swap is T81's: a single
 //! binary is copied to a candidate beside `bin`, given mode 0755 and
 //! renamed over `bin` (one rename); a tarball is unpacked (`.strip(n)`) into
@@ -419,12 +424,16 @@ impl BinaryRelease {
             }
         }
         s.push_str(&format!(
-            "tp_o=$(tp_one 0 \"$tp_url\" \"$tp_sum\" {})\necho \"$tp_o\"\n",
-            if self.unpack_to.is_some() { 1 } else { 0 }
+            "tp_o=$(tp_one 0 \"$tp_url\" \"$tp_sum\" {}{})\necho \"$tp_o\"\n",
+            if self.unpack_to.is_some() { 1 } else { 0 },
+            self.unpack_to
+                .as_deref()
+                .map(|d| format!(" {}", path_word(d)))
+                .unwrap_or_default()
         ));
         s.push_str(
             "case \"$tp_o\" in\n  'fetch 0 cached'|'fetch 0 fetched'|'fetch 0 staged') ;;\n  *) rmdir -- \"$tp_run\" 2>/dev/null; return 0;;\nesac\n\
-             if [ -n \"$tp_sum\" ]; then tp_f=\"$tp_cd/$tp_sum\"; tp_got=$tp_sum\n\
+             if [ -n \"$tp_sum\" ]; then tp_f=\"$tp_cd/$tp_sum\"; if [ -L \"$tp_run/f-$tp_sum\" ]; then tp_f=\"$tp_run/f-$tp_sum\"; fi; tp_got=$tp_sum\n\
              else tp_f=\"$tp_run/u-$(printf %s \"$tp_url\" | sha256sum | cut -c1-32)\"; tp_got=$(sha256sum \"$tp_f\" | cut -d' ' -f1); fi\n\
              if ! (umask 077; mkdir -p -- \"$tp_run\" && printf '%s %s %s\\n' \"$tp_got\" \"${tp_want:--}\" \"$tp_f\" > \"$tp_dec\"); then echo \"br block cannot write $tp_dec\"; return 0; fi\n\
              echo \"br change\"\n}\ntp_br\n",
@@ -583,6 +592,8 @@ pub fn prepared(
         unpack: false,
         retry: 0,
         timeout: None,
+        targets: Vec::new(),
+        pkg_file: false,
     };
     let state = match fetch::parse(std::slice::from_ref(&item), out).remove(0) {
         Found::Blocked(why) => return Err(blocked(&why)),

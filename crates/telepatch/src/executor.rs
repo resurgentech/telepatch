@@ -3217,16 +3217,21 @@ impl Executor for HostExec {
                 matches!(&o.node.spec, OpSpec::Pkg(p)
                     if matches!(p.source, crate::ops::pkg::Source::BinaryRelease(_)))
             });
-            if binary_release || !crate::ops::fetch::items(&window).is_empty() {
+            let fetching = binary_release || !crate::ops::fetch::items(&window).is_empty();
+            if fetching {
                 self.fetch_staged = true;
             }
+            // The stale sweep also covers a fetch-only window (a binary
+            // release, a package from a file): a download may have made
+            // `<root>/.telepatch/tmp/<run>` on another filesystem (T119).
             if self.check.is_none()
-                && window.ops.iter().any(|o| {
-                    matches!(
-                        o.node.spec,
-                        OpSpec::File(_) | OpSpec::Unit(_) | OpSpec::Repo(_)
-                    )
-                })
+                && (fetching
+                    || window.ops.iter().any(|o| {
+                        matches!(
+                            o.node.spec,
+                            OpSpec::File(_) | OpSpec::Unit(_) | OpSpec::Repo(_)
+                        )
+                    }))
                 && !self.undo_used
             {
                 self.undo_used = true;

@@ -1720,3 +1720,613 @@ fn two_fetches_of_one_url_download_once_with_the_longest_timeout() {
     assert_eq!(e.log().lines().count(), 1, "{}", e.log());
     assert!(e.log().contains("curl max=45 "), "{}", e.log());
 }
+
+// --- T119: a download lands on its target's filesystem ---
+//
+// A filesystem of its own is the `TP_FS_ROOTS` seam: `<d>/fsB` (and `<d>/fsC`)
+// are roots of their own. The stage and the main cache are on the temp
+// dir's real filesystem. A wrapper `curl` records the `-o` path of every
+// download, and a wrapper `tar` the `-C` directory of every unpack.
+
+/// One consumer of a fetch: a `.from` or an `.unpack` at `target`.
+#[derive(Clone)]
+struct Tgt {
+    url: String,
+    sum: Option<String>,
+    target: String,
+    unpack: bool,
+    allow: bool,
+}
+
+#[derive(Clone)]
+struct W {
+    d: PathBuf,
+    sets: Vec<Tgt>,
+    /// Directories made by ops before the fetch ops (not there at prepare).
+    dirs: Vec<String>,
+    /// The ops run in `as_user("root")`'s login shell.
+    login: bool,
+    /// Write the stage and `<d>/fsB/.telepatch` listings after the ops.
+    mid: bool,
+}
+
+impl Tgt {
+    fn from(url: &str, sum: Option<&str>, target: &Path) -> Tgt {
+        Tgt {
+            url: url.to_string(),
+            sum: sum.map(str::to_string),
+            target: target.display().to_string(),
+            unpack: false,
+            allow: sum.is_none(),
+        }
+    }
+    fn unpack(url: &str, sum: &str, target: &Path) -> Tgt {
+        Tgt {
+            unpack: true,
+            ..Tgt::from(url, Some(sum), target)
+        }
+    }
+}
+
+fn pb_w(h: Host<W>) -> PlaybookFuture {
+    Box::pin(async move {
+        let w = h.vars.clone();
+        for d in &w.dirs {
+            h.file(d).dir();
+        }
+        for t in &w.sets {
+            let mut f = h.fetch(&t.url);
+            if let Some(s) = &t.sum {
+                f = f.sha256(s);
+            }
+            let o = if w.login {
+                h.as_user("root").file(&t.target)
+            } else {
+                h.file(&t.target)
+            };
+            if t.unpack {
+                o.unpack(&f).strip(1);
+            } else {
+                o.from(&f);
+            }
+            if t.allow {
+                o.allow(Policy::Unverified, "the test server publishes no sums");
+            }
+        }
+        if w.mid {
+            let d = w.d.display();
+            h.raw(format!(
+                "S=\"$TP_FETCH_STAGE/$__tp_run\"\n\
+                 for f in \"$S\"/*; do if [ ! -e \"$f\" ] && [ ! -L \"$f\" ]; then :; elif [ -L \"$f\" ]; then echo \"link ${{f##*/}} $(readlink \"$f\")\"; else echo \"other ${{f##*/}}\"; fi; done > {d}/mid_stage\n\
+                 cat \"$S/fsroots\" > {d}/mid_roots 2>/dev/null\n\
+                 find {d}/fsB/.telepatch -mindepth 1 -printf '%P %y %m\\n' 2>/dev/null | sed \"s/$__tp_run/<run>/\" | sort > {d}/mid_fsb\n\
+                 true"
+            ));
+        }
+        Ok(())
+    })
+}
+
+impl Env {
+    fn fsb(&self) -> PathBuf {
+        self.p("fsB")
+    }
+    /// Wrappers in `<d>/wrap`: `curl` records its `-o` file, `tar` its
+    /// `-C` directory, then each runs the real one.
+    fn wrappers(&self) -> PathBuf {
+        let fake = self.fakes(&["curl"]);
+        let wrap = self.p("wrap");
+        std::fs::create_dir_all(&wrap).unwrap();
+        let dd = self.d.path().display();
+        let real_tar = String::from_utf8(
+            Command::new("sh")
+                .args(["-c", "command -v tar"])
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap()
+        .trim()
+        .to_string();
+        for (n, body) in [
+            (
+                "curl",
+                format!(
+                    "a=(\"$@\"); for ((i=0;i<${{#a[@]}};i++)); do [ \"${{a[i]}}\" = -o ] && echo \"${{a[i+1]}}\" >> {dd}/outlog; done\nexec {}/curl \"$@\"",
+                    fake.display()
+                ),
+            ),
+            (
+                "tar",
+                format!(
+                    "a=(\"$@\"); for ((i=0;i<${{#a[@]}};i++)); do [ \"${{a[i]}}\" = -C ] && echo \"${{a[i+1]}}\" >> {dd}/tarlog; done\nexec {real_tar} \"$@\""
+                ),
+            ),
+        ] {
+            let p = wrap.join(n);
+            std::fs::write(&p, format!("#!/bin/bash\n{body}\n")).unwrap();
+            std::fs::set_permissions(&p, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+                .unwrap();
+        }
+        wrap
+    }
+    fn outlog(&self) -> Vec<String> {
+        std::fs::read_to_string(self.p("outlog"))
+            .unwrap_or_default()
+            .lines()
+            .map(str::to_string)
+            .collect()
+    }
+    /// Run `w` with `roots` as filesystems of their own.
+    fn go_w(&self, w: &W, roots: &[PathBuf]) -> (Report, String) {
+        self.clear_log();
+        for f in ["outlog", "tarlog", "mid_stage", "mid_roots", "mid_fsb"] {
+            let _ = std::fs::remove_file(self.p(f));
+        }
+        let wrap = self.wrappers();
+        let mut path = format!(
+            "{}:{}:{}",
+            wrap.display(),
+            self.p("bin").display(),
+            std::env::var("PATH").unwrap()
+        );
+        let mut t = LocalTransport::new();
+        if w.login {
+            let (b, home) = (self.p("lbin"), self.p("home"));
+            std::fs::create_dir_all(&b).unwrap();
+            std::fs::create_dir_all(&home).unwrap();
+            let g = b.join("getent");
+            std::fs::write(
+                &g,
+                format!(
+                    "#!/bin/bash\n[ \"$1 $2\" = \"passwd root\" ] || exit 2\necho 'root:x:0:0::{}:/bin/bash'\n",
+                    home.display()
+                ),
+            )
+            .unwrap();
+            std::fs::set_permissions(&g, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+                .unwrap();
+            path = format!("{}:{path}", b.display());
+        }
+        t = t
+            .uid(0)
+            .sandboxed_at(self.d.path())
+            .env("PATH", &path)
+            .env("TMPDIR", &self.p("tmp").display().to_string())
+            .env("TP_FETCH_STAGE", &self.p("stage").display().to_string())
+            .env("TP_FETCH_CACHE", &self.p("cache").display().to_string())
+            .env(
+                "TP_FS_ROOTS",
+                &roots
+                    .iter()
+                    .map(|r| r.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(":"),
+            );
+        let out = Rc::new(RefCell::new(String::new()));
+        let report = run(
+            &Playbook::new("fetch", pb_w),
+            vec![HostSpec {
+                groups: Vec::new(),
+                name: "h1".into(),
+                target: Target::Local(t),
+                vars: w.clone(),
+            }],
+            RunOpts {
+                log: None,
+                stdout: Stdout::Capture(out.clone()),
+            },
+        );
+        let text = out.borrow().clone();
+        (report, text)
+    }
+    fn mid(&self, f: &str) -> String {
+        std::fs::read_to_string(self.p(f)).unwrap_or_default()
+    }
+    fn w(&self, sets: Vec<Tgt>) -> W {
+        W {
+            d: self.d.path().to_path_buf(),
+            sets,
+            dirs: Vec::new(),
+            login: false,
+            mid: true,
+        }
+    }
+    /// The archive `pkg.tgz` (a `pkg-1.0/` tree), served; its sum.
+    fn serve_tgz(&self) -> String {
+        let tree = make_tree(self, "t119");
+        assert!(make_archive(&tree, &self.p("www/pkg.tgz"), "tgz"));
+        sha256(&std::fs::read(self.p("www/pkg.tgz")).unwrap())
+    }
+}
+
+fn mode(p: &Path) -> String {
+    stat(p, "%a")
+}
+
+#[test]
+fn a_from_and_an_unpack_under_another_filesystem_download_and_cache_there_and_the_stage_holds_links()
+ {
+    let e = Env::new();
+    let fsb = e.fsb();
+    std::fs::create_dir_all(fsb.join("etc")).unwrap();
+    std::fs::create_dir_all(fsb.join("opt")).unwrap();
+    e.serve("a.txt", FILE.as_bytes());
+    let sa = sha256(FILE.as_bytes());
+    let st = e.serve_tgz();
+    let w = e.w(vec![
+        Tgt::from("http://fake/a.txt", Some(&sa), &fsb.join("etc/a.txt")),
+        Tgt::unpack("http://fake/pkg.tgz", &st, &fsb.join("opt/pkg")),
+    ]);
+    let (r, out) = e.go_w(&w, std::slice::from_ref(&fsb));
+    assert_eq!(status(&r), &HostStatus::Changed, "{out}\n{}", r.render());
+    assert_eq!(
+        std::fs::read(fsb.join("etc/a.txt")).unwrap(),
+        FILE.as_bytes()
+    );
+    assert_eq!(
+        std::fs::read_to_string(fsb.join("opt/pkg/README")).unwrap(),
+        "readme\n"
+    );
+    // each was downloaded once, onto fsB
+    let log = e.log();
+    assert_eq!(log.lines().count(), 2, "{log}");
+    let down = e.outlog();
+    let pre = format!("{}/.telepatch/tmp/", fsb.display());
+    assert_eq!(down.len(), 2, "{down:?}");
+    for (i, d) in down.iter().enumerate() {
+        assert!(
+            d.starts_with(&pre) && d.ends_with(&format!("/fetch/{i}.part")),
+            "{d}"
+        );
+    }
+    // mid-run: the stage holds links (and its index) and nothing else ...
+    let c = format!("{}/.telepatch/cache/sha256", fsb.display());
+    let mut want = vec![
+        "link f-".to_string() + &sa + " " + &c + "/" + &sa,
+        "link f-".to_string() + &st + " " + &c + "/" + &st,
+        "other fsroots".to_string(),
+    ];
+    want.sort();
+    let mut got: Vec<String> = e.mid("mid_stage").lines().map(str::to_string).collect();
+    got.sort();
+    assert_eq!(got, want);
+    assert_eq!(e.mid("mid_roots"), format!("{}\n", fsb.display()));
+    // ... and fsB holds the chain and the cache entries, root-owned 0644/0755
+    let fs = e.mid("mid_fsb");
+    for line in [
+        "cache d 755",
+        "cache/sha256 d 755",
+        "tmp d 711",
+        "tmp/<run> d 711",
+        "tmp/<run>/fetch d 711",
+    ] {
+        assert!(fs.lines().any(|l| l == line), "{line}\n{fs}");
+    }
+    for s in [&sa, &st] {
+        let line = format!("cache/sha256/{s} f 644");
+        assert!(fs.lines().any(|l| l == line), "{line}\n{fs}");
+        assert_eq!(mode(&fsb.join(".telepatch/cache/sha256").join(s)), "644");
+    }
+    assert!(!fs.contains(".part"), "{fs}");
+    // after the run: the cache stays on fsB, the main cache was not used,
+    // and the run's tmp is gone
+    assert_eq!(e.cache(), Vec::<String>::new());
+    assert_eq!(ls(&fsb.join(".telepatch/cache/sha256")), {
+        let mut v = vec![sa.clone(), st.clone()];
+        v.sort();
+        v
+    });
+    assert_eq!(
+        ls(&fsb.join(".telepatch")),
+        ["cache"],
+        "tmp goes when empty"
+    );
+    e.assert_clean();
+    // the unpack's scratch tree is a sibling of the target, not under the
+    // stage nor the tmp
+    let tl = std::fs::read_to_string(e.p("tarlog")).unwrap();
+    for l in tl.lines() {
+        assert!(
+            l.starts_with(&format!("{}/opt/pkg.tp", fsb.display())),
+            "scratch tree {l}"
+        );
+    }
+    assert_eq!(tl.lines().count(), 1, "{tl}");
+}
+
+#[test]
+fn a_target_on_the_stage_s_filesystem_stages_and_caches_as_before() {
+    let e = Env::new();
+    let fsb = e.fsb();
+    std::fs::create_dir_all(&fsb).unwrap();
+    e.serve("a.txt", FILE.as_bytes());
+    let sa = sha256(FILE.as_bytes());
+    let w = e.w(vec![Tgt::from(
+        "http://fake/a.txt",
+        Some(&sa),
+        &e.p("out/a.txt"),
+    )]);
+    let (r, out) = e.go_w(&w, std::slice::from_ref(&fsb));
+    assert_eq!(status(&r), &HostStatus::Changed, "{out}\n{}", r.render());
+    assert_eq!(std::fs::read(e.p("out/a.txt")).unwrap(), FILE.as_bytes());
+    let down = e.outlog();
+    assert_eq!(down.len(), 1, "{down:?}");
+    assert!(
+        down[0].starts_with(&format!("{}/", e.p("stage").display()))
+            && down[0].ends_with("/0.part"),
+        "{down:?}"
+    );
+    assert_eq!(e.cache(), std::slice::from_ref(&sa));
+    assert_eq!(e.mid("mid_stage"), "", "no links, no index");
+    assert!(!fsb.join(".telepatch").exists(), "fsB is not touched");
+}
+
+#[test]
+fn a_target_directory_that_does_not_exist_yet_uses_its_nearest_ancestor() {
+    let e = Env::new();
+    let fsb = e.fsb();
+    std::fs::create_dir_all(&fsb).unwrap();
+    e.serve("a.txt", FILE.as_bytes());
+    let sa = sha256(FILE.as_bytes());
+    let t = fsb.join("new/deep/dir/a.txt");
+    let mut w = e.w(vec![Tgt::from("http://fake/a.txt", Some(&sa), &t)]);
+    w.dirs = vec![fsb.join("new/deep/dir").display().to_string()];
+    let (r, out) = e.go_w(&w, std::slice::from_ref(&fsb));
+    assert_eq!(status(&r), &HostStatus::Changed, "{out}\n{}", r.render());
+    assert_eq!(std::fs::read(&t).unwrap(), FILE.as_bytes());
+    let down = e.outlog();
+    assert!(
+        down.len() == 1 && down[0].starts_with(&format!("{}/.telepatch/tmp/", fsb.display())),
+        "{down:?}"
+    );
+    assert_eq!(e.cache(), Vec::<String>::new());
+    assert!(fsb.join(".telepatch/cache/sha256").join(&sa).is_file());
+    e.assert_clean();
+}
+
+#[test]
+fn one_url_for_two_filesystems_is_downloaded_once_on_the_first_consumer_s() {
+    let e = Env::new();
+    let (fsb, fsc) = (e.fsb(), e.p("fsC"));
+    std::fs::create_dir_all(&fsb).unwrap();
+    std::fs::create_dir_all(&fsc).unwrap();
+    e.serve("a.txt", FILE.as_bytes());
+    let sa = sha256(FILE.as_bytes());
+    let w = e.w(vec![
+        Tgt::from("http://fake/a.txt", Some(&sa), &fsb.join("a.txt")),
+        Tgt::from("http://fake/a.txt", Some(&sa), &fsc.join("b.txt")),
+    ]);
+    let (r, out) = e.go_w(&w, &[fsb.clone(), fsc.clone()]);
+    assert_eq!(status(&r), &HostStatus::Changed, "{out}\n{}", r.render());
+    assert_eq!(e.log().lines().count(), 1, "{}", e.log());
+    assert_eq!(std::fs::read(fsb.join("a.txt")).unwrap(), FILE.as_bytes());
+    assert_eq!(std::fs::read(fsc.join("b.txt")).unwrap(), FILE.as_bytes());
+    let down = e.outlog();
+    assert!(
+        down.len() == 1 && down[0].starts_with(&format!("{}/.telepatch/tmp/", fsb.display())),
+        "first consumer's filesystem: {down:?}"
+    );
+    assert!(
+        e.mid("mid_stage").contains(&format!(
+            "link f-{sa} {}/.telepatch/cache/sha256/{sa}",
+            fsb.display()
+        )),
+        "{}",
+        e.mid("mid_stage")
+    );
+    assert!(!fsc.join(".telepatch").exists(), "nothing staged on fsC");
+    // the op that copies across names the move once; the first consumer,
+    // whose target is where the file was staged, says nothing
+    let note = format!(
+        "telepatch: fetch http://fake/a.txt: staged on {}, target now on {}",
+        fsb.display(),
+        fsc.display()
+    );
+    assert_eq!(out.matches(&note).count(), 1, "{out}");
+    assert_eq!(out.matches("target now on").count(), 1, "{out}");
+    assert_eq!(e.cache(), Vec::<String>::new());
+    e.assert_clean();
+}
+
+#[test]
+fn a_second_run_hits_the_cache_on_the_other_filesystem_with_no_download() {
+    let e = Env::new();
+    let fsb = e.fsb();
+    std::fs::create_dir_all(&fsb).unwrap();
+    e.serve("a.txt", FILE.as_bytes());
+    let sa = sha256(FILE.as_bytes());
+    let t = fsb.join("a.txt");
+    let w = e.w(vec![Tgt::from("http://fake/a.txt", Some(&sa), &t)]);
+    let (r1, out1) = e.go_w(&w, std::slice::from_ref(&fsb));
+    assert_eq!(status(&r1), &HostStatus::Changed, "{out1}");
+    assert_eq!(e.log().lines().count(), 1);
+    // run 2: the target is gone, the cache entry on fsB is what places it
+    std::fs::remove_file(&t).unwrap();
+    let (r2, out2) = e.go_w(&w, std::slice::from_ref(&fsb));
+    assert_eq!(status(&r2), &HostStatus::Changed, "{out2}\n{}", r2.render());
+    assert_eq!(e.log(), "", "no curl call");
+    assert_eq!(e.outlog(), Vec::<String>::new());
+    assert_eq!(std::fs::read(&t).unwrap(), FILE.as_bytes());
+    assert_eq!(r2.hosts[0].fetches[0].state, FetchState::Cached);
+    assert!(
+        e.mid("mid_stage").contains(&format!(
+            "link f-{sa} {}/.telepatch/cache/sha256/{sa}",
+            fsb.display()
+        )),
+        "{}",
+        e.mid("mid_stage")
+    );
+    // the cache is never removed by the run's cleanup
+    assert!(fsb.join(".telepatch/cache/sha256").join(&sa).is_file());
+    assert_eq!(ls(&fsb.join(".telepatch")), ["cache"]);
+    // run 3: settled, still no call
+    let (r3, out3) = e.go_w(&w, std::slice::from_ref(&fsb));
+    assert_eq!(status(&r3), &HostStatus::Ok, "{out3}");
+    assert_eq!(e.log(), "");
+    e.assert_clean();
+}
+
+#[test]
+fn an_unverified_download_is_staged_on_the_other_filesystem_and_cleaned() {
+    let e = Env::new();
+    let fsb = e.fsb();
+    std::fs::create_dir_all(&fsb).unwrap();
+    e.serve("blob", b"unverified bytes\n");
+    let t = fsb.join("blob");
+    let w = e.w(vec![Tgt::from("http://fake/blob", None, &t)]);
+    let (r, out) = e.go_w(&w, std::slice::from_ref(&fsb));
+    assert_eq!(status(&r), &HostStatus::Changed, "{out}\n{}", r.render());
+    assert_eq!(std::fs::read(&t).unwrap(), b"unverified bytes\n");
+    assert_eq!(r.hosts[0].fetches[0].state, FetchState::Unverified);
+    let ms = e.mid("mid_stage");
+    let l = ms.lines().find(|l| l.starts_with("link u-")).expect(&ms);
+    let (name, to) = l["link ".len()..].split_once(' ').unwrap();
+    assert!(
+        to.starts_with(&format!("{}/.telepatch/tmp/", fsb.display()))
+            && to.ends_with(&format!("/fetch/{name}")),
+        "{l}"
+    );
+    assert_eq!(e.cache(), Vec::<String>::new(), "never cached");
+    assert!(
+        !fsb.join(".telepatch").exists(),
+        "nothing is left on fsB: {:?}",
+        ls(&fsb)
+    );
+    e.assert_clean();
+}
+
+#[test]
+fn an_unwritable_other_filesystem_blocks_the_host_with_no_fallback_to_the_stage() {
+    use std::os::unix::fs::PermissionsExt;
+    if Command::new("id").arg("-u").output().unwrap().stdout == b"0\n" {
+        eprintln!("skipping: root writes anywhere");
+        return;
+    }
+    let e = Env::new();
+    let fsb = e.fsb();
+    std::fs::create_dir_all(&fsb).unwrap();
+    e.serve("a.txt", FILE.as_bytes());
+    let sa = sha256(FILE.as_bytes());
+    std::fs::create_dir_all(e.p("out")).unwrap();
+    let mut w = e.w(vec![Tgt::from(
+        "http://fake/a.txt",
+        Some(&sa),
+        &fsb.join("a.txt"),
+    )]);
+    w.mid = false;
+    std::fs::set_permissions(&fsb, std::fs::Permissions::from_mode(0o555)).unwrap();
+    let (r, out) = e.go_w(&w, std::slice::from_ref(&fsb));
+    std::fs::set_permissions(&fsb, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let HostStatus::Blocked(why) = status(&r) else {
+        panic!("{:?}\n{out}\n{}", status(&r), r.render());
+    };
+    let pre = format!(
+        "fetch http://fake/a.txt: cannot stage on {}: ",
+        fsb.display()
+    );
+    assert!(
+        why.starts_with(&pre) && why.ends_with(" (window 1)"),
+        "{why}"
+    );
+    assert_eq!(e.log(), "", "nothing was downloaded");
+    assert!(!fsb.join("a.txt").exists());
+    assert_eq!(
+        e.cache(),
+        Vec::<String>::new(),
+        "no fallback to the stage's cache"
+    );
+    assert_eq!(ls(&fsb), Vec::<String>::new());
+    e.assert_clean();
+}
+
+#[test]
+fn an_as_user_root_op_reads_a_file_staged_on_the_other_filesystem() {
+    let e = Env::new();
+    let fsb = e.fsb();
+    std::fs::create_dir_all(&fsb).unwrap();
+    e.serve("a.txt", FILE.as_bytes());
+    let sa = sha256(FILE.as_bytes());
+    let mut w = e.w(vec![Tgt::from(
+        "http://fake/a.txt",
+        Some(&sa),
+        &fsb.join("a.txt"),
+    )]);
+    w.login = true;
+    let (r, out) = e.go_w(&w, std::slice::from_ref(&fsb));
+    assert_eq!(status(&r), &HostStatus::Changed, "{out}\n{}", r.render());
+    assert_eq!(std::fs::read(fsb.join("a.txt")).unwrap(), FILE.as_bytes());
+    // staged files are readable by anyone who can traverse: 0644 files in
+    // 0711 and 0755 directories
+    let fs = e.mid("mid_fsb");
+    assert!(fs.lines().any(|l| l == "tmp/<run>/fetch d 711"), "{fs}");
+    assert!(
+        fs.lines().any(|l| l == format!("cache/sha256/{sa} f 644")),
+        "{fs}"
+    );
+    e.assert_clean();
+}
+
+/// A run of a dead controller: its stage directory (index `fsroots`) and
+/// its `tmp` on fsB, with some fetch and undo data.
+fn dead_run(e: &Env, name: &str, age: &str) {
+    let fsb = e.fsb();
+    let t = fsb.join(".telepatch/tmp").join(name);
+    std::fs::create_dir_all(t.join("fetch")).unwrap();
+    std::fs::create_dir_all(t.join("undo/u/1/old")).unwrap();
+    std::fs::write(t.join("fetch/x.part"), "partial").unwrap();
+    let s = e.p("stage").join(name);
+    std::fs::create_dir_all(&s).unwrap();
+    std::fs::write(s.join("fsroots"), format!("{}\n", fsb.display())).unwrap();
+    let st = Command::new("touch")
+        .args(["-d", age])
+        .arg(&s)
+        .status()
+        .unwrap();
+    assert!(st.success());
+}
+
+#[test]
+fn the_stale_sweep_removes_an_old_run_s_tmp_on_the_other_filesystem_and_nothing_else() {
+    let e = Env::new();
+    let fsb = e.fsb();
+    std::fs::create_dir_all(&fsb).unwrap();
+    e.serve("a.txt", FILE.as_bytes());
+    let sa = sha256(FILE.as_bytes());
+    // fsB's cache holds an entry from some earlier run
+    let old_sum = sha256(b"older download");
+    let cache = fsb.join(".telepatch/cache/sha256");
+    std::fs::create_dir_all(&cache).unwrap();
+    std::fs::write(cache.join(&old_sum), "older download").unwrap();
+    dead_run(&e, "old", "3 days ago");
+    dead_run(&e, "young", "10 minutes ago");
+    let w = e.w(vec![Tgt::from(
+        "http://fake/a.txt",
+        Some(&sa),
+        &fsb.join("a.txt"),
+    )]);
+    let (r, out) = e.go_w(&w, std::slice::from_ref(&fsb));
+    assert_eq!(status(&r), &HostStatus::Changed, "{out}\n{}", r.render());
+    // the old run is gone from both places
+    assert!(!fsb.join(".telepatch/tmp/old").exists());
+    assert!(!e.p("stage/old").exists());
+    // what must stay: another run's tmp younger than the threshold (its
+    // fetch and undo data included), the cache entries, and the parents
+    let y = fsb.join(".telepatch/tmp/young");
+    assert!(y.join("fetch/x.part").is_file());
+    assert!(y.join("undo/u/1/old").is_dir());
+    assert!(e.p("stage/young/fsroots").is_file());
+    assert_eq!(
+        std::fs::read(cache.join(&old_sum)).unwrap(),
+        b"older download"
+    );
+    assert!(cache.join(&sa).is_file(), "this run's entry stays too");
+    assert_eq!(ls(&fsb.join(".telepatch/tmp")), ["young"]);
+    assert!(out.contains("from run old removed"), "{out}");
+    assert!(
+        out.contains("from run young, less than 24 h old, left"),
+        "{out}"
+    );
+    // this run's own tmp is gone
+    assert_eq!(ls(&e.p("stage")), ["young"]);
+}
