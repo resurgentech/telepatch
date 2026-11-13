@@ -169,12 +169,73 @@ async fn shell_death_fails_in_flight_ops() {
     sh.send(1, "kill -9 $$\n").await.unwrap();
     let h = host();
     h.raw("echo never");
-    let ids = send_all(&mut sh, &h).await;
+    // The shell may already be gone when the next op is written: the send
+    // then fails with `Died` (a broken pipe), and that is the op's failure,
+    // not a bug. Either outcome is fine; nothing else is.
+    let mut ids = vec![];
+    for (i, n) in h.snapshot().nodes.iter().enumerate() {
+        if let Node::Op(op) = n {
+            match sh.send_op(op, i, &h.os).await {
+                Ok(()) | Err(ShellError::Died { .. }) => ids.push(i),
+                Err(e) => panic!("send after the kill: {e:?}"),
+            }
+        }
+    }
     assert!(matches!(sh.wait(1).await, Err(ShellError::Died { .. })));
     assert!(matches!(
         sh.wait(ids[0]).await,
         Err(ShellError::Died { .. })
     ));
+}
+
+/// The race above made deterministic: the shell is known dead before the
+/// send. The send fails with `Died`, and the op's `wait` says `Died` too
+/// (not `UnknownOp`, and it does not hang).
+///
+/// "Dead" is the process gone, not only its output closed: the kernel
+/// closes a dying process's descriptors one at a time, so for a moment
+/// after stdout's EOF a write to stdin can still land in the pipe (about 1
+/// run in 200 under load). The test waits until `/proc/<pid>` is gone or a
+/// zombie.
+#[tokio::test]
+async fn send_to_a_dead_shell_is_the_ops_failure() {
+    let mut sh = open_root().await;
+    let h = host();
+    h.raw("echo $$");
+    h.raw("echo never");
+    let snap = h.snapshot();
+    let ops: Vec<_> = snap
+        .nodes
+        .iter()
+        .filter_map(|n| match n {
+            Node::Op(op) => Some(op),
+            _ => None,
+        })
+        .collect();
+    sh.send_op(ops[0], 0, &h.os).await.unwrap();
+    let out = sh.wait(0).await.unwrap().output;
+    let pid = String::from_utf8(out).unwrap().trim().to_string();
+    sh.send(1, "kill -9 $$\n").await.unwrap();
+    assert!(matches!(sh.wait(1).await, Err(ShellError::Died { .. })));
+    let t0 = std::time::Instant::now();
+    loop {
+        match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+            Err(_) => break,
+            Ok(st) if st.rsplit(") ").next().is_some_and(|r| r.starts_with('Z')) => break,
+            Ok(_) => {}
+        }
+        assert!(
+            t0.elapsed() < std::time::Duration::from_secs(10),
+            "shell {pid} never ended"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+    }
+    let sent = sh.send_op(ops[1], 2, &h.os).await;
+    assert!(matches!(sent, Err(ShellError::Died { .. })), "{sent:?}");
+    let got = tokio::time::timeout(std::time::Duration::from_secs(10), sh.wait(2))
+        .await
+        .expect("wait on an op sent to a dead shell hung");
+    assert!(matches!(got, Err(ShellError::Died { .. })), "{got:?}");
 }
 
 /// Write an executable script. It is written by a child `sh`, not by this
