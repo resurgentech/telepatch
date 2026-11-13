@@ -1730,3 +1730,22 @@ are appended, never edited in; a hook refuses rewrites.
   GREEN: 1000 runs, 0 failures; `cargo test --workspace` 5x green
   (1007 passed each); lint, tp_basic test+lint, check-sandbox ok.
 - Commits: telepatch 4c502d0
+
+## 2026-11-13 — T126 Undo and fetch helpers defined once per shell, not in every op script
+
+- `init_shell` defines `ops::undo::HELPERS` (incl. T124's `tp_sbx`) and
+  sets `__tp_hv` (FNV-1a 64 of the text) on every shell: root, login
+  and its reopens, post-reboot root, cleanup's fresh root, the killer.
+- File, unit, repo and the undo preparation op start with one guard
+  line; a stale hash or missing `tp_save` ends the op with rc 125, a
+  trailer and `telepatch: shell helpers missing or stale (want <hash>)`.
+- Plans with a capturing op show `shell helpers: undo <hash8>` once
+  per host. `trailer::with_helpers` for hand-run scripts. Trailer
+  PRELUDE stays per op (Q-H1). The note describes the helpers once.
+  Fetch `place`/`unpack` carried no copy (they run inside the file op).
+- Snapshots audited line by line: telepatch −1580 helper lines (20 ops
+  × 79), +20 guard, +9 header; tp_basic −32153 (407 × 79), +407 guard,
+  +140 header; nothing else.
+- Gate E green: telepatch 1014 passed, lint; tp_basic 52 passed, lint;
+  check-sandbox unchanged.
+- Commits: telepatch c2e6aea; tp_basic 509b077
