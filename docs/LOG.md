@@ -1701,3 +1701,17 @@ are appended, never edited in; a hook refuses rewrites.
 - Gate E green: telepatch+tp_basic 1058 passed, lint clean;
   check-sandbox unchanged.
 - Commits: telepatch c1bb04f; tp_basic e947ef8
+
+## 2026-11-13 — T127 tp_basic: fix four clippy errors and add `just lint`
+
+- `admin_users.rs`: a doc line no longer starts with `>` (two
+  doc-quote errors); the doc comment's tab is written `<TAB>`.
+  `rust_kernel.rs`: unused `sh` import dropped. No behaviour change.
+- tp_basic `just lint`: `cargo fmt --check` and `cargo clippy
+  --all-targets -- -D warnings`. `cargo fmt` reformatted `docker.rs`,
+  `golang.rs`, `tests/hacks.rs`, `tests/plans.rs` (formatting only),
+  which the recipe's `fmt --check` needed.
+- Gates E and B now include tp_basic `just lint` (roadmap Common gates).
+- Gate B green: tp_basic 52 passed, plan snapshots unchanged, lint,
+  check-conversion and oracle self-tests ok.
+- Commits: tp_basic 4c4ac61
