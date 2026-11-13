@@ -1664,3 +1664,20 @@ are appended, never edited in; a hook refuses rewrites.
 - No plan text or snapshot moved in either repo.
 - Gate E green: telepatch 990 passed, lint clean; tp_basic 52 passed.
 - Commits: telepatch c108ab1
+
+## 2026-11-13 — T109 `--check`: the note's counts, and file probes after earlier changes
+
+- `[prepare] N will change, K ok, B blocked`, in trace ops (merged pkg
+  members once each): N pending, K probed and settled, run-time ops in
+  neither with their reason; exit status unchanged (still from findings).
+- File lines after an earlier window's change add `(as the host is now;
+  the earlier windows' changes may differ)`; after an earlier op in the
+  window writing the same path or a parent, `(as the host is now; this
+  window's earlier ops may differ)`. `*` writes do not count.
+- `CheckInfo` gains `will_ops`, `ok_ops`; the `[prepare]` check event
+  carries them. Module doc updated. No snapshot moved.
+- Gate E green: telepatch 996 passed, lint clean; tp_basic 52 passed.
+  One gate-hook run hit a load flake in
+  `op_kill::a_termed_op_still_prints_its_trailer_with_rc_143` (5 s
+  wait); five isolated reruns ok; the retry passed.
+- Commits: telepatch 4b78b5c
