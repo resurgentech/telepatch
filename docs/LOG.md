@@ -1652,3 +1652,15 @@ are appended, never edited in; a hook refuses rewrites.
 - Snapshots: telepatch 4, tp_basic 49, capture lines only.
 - Gate E green: telepatch 987 passed, lint clean; tp_basic 52 passed.
 - Commits: telepatch f9a1024; tp_basic 18c5fba
+
+## 2026-11-13 — T108 `sh` `.undo(..)` and "sh without undo"
+
+- `.undo(cmd)` on the `sh!` handle stores the command (`ShellSpec.undo`);
+  nothing runs or captures it. `has_inverse(Shell)` is `undo.is_some()`;
+  `Raw` stays false. `.undo` on a non-sh op is a trace error.
+- `[coverage] r: n ops, m reversible, k sh without undo` when k > 0
+  (k: ops of kind `sh` with no inverse, `Raw` included); unchanged when
+  k = 0. The `sh!` warning still fires. Note's `sh` row: `.undo` built.
+- No plan text or snapshot moved in either repo.
+- Gate E green: telepatch 990 passed, lint clean; tp_basic 52 passed.
+- Commits: telepatch c108ab1
