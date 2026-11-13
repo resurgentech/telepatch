@@ -381,6 +381,9 @@ pub enum RenderError {
     /// `shell_user`'s. Switching to another user (`sudo -iu`) is not
     /// implemented yet.
     UserSwitchUnsupported { user: String, shell_user: String },
+    /// A line of a script given to a here-doc equals the here-doc's
+    /// delimiter, which would end the script early. Never cut silently.
+    ScriptHasDelimiter { delimiter: String },
 }
 
 impl std::fmt::Display for RenderError {
@@ -390,11 +393,28 @@ impl std::fmt::Display for RenderError {
                 f,
                 "as_user({user}) from a {shell_user} shell: switching users is not supported yet"
             ),
+            RenderError::ScriptHasDelimiter { delimiter } => write!(
+                f,
+                "a script line equals its here-doc delimiter {delimiter}: refusing to cut the script"
+            ),
         }
     }
 }
 
 impl std::error::Error for RenderError {}
+
+/// `script` as the body of a quoted here-doc ended by `delimiter`: the
+/// text, a final newline if it lacks one, then the delimiter line. A line
+/// equal to the delimiter is an error: the shell would end the script there.
+pub(crate) fn heredoc_body(script: &str, delimiter: &str) -> Result<String, RenderError> {
+    if script.lines().any(|l| l == delimiter) {
+        return Err(RenderError::ScriptHasDelimiter {
+            delimiter: delimiter.to_string(),
+        });
+    }
+    let nl = if script.ends_with('\n') { "" } else { "\n" };
+    Ok(format!("{script}{nl}{delimiter}\n"))
+}
 
 const LOGIN_PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
 
@@ -482,12 +502,41 @@ pub fn render_with(
     if plain.contains("$__tp_run") {
         pass.push_str("__tp_run=\"${__tp_run-}\" ");
     }
+    // The script goes to the login bash on fd 9 from a quoted here-doc, never
+    // as an argument: an argument is capped (128 KiB) and shows in `ps`.
+    let delim = format!("__tp_S_{nonce}_{id}");
+    let body = heredoc_body(&plain, &delim)?;
     Ok(format!(
         "(\n__tp_pw=$(getent passwd {q}) || __tp_pw=\n\
          if [ -z \"$__tp_pw\" ]; then\n{failed}else\n\
          IFS=: read -r _ _ _ _ _ __tp_home __tp_shell <<<\"$__tp_pw\"\n\
-         env -i {pass}HOME=\"$__tp_home\" USER={q} LOGNAME={q} SHELL=\"$__tp_shell\" PATH={LOGIN_PATH} bash -l -c {}\n\
+         env -i {pass}HOME=\"$__tp_home\" USER={q} LOGNAME={q} SHELL=\"$__tp_shell\" PATH={LOGIN_PATH} bash -l /dev/fd/9 9<<'{delim}'\n\
+         {body}\
          fi\n) </dev/null\n",
-        crate::sh::quote(&plain)
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_script_line_equal_to_the_delimiter_is_a_render_error() {
+        let d = "__tp_S_n0nce_7";
+        assert_eq!(
+            heredoc_body(&format!("echo a\n{d}\necho b\n"), d),
+            Err(RenderError::ScriptHasDelimiter {
+                delimiter: d.to_string()
+            })
+        );
+        // Only a whole line counts; a longer or indented line is body text.
+        assert_eq!(
+            heredoc_body(&format!("echo {d}\n {d}\n{d}x"), d).unwrap(),
+            format!("echo {d}\n {d}\n{d}x\n{d}\n")
+        );
+        assert_eq!(
+            heredoc_body("echo a\n", d).unwrap(),
+            format!("echo a\n{d}\n")
+        );
+    }
 }

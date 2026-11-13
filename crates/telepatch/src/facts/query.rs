@@ -288,12 +288,37 @@ fn pkg_probe(name: &str, family: Option<&Family>) -> String {
 /// Run `cmd` in a fresh bash. Stdout is preserved, including a trailing
 /// newline; stderr is discarded so it does not join the shell's merged
 /// stream. The temp file is removed before the probe returns.
+///
+/// The command reaches bash on fd 9 from a quoted here-doc, never as an
+/// argument (no size cap, not in `ps`). The delimiter is a digest of the
+/// command plus a counter: a script cannot hold a line equal to a digest of
+/// itself, and if one ever did, the counter moves to the next delimiter
+/// ([`check_probe_with`] is the error form).
 fn check_probe(cmd: &str) -> String {
-    let c = quote(cmd);
-    format!(
+    for counter in 0..64 {
+        if let Ok(s) = check_probe_with(cmd, counter) {
+            return s;
+        }
+    }
+    unreachable!("64 delimiters in a row each equal a line of the command")
+}
+
+/// [`check_probe`] with the delimiter for `counter`; an error when a line of
+/// `cmd` equals it.
+fn check_probe_with(cmd: &str, counter: u32) -> Result<String, crate::trailer::RenderError> {
+    use sha2::{Digest, Sha256};
+    let digest: String = Sha256::digest(cmd.as_bytes())
+        .iter()
+        .take(8)
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    let delim = format!("__tp_C_{digest}_{counter}");
+    let body = crate::trailer::heredoc_body(cmd, &delim)?;
+    Ok(format!(
         "tp_f=$(mktemp 2>/dev/null) || tp_f=\n\
          if [ -z \"$tp_f\" ]; then printf '%s\\n%s\\n' 1 0; else\n\
-         bash -c {c} >\"$tp_f\" 2>/dev/null\n\
+         bash /dev/fd/9 >\"$tp_f\" 2>/dev/null 9<<'{delim}'\n\
+         {body}\
          tp_rc=$?\n\
          printf '%s\\n' \"$tp_rc\"\n\
          wc -c < \"$tp_f\" | tr -d '[:space:]'\n\
@@ -301,7 +326,7 @@ fn check_probe(cmd: &str) -> String {
          cat \"$tp_f\"\n\
          rm -f -- \"$tp_f\"\n\
          fi\n"
-    )
+    ))
 }
 
 fn parse_check(stdout: &str) -> Value {
@@ -442,5 +467,18 @@ mod tests {
                 stdout: String::new(),
             })
         );
+    }
+
+    #[test]
+    fn check_probe_takes_the_command_on_fd_9() {
+        let probe = check_probe("echo hi");
+        assert!(
+            probe.contains("bash /dev/fd/9 >\"$tp_f\" 2>/dev/null 9<<'__tp_C_"),
+            "{probe}"
+        );
+        assert!(!probe.contains("bash -c"), "{probe}");
+        // The same command always renders the same probe.
+        assert_eq!(probe, check_probe("echo hi"));
+        assert_ne!(probe, check_probe("echo ho"));
     }
 }
