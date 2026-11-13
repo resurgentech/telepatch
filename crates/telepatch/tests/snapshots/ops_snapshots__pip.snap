@@ -2,7 +2,8 @@
 source: crates/telepatch/tests/ops_snapshots.rs
 expression: "wrapped(&h, id)"
 ---
-(
+{ (
+exec 2>&3 3>&-
 __tp_esc() { local s=${1//\\/\\\\}; s=${s//\"/\\\"}; printf %s "$s"; }
 __tp_emit() {
   if [ "$1" -ne 0 ]; then rc=$1; fi
@@ -14,7 +15,9 @@ __tp_emit() {
   printf '\n__tp_testnonce 0 {"rc":%s,"changed":%s,"installed":[%s]}\n' "$rc" "$__tp_c" "$__tp_i"
 }
 trap '__tp_emit $?' EXIT
+trap 'exit 143' TERM
 rc=0; changed=0; skipped=0; installed=()
+printf '\n__tpS_testnonce 0 %s %s\n' "$BASHPID" "$$"
 rc=0; changed=0; installed=()
 tp_want=('requests' 'pyyaml')
 tp_missing=()
@@ -32,4 +35,4 @@ if [ "$rc" -eq 0 ]; then
   fi
 fi
 exit "$rc"
-) </dev/null
+) </dev/null; } 3>&2 2>/dev/null

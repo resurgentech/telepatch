@@ -15,6 +15,12 @@
 //! one at a time in write order, so bytes before a trailer belong to the
 //! oldest op still in flight. A line shaped like a trailer but with another
 //! nonce is plain output.
+//!
+//! Besides the trailer, an op that runs prints one start line,
+//! `\n__tpS_<nonce> <id> <pid> <shell_pid>\n` (see [`crate::trailer`]), which
+//! becomes [`Event::Started`] and is never output. A skipped op prints no
+//! start line. Under `set -m` (the executor sets it) `pid` is the op's
+//! process group, so a controller can signal the op from a second shell.
 
 mod split;
 
@@ -70,6 +76,17 @@ pub struct OpOutput {
 /// One step of the stream, in order.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Event {
+    /// The op's subshell has started: `pid` is its `$BASHPID`, which is
+    /// its process group id under `set -m`, and `shell_pid` is the
+    /// persistent shell's `$$` (to check identity before a kill). A guard
+    /// skip or a halt skip never starts, so its `Done` has no `Started`.
+    /// Seeing it also means every earlier op still in flight has ended
+    /// without a trailer ([`ShellError::TrailerLost`] arrives first).
+    Started {
+        id: usize,
+        pid: i32,
+        shell_pid: i32,
+    },
     Output(usize, Vec<u8>),
     Done(usize, Trailer),
     Failed(usize, ShellError),
@@ -87,6 +104,7 @@ pub enum SpawnError {
 
 enum Raw {
     Bytes(Vec<u8>),
+    Started { id: usize, pid: i32, shell_pid: i32 },
     Trailer(Trailer),
     Eof,
 }
@@ -156,6 +174,9 @@ impl Shell {
                             let raw = match p {
                                 Piece::Output(b) => Raw::Bytes(b),
                                 Piece::Trailer(t) => Raw::Trailer(t),
+                                Piece::Started { id, pid, shell_pid } => {
+                                    Raw::Started { id, pid, shell_pid }
+                                }
                             };
                             if tx.send(raw).is_err() {
                                 return;
@@ -266,6 +287,20 @@ impl Shell {
                         return Some(Event::Output(id, b));
                     }
                 }
+                Raw::Started { id, pid, shell_pid } => {
+                    let Some(pos) = self.inflight.iter().position(|&i| i == id) else {
+                        continue;
+                    };
+                    // Ops run one at a time: an earlier op still in flight
+                    // ended without printing its trailer (it was killed).
+                    for _ in 0..pos {
+                        let lost = self.inflight.pop_front().unwrap();
+                        self.pending
+                            .push_back(Event::Failed(lost, ShellError::TrailerLost));
+                    }
+                    self.pending
+                        .push_back(Event::Started { id, pid, shell_pid });
+                }
                 Raw::Trailer(t) => {
                     let Some(pos) = self.inflight.iter().position(|&i| i == t.id) else {
                         continue; // not ours; cannot attribute it
@@ -304,6 +339,7 @@ impl Shell {
                 return Err(ShellError::UnknownOp(id));
             }
             match self.next_event().await {
+                Some(Event::Started { .. }) => {}
                 Some(Event::Output(i, b)) => self.partial.entry(i).or_default().extend(b),
                 Some(Event::Done(i, trailer)) => {
                     let output = self.partial.remove(&i).unwrap_or_default();

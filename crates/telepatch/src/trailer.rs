@@ -6,19 +6,41 @@
 //! [`render_op`] produces a subshell:
 //!
 //! ```text
-//! (
+//! { (
+//! exec 2>&3 3>&-                      # the op's own stderr: the stream
 //! __tp_esc() { ... }                  # JSON string escaping helper
 //! __tp_emit() { ... }                 # prints the trailer; runs on EXIT
 //! trap '__tp_emit $?' EXIT
+//! trap 'exit 143' TERM                # a TERMed op still prints its trailer
 //! rc=0; changed=0; skipped=0; installed=()
+//! printf '\n__tpS_<nonce> <id> %s %s\n' "$BASHPID" "$$"   # the start line
 //! <op body: sets rc / changed / skipped / installed>
 //! exit "$rc"
-//! )
+//! ) </dev/null; } 3>&2 2>/dev/null
 //! ```
 //!
 //! Because the trailer is printed by an `EXIT` trap inside the subshell, it
 //! is emitted on every exit path, including a body that calls `exit N`
 //! (then `rc` is `N`). `cd`, `export` and variables die with the subshell.
+//!
+//! # Start line and process group
+//!
+//! The persistent shell runs under `set -m`, so the op subshell is its own
+//! process group: its pgid is its `$BASHPID`, and its children share it.
+//! The start line carries that pid and `$$` (the persistent shell's pid)
+//! so a controller can `kill -- -PID` the op from a second shell after
+//! checking `$$`. Its framing, `\n__tpS_<nonce> <id> <pid> <shell_pid>\n`,
+//! is not `__tp_`, so it is never taken for a trailer, and the splitter
+//! never shows it as output. A guard skip and a halt skip ([`skip`]) print
+//! none. A login op's start line is printed by the outer subshell, whose
+//! group holds the inner `bash -l`; the inner script is plain.
+//!
+//! The persistent shell's stderr is merged into its stdout. Bash prints a
+//! job notice for a job killed by a signal, and the notice holds the whole
+//! script, so the group `{ ...; } 3>&2 2>/dev/null` swaps the parent's
+//! stderr for `/dev/null` around the op only; the op's subshell puts its
+//! own stderr back (`exec 2>&3`). A TERMed op exits 143 through the trap
+//! and prints its trailer; a KILLed op prints none.
 //!
 //! The trailer is the byte sequence `"\n__tp_<nonce> <id> <json>\n"`. The
 //! leading `\n` is a *separator*, always printed: an op whose output lacks a
@@ -217,9 +239,11 @@ impl Trailer {
     }
 }
 
-/// Split captured stdout into `(output, trailer)` pairs for `nonce`. Text
+/// Split captured stdout into `(output, trailer)` pairs for `nonce`; start
+/// lines are dropped. Text
 /// after the last trailer (an op still running) is dropped.
 pub fn split_stream(stream: &str, nonce: &str) -> Vec<(String, Trailer)> {
+    let stream = &strip_start_lines(stream, nonce);
     let marker = format!("\n__tp_{nonce} ");
     let mut out = Vec::new();
     let mut cursor = 0;
@@ -237,6 +261,25 @@ pub fn split_stream(stream: &str, nonce: &str) -> Vec<(String, Trailer)> {
     out
 }
 
+/// `stream` without the start lines (`\n__tpS_<nonce> ...\n`) of `nonce`.
+fn strip_start_lines(stream: &str, nonce: &str) -> String {
+    let marker = format!("\n{START_TAG}{nonce} ");
+    let mut out = String::with_capacity(stream.len());
+    let mut rest = stream;
+    while let Some(i) = rest.find(&marker) {
+        out.push_str(&rest[..i]);
+        match rest[i + 1..].find('\n') {
+            Some(len) => rest = &rest[i + 1 + len + 1..],
+            None => {
+                rest = &rest[i..];
+                break;
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
 const PRELUDE: &str = r#"__tp_esc() { local s=${1//\\/\\\\}; s=${s//\"/\\\"}; printf %s "$s"; }
 __tp_emit() {
   if [ "$1" -ne 0 ]; then rc=$1; fi
@@ -250,7 +293,7 @@ __tp_emit() {
 /// The full script for one op: body wrapped in the trailer subshell.
 /// `id` is the op's trace index; `nonce` is random per run.
 pub fn render_op(op: &OpNode, id: usize, nonce: &str, os: &Os) -> String {
-    render_op_with(op, id, nonce, os, RenderOpts::default())
+    render_op_with(op, id, nonce, os, RenderOpts::default(), true)
 }
 
 /// How [`render_with`] renders an op beyond its spec.
@@ -265,14 +308,21 @@ pub struct RenderOpts {
     pub daemon_reload: bool,
 }
 
-fn render_op_with(op: &OpNode, id: usize, nonce: &str, os: &Os, opts: RenderOpts) -> String {
+fn render_op_with(
+    op: &OpNode,
+    id: usize,
+    nonce: &str,
+    os: &Os,
+    opts: RenderOpts,
+    killable: bool,
+) -> String {
     let body = match &op.spec {
         crate::trace::OpSpec::Raw { script } => crate::ops::shell::raw_body(script),
         crate::trace::OpSpec::Svc(s) if opts.daemon_reload => s.render_exec_reload(),
         crate::trace::OpSpec::Svc(s) => s.render_exec(),
         spec => spec.exec_script(os),
     };
-    wrap_with(op.spec.op_kind(), &body, id, nonce, opts.source)
+    wrap_framed(op.spec.op_kind(), &body, id, nonce, opts.source, killable)
 }
 
 /// Wrap `body` (which sets `rc` / `changed` / ...) in the trailer subshell
@@ -313,6 +363,12 @@ pub fn guard_skip(kind: OpKind, id: usize, nonce: &str) -> String {
     format!("printf '\\n__tp_{nonce} {id} %s\\n' '{json}'\n")
 }
 
+/// The trailer the halt gate prints for an op it does not run: rc 0,
+/// `skipped`. No start line: nothing ran, so there is nothing to kill.
+pub fn skip(kind: OpKind, id: usize, nonce: &str) -> String {
+    wrap_plain(kind, "rc=0\nskipped=1\n", id, nonce, false)
+}
+
 /// Was this trailer printed by [`guard_skip`]?
 pub fn is_guard_skip(t: &Trailer) -> bool {
     serde_json::from_str::<serde_json::Value>(&t.json)
@@ -321,7 +377,35 @@ pub fn is_guard_skip(t: &Trailer) -> bool {
         == Some(false)
 }
 
+/// What follows `\n` and the nonce of the start line: not `__tp_`, so a
+/// start line is never taken for a trailer.
+pub(crate) const START_TAG: &str = "__tpS_";
+
+/// The start line an op's subshell prints once its traps are set: its own
+/// pid (the process group id, under `set -m`) and `$$`, the persistent
+/// shell's pid.
+fn start_line(nonce: &str, id: usize) -> String {
+    format!("printf '\\n{START_TAG}{nonce} {id} %s %s\\n' \"$BASHPID\" \"$$\"\n")
+}
+
+/// `wrap_with` for a skip or a login op's inner script: the plain
+/// subshell, no start line and no stderr swap.
+fn wrap_plain(kind: OpKind, body: &str, id: usize, nonce: &str, record: bool) -> String {
+    wrap_framed(kind, body, id, nonce, record, false)
+}
+
 fn wrap_with(kind: OpKind, body: &str, id: usize, nonce: &str, record: bool) -> String {
+    wrap_framed(kind, body, id, nonce, record, true)
+}
+
+fn wrap_framed(
+    kind: OpKind,
+    body: &str,
+    id: usize,
+    nonce: &str,
+    record: bool,
+    killable: bool,
+) -> String {
     assert!(
         nonce.chars().all(|c| c.is_ascii_alphanumeric()),
         "nonce must be alphanumeric"
@@ -346,7 +430,12 @@ fn wrap_with(kind: OpKind, body: &str, id: usize, nonce: &str, record: bool) -> 
             r#""$rc" "$__tp_c" "$__tp_s" "${tp_was_e:-null}" "${tp_was_a:-null}" "${tp_was_m:-null}" "$__tp_st" "$(__tp_esc "${__tp_drn-}")""#
         }
     };
-    let mut o = String::from("(\n");
+    // The killable op: stderr swapped around it, its own group, a start line.
+    let mut o = String::from(if killable {
+        "{ (\nexec 2>&3 3>&-\n"
+    } else {
+        "(\n"
+    });
     o.push_str(PRELUDE);
     if matches!(kind, OpKind::Group | OpKind::User | OpKind::Git) {
         // Only a group or user op sets `created`; other kinds keep their bytes.
@@ -364,13 +453,21 @@ fn wrap_with(kind: OpKind, body: &str, id: usize, nonce: &str, record: bool) -> 
         });
     }
     let _ = writeln!(o, "  printf '\\n__tp_{nonce} {id} {}\\n' {args}", json);
-    o.push_str("}\ntrap '__tp_emit $?' EXIT\nrc=0; changed=0; skipped=0; installed=()\n");
+    o.push_str("}\ntrap '__tp_emit $?' EXIT\ntrap 'exit 143' TERM\n");
+    o.push_str("rc=0; changed=0; skipped=0; installed=()\n");
+    if killable {
+        o.push_str(&start_line(nonce, id));
+    }
     o.push_str(body);
     if !body.ends_with('\n') {
         o.push('\n');
     }
     // stdin is the shell's op queue: an op must never read it.
-    o.push_str("exit \"$rc\"\n) </dev/null\n");
+    o.push_str(if killable {
+        "exit \"$rc\"\n) </dev/null; } 3>&2 2>/dev/null\n"
+    } else {
+        "exit \"$rc\"\n) </dev/null\n"
+    });
     o
 }
 
@@ -470,7 +567,9 @@ pub fn render_with(
     opts: RenderOpts,
 ) -> Result<String, RenderError> {
     let record = opts.source;
-    let plain = render_op_with(op, id, nonce, os, opts);
+    // A login op's start line and stderr swap belong to the outer subshell,
+    // whose group holds the inner `bash -l`: the inner script is plain.
+    let plain = render_op_with(op, id, nonce, os, opts, !op.run_as.login);
     if !op.run_as.login {
         return Ok(plain);
     }
@@ -485,7 +584,7 @@ pub fn render_with(
         });
     }
     let q = crate::sh::quote(user);
-    let failed = wrap_with(
+    let failed = wrap_plain(
         op.spec.op_kind(),
         &format!("echo \"telepatch: no passwd entry for \"{q} >&2\nrc=1\n"),
         id,
@@ -506,13 +605,20 @@ pub fn render_with(
     // as an argument: an argument is capped (128 KiB) and shows in `ps`.
     let delim = format!("__tp_S_{nonce}_{id}");
     let body = heredoc_body(&plain, &delim)?;
+    // The outer subshell waits for the inner `bash -l` when it is TERMed
+    // (the trap), so the inner's trailer is printed before the next op. Its
+    // own stderr stays /dev/null: the notice bash prints for its killed
+    // `env ... bash -l` job holds the here-doc, the whole script. Only the
+    // inner `bash -l` and the no-passwd message get the real stderr (fd 3).
+    let start = start_line(nonce, id);
     Ok(format!(
-        "(\n__tp_pw=$(getent passwd {q}) || __tp_pw=\n\
-         if [ -z \"$__tp_pw\" ]; then\n{failed}else\n\
+        "{{ (\ntrap 'exit 143' TERM\n{start}\
+         __tp_pw=$(getent passwd {q}) || __tp_pw=\n\
+         if [ -z \"$__tp_pw\" ]; then\n{{\n{failed}}} 2>&3\nelse\n\
          IFS=: read -r _ _ _ _ _ __tp_home __tp_shell <<<\"$__tp_pw\"\n\
-         env -i {pass}HOME=\"$__tp_home\" USER={q} LOGNAME={q} SHELL=\"$__tp_shell\" PATH={LOGIN_PATH} bash -l /dev/fd/9 9<<'{delim}'\n\
+         env -i {pass}HOME=\"$__tp_home\" USER={q} LOGNAME={q} SHELL=\"$__tp_shell\" PATH={LOGIN_PATH} bash -l /dev/fd/9 9<<'{delim}' 2>&3 3>&-\n\
          {body}\
-         fi\n) </dev/null\n",
+         fi\n) </dev/null; }} 3>&2 2>/dev/null\n",
     ))
 }
 

@@ -2,7 +2,8 @@
 source: crates/telepatch/tests/repo.rs
 expression: "format!(\"{}\\n{}\\n{}\", wrapped_display(&h, a), wrapped_display(&f, b),\nwrapped_display(&f, c))"
 ---
-(
+{ (
+exec 2>&3 3>&-
 __tp_esc() { local s=${1//\\/\\\\}; s=${s//\"/\\\"}; printf %s "$s"; }
 __tp_emit() {
   if [ "$1" -ne 0 ]; then rc=$1; fi
@@ -14,7 +15,9 @@ __tp_emit() {
   printf '\n__tp_t0n 0 {"rc":%s,"changed":%s}\n' "$rc" "$__tp_c"
 }
 trap '__tp_emit $?' EXIT
+trap 'exit 143' TERM
 rc=0; changed=0; skipped=0; installed=()
+printf '\n__tpS_t0n 0 %s %s\n' "$BASHPID" "$$"
 tp_n='docker'
 tp_fetch() {
   if ! command -v curl >/dev/null 2>&1; then
@@ -56,9 +59,10 @@ if [ "$rc" -eq 0 ]; then
   fi
 fi
 exit "$rc"
-) </dev/null
+) </dev/null; } 3>&2 2>/dev/null
 
-(
+{ (
+exec 2>&3 3>&-
 __tp_esc() { local s=${1//\\/\\\\}; s=${s//\"/\\\"}; printf %s "$s"; }
 __tp_emit() {
   if [ "$1" -ne 0 ]; then rc=$1; fi
@@ -70,7 +74,9 @@ __tp_emit() {
   printf '\n__tp_t0n 0 {"rc":%s,"changed":%s}\n' "$rc" "$__tp_c"
 }
 trap '__tp_emit $?' EXIT
+trap 'exit 143' TERM
 rc=0; changed=0; skipped=0; installed=()
+printf '\n__tpS_t0n 0 %s %s\n' "$BASHPID" "$$"
 tp_n='docker'
 tp_fetch() {
   if ! command -v curl >/dev/null 2>&1; then
@@ -90,9 +96,10 @@ if [ ! -e "$tp_f" ]; then
   if tp_fetch 'https://download.docker.com/linux/rhel/docker-ce.repo' "$tp_f"; then changed=1; else rc=1; fi
 fi
 exit "$rc"
-) </dev/null
+) </dev/null; } 3>&2 2>/dev/null
 
-(
+{ (
+exec 2>&3 3>&-
 __tp_esc() { local s=${1//\\/\\\\}; s=${s//\"/\\\"}; printf %s "$s"; }
 __tp_emit() {
   if [ "$1" -ne 0 ]; then rc=$1; fi
@@ -104,7 +111,9 @@ __tp_emit() {
   printf '\n__tp_t0n 1 {"rc":%s,"changed":%s}\n' "$rc" "$__tp_c"
 }
 trap '__tp_emit $?' EXIT
+trap 'exit 143' TERM
 rc=0; changed=0; skipped=0; installed=()
+printf '\n__tpS_t0n 1 %s %s\n' "$BASHPID" "$$"
 tp_n='docker'
 tp_put() {
   if [ -f "$1" ] && [ "$(tp_render "$2" | sha256sum | cut -d' ' -f1)" = "$(sha256sum < "$1" | cut -d' ' -f1)" ]; then return 0; fi
@@ -127,4 +136,4 @@ gpgkey=https://download.docker.com/linux/rhel/gpg
 tp_f='/etc/yum.repos.d/docker.repo'
 if ! tp_put "$tp_f" ''; then rc=1; fi
 exit "$rc"
-) </dev/null
+) </dev/null; } 3>&2 2>/dev/null

@@ -2,7 +2,8 @@
 source: crates/telepatch/tests/user.rs
 expression: "format!(\"{}\\n{}\\n{}\", wrapped_display(&h, a), wrapped_display(&h, b),\nwrapped_display(&h, c))"
 ---
-(
+{ (
+exec 2>&3 3>&-
 __tp_esc() { local s=${1//\\/\\\\}; s=${s//\"/\\\"}; printf %s "$s"; }
 __tp_emit() {
   if [ "$1" -ne 0 ]; then rc=$1; fi
@@ -15,7 +16,9 @@ __tp_emit() {
   printf '\n__tp_t0n 0 {"rc":%s,"changed":%s,"created":%s}\n' "$rc" "$__tp_c" "$__tp_k"
 }
 trap '__tp_emit $?' EXIT
+trap 'exit 143' TERM
 rc=0; changed=0; skipped=0; installed=()
+printf '\n__tpS_t0n 0 %s %s\n' "$BASHPID" "$$"
 created=0
 tp_u='tpdev'
 if [ "$rc" -eq 0 ]; then
@@ -28,9 +31,10 @@ else
 fi
 fi
 exit "$rc"
-) </dev/null
+) </dev/null; } 3>&2 2>/dev/null
 
-(
+{ (
+exec 2>&3 3>&-
 __tp_esc() { local s=${1//\\/\\\\}; s=${s//\"/\\\"}; printf %s "$s"; }
 __tp_emit() {
   if [ "$1" -ne 0 ]; then rc=$1; fi
@@ -43,7 +47,9 @@ __tp_emit() {
   printf '\n__tp_t0n 1 {"rc":%s,"changed":%s,"created":%s}\n' "$rc" "$__tp_c" "$__tp_k"
 }
 trap '__tp_emit $?' EXIT
+trap 'exit 143' TERM
 rc=0; changed=0; skipped=0; installed=()
+printf '\n__tpS_t0n 1 %s %s\n' "$BASHPID" "$$"
 created=0
 tp_u='tpdev'
 for tp_g in 'sudo' 'docker'; do
@@ -80,9 +86,10 @@ else
 fi
 fi
 exit "$rc"
-) </dev/null
+) </dev/null; } 3>&2 2>/dev/null
 
-(
+{ (
+exec 2>&3 3>&-
 __tp_esc() { local s=${1//\\/\\\\}; s=${s//\"/\\\"}; printf %s "$s"; }
 __tp_emit() {
   if [ "$1" -ne 0 ]; then rc=$1; fi
@@ -95,7 +102,9 @@ __tp_emit() {
   printf '\n__tp_t0n 2 {"rc":%s,"changed":%s,"created":%s}\n' "$rc" "$__tp_c" "$__tp_k"
 }
 trap '__tp_emit $?' EXIT
+trap 'exit 143' TERM
 rc=0; changed=0; skipped=0; installed=()
+printf '\n__tpS_t0n 2 %s %s\n' "$BASHPID" "$$"
 created=0
 tp_u='tpdev'
 for tp_g in 'sudo'; do
@@ -145,4 +154,4 @@ else
 fi
 fi
 exit "$rc"
-) </dev/null
+) </dev/null; } 3>&2 2>/dev/null

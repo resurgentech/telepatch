@@ -33,7 +33,11 @@
 //! to the shell. Each op is therefore sent as
 //! `if [ -z "${__tp_halt-}" ]; then <op>; [ $? -eq 0 ] || __tp_halt=1;
 //! else <skip trailer>; fi`. `__tp_halt` lives in the persistent shell and
-//! is never reset: after a failure no later op on that shell runs, and the
+//! is never reset: after a failure no later op on that shell runs. A signal
+//! that ends an op reaches `$?` as 143 or 137, so a killed op trips the halt
+//! too. The shell runs under `set -m` ([`init_shell`]): each op is its own
+//! process group, and the skip trailer prints no start line
+//! ([`crate::trailer`]). After a failure the
 //! executor sends nothing more on any of the host's shells. An
 //! `allow_fail` op never sets it. After a failure the executor stops
 //! sending windows but lets the engine finish tracing, so the report can
@@ -674,7 +678,11 @@ async fn init_shell(shell: &mut Shell) -> Result<(), String> {
         0,
         shell.nonce(),
     );
-    let script = format!("{}{ack}", crate::ops::fetch::shell_init());
+    // `set -m`: job control, so each op's subshell is its own process
+    // group (pgid = its pid), which a controller can signal from a second
+    // shell. It also makes bash report a signalled job; the op wrapper
+    // sends that notice to /dev/null ([`crate::trailer`]).
+    let script = format!("set -m\n{}{ack}", crate::ops::fetch::shell_init());
     shell.send(0, &script).await.map_err(|e| e.to_string())?;
     let (rc, out) = prepare::collect(shell, 0).await?;
     if rc == 0 {
@@ -1202,7 +1210,7 @@ impl HostExec {
         let script = format!(
             "if [ -z \"${{__tp_halt-}}\" ]; then\n{}[ $? -eq 0 ] || __tp_halt=1\n__tp_dr=0\nelse\n{}fi\n",
             wrap(OpKind::Sh, &flush_body(), id, &nonce),
-            wrap(OpKind::Sh, "rc=0\nskipped=1\n", id, &nonce)
+            crate::trailer::skip(OpKind::Sh, id, &nonce)
         );
         let desc = flush_desc(window.number);
         let mut roles: Vec<String> = Vec::new();
@@ -1890,7 +1898,7 @@ fn will_pending(w: &crate::prepare::Prepared) -> usize {
 
 /// The skip trailer an op emits instead of running once the host halted.
 fn skip_script(op: &OpNode, id: usize, nonce: &str) -> String {
-    wrap(op.spec.op_kind(), "rc=0\nskipped=1\n", id, nonce)
+    crate::trailer::skip(op.spec.op_kind(), id, nonce)
 }
 
 impl Executor for HostExec {
@@ -2340,6 +2348,7 @@ impl Executor for HostExec {
                 None => None,
             } {
                 match ev {
+                    Event::Started { .. } => {}
                     Event::Output(id, bytes) => {
                         let Some(&i) = index.get(&id) else { continue };
                         let w = &window.ops[i];

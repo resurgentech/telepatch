@@ -3,7 +3,8 @@ source: crates/telepatch/tests/svc.rs
 assertion_line: 381
 expression: "format!(\"{}\\n{}\\n{}\", wrapped(&h, a), wrapped(&h, b), wrapped(&h, c))"
 ---
-(
+{ (
+exec 2>&3 3>&-
 __tp_esc() { local s=${1//\\/\\\\}; s=${s//\"/\\\"}; printf %s "$s"; }
 __tp_emit() {
   if [ "$1" -ne 0 ]; then rc=$1; fi
@@ -16,7 +17,9 @@ __tp_emit() {
   printf '\n__tp_t0n 0 {"rc":%s,"changed":%s,"skipped":%s,"was_enabled":%s,"was_active":%s,"was_masked":%s,"started":%s,"reloads":"%s"}\n' "$rc" "$__tp_c" "$__tp_s" "${tp_was_e:-null}" "${tp_was_a:-null}" "${tp_was_m:-null}" "$__tp_st" "$(__tp_esc "${__tp_drn-}")"
 }
 trap '__tp_emit $?' EXIT
+trap 'exit 143' TERM
 rc=0; changed=0; skipped=0; installed=()
+printf '\n__tpS_t0n 0 %s %s\n' "$BASHPID" "$$"
 tp_u='docker'
 tp_run="${TP_SVC_RUNDIR:-/run/systemd/system}"
 tp_skip=0
@@ -63,9 +66,10 @@ else
   if [ "$rc" -eq 0 ] && [ "$changed" -eq 0 ] && [ "$tp_skip" -eq 1 ]; then skipped=1; fi
 fi
 exit "$rc"
-) </dev/null
+) </dev/null; } 3>&2 2>/dev/null
 
-(
+{ (
+exec 2>&3 3>&-
 __tp_esc() { local s=${1//\\/\\\\}; s=${s//\"/\\\"}; printf %s "$s"; }
 __tp_emit() {
   if [ "$1" -ne 0 ]; then rc=$1; fi
@@ -78,7 +82,9 @@ __tp_emit() {
   printf '\n__tp_t0n 1 {"rc":%s,"changed":%s,"skipped":%s,"was_enabled":%s,"was_active":%s,"was_masked":%s,"started":%s,"reloads":"%s"}\n' "$rc" "$__tp_c" "$__tp_s" "${tp_was_e:-null}" "${tp_was_a:-null}" "${tp_was_m:-null}" "$__tp_st" "$(__tp_esc "${__tp_drn-}")"
 }
 trap '__tp_emit $?' EXIT
+trap 'exit 143' TERM
 rc=0; changed=0; skipped=0; installed=()
+printf '\n__tpS_t0n 1 %s %s\n' "$BASHPID" "$$"
 tp_u='cron.service'
 tp_run="${TP_SVC_RUNDIR:-/run/systemd/system}"
 tp_skip=0
@@ -106,9 +112,10 @@ else
   esac
 fi
 exit "$rc"
-) </dev/null
+) </dev/null; } 3>&2 2>/dev/null
 
-(
+{ (
+exec 2>&3 3>&-
 __tp_esc() { local s=${1//\\/\\\\}; s=${s//\"/\\\"}; printf %s "$s"; }
 __tp_emit() {
   if [ "$1" -ne 0 ]; then rc=$1; fi
@@ -121,7 +128,9 @@ __tp_emit() {
   printf '\n__tp_t0n 2 {"rc":%s,"changed":%s,"skipped":%s,"was_enabled":%s,"was_active":%s,"was_masked":%s,"started":%s,"reloads":"%s"}\n' "$rc" "$__tp_c" "$__tp_s" "${tp_was_e:-null}" "${tp_was_a:-null}" "${tp_was_m:-null}" "$__tp_st" "$(__tp_esc "${__tp_drn-}")"
 }
 trap '__tp_emit $?' EXIT
+trap 'exit 143' TERM
 rc=0; changed=0; skipped=0; installed=()
+printf '\n__tpS_t0n 2 %s %s\n' "$BASHPID" "$$"
 tp_u='ssh.socket'
 tp_run="${TP_SVC_RUNDIR:-/run/systemd/system}"
 tp_skip=0
@@ -160,4 +169,4 @@ else
   if [ "$rc" -eq 0 ] && [ "$changed" -eq 0 ] && [ "$tp_skip" -eq 1 ]; then skipped=1; fi
 fi
 exit "$rc"
-) </dev/null
+) </dev/null; } 3>&2 2>/dev/null
