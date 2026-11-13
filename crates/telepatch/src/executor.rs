@@ -670,6 +670,27 @@ struct Cur {
     /// `(pid, shell pid)` of the start line.
     start: Option<(i32, i32)>,
     kill: Option<Kill>,
+    /// The op's own trailer came after a signal, while members of its group
+    /// may remain (a background child that forked late or ignores TERM):
+    /// it is kept, and the kill goes on (TERM through the grace, then
+    /// KILL) until the killer reports the group gone.
+    held: Option<Held>,
+}
+
+enum Held {
+    Trailer(Trailer),
+    Lost,
+}
+
+impl From<Held> for Stopped {
+    fn from(h: Held) -> Stopped {
+        Stopped::TimedOut {
+            trailer: match h {
+                Held::Trailer(t) => Some(t),
+                Held::Lost => None,
+            },
+        }
+    }
 }
 
 struct Kill {
@@ -696,13 +717,20 @@ struct Kill {
 /// op's; send TERM to its process group every `term_every` for `grace`,
 /// then KILL (one TERM can be lost to a child that forked but has not yet
 /// exec'd and still carries the op's TERM trap). The op's own rc-143
-/// trailer is taken if it comes; if none does, the result is made up once
+/// trailer is taken if it comes, but a signalled op ends only when its
+/// group is empty: the trailer is held while the TERM rounds and the KILL
+/// go on (a background child may outlive it), and the events of later ops
+/// are replayed after the result; if no trailer comes, the result is made up once
 /// the killer reports the group gone. A trailer that comes later is
 /// ignored ([`Shell::abandon`]).
 pub struct Watch {
     bounds: KillBounds,
     queue: VecDeque<(usize, Duration)>,
     cur: Option<Cur>,
+    /// Events of later ops that came while the current op's group was
+    /// still being finished after its trailer ([`Cur::held`]); replayed in
+    /// order once the current op's result has gone out.
+    replay: VecDeque<Event>,
 }
 
 impl Watch {
@@ -711,6 +739,7 @@ impl Watch {
             bounds,
             queue: ops.into_iter().collect(),
             cur: None,
+            replay: VecDeque::new(),
         };
         w.arm();
         w
@@ -724,6 +753,7 @@ impl Watch {
             deadline: Instant::now() + limit,
             start: None,
             kill: None,
+            held: None,
         });
     }
 
@@ -731,6 +761,16 @@ impl Watch {
     /// controller.
     pub async fn next(&mut self, sh: &mut Shell, killer: &mut Killer) -> Tick {
         loop {
+            // Events that came out of order are replayed first, unless the
+            // current op is again waiting for its group.
+            if self.cur.as_ref().is_none_or(|c| c.held.is_none())
+                && let Some(ev) = self.replay.pop_front()
+            {
+                if let Some(t) = self.seen(ev) {
+                    return t;
+                }
+                continue;
+            }
             let Some(cur) = self.cur.as_ref() else {
                 return match sh.next_event().await {
                     Some(e) => Tick::Event(e),
@@ -751,10 +791,19 @@ impl Watch {
             }
             tokio::select! {
                 ev = sh.next_event() => {
-                    return match ev {
-                        Some(ev) => self.seen(ev),
-                        None => Tick::Idle,
-                    };
+                    match ev {
+                        Some(ev) => {
+                            if let Some(t) = self.seen(ev) {
+                                return t;
+                            }
+                        }
+                        // Nothing in flight in the shell. An op waiting for
+                        // its group still has the killer to run.
+                        None if self.cur.as_ref().is_some_and(|c| c.held.is_some()) => {
+                            tokio::time::sleep_until(wake).await;
+                        }
+                        None => return Tick::Idle,
+                    }
                 }
                 _ = tokio::time::sleep_until(wake) => {}
             }
@@ -762,11 +811,27 @@ impl Watch {
     }
 
     /// An event passes through; it may start the clock or end the op.
-    fn seen(&mut self, ev: Event) -> Tick {
+    /// `None`: held back until the current op's result has gone out.
+    fn seen(&mut self, ev: Event) -> Option<Tick> {
         let Some(cur) = self.cur.as_mut() else {
-            return Tick::Event(ev);
+            return Some(Tick::Event(ev));
         };
+        if cur.held.is_some() {
+            // The op's own trailer is in, and its group is being finished.
+            // Its further output passes; whatever belongs to a later op
+            // waits its turn.
+            return match &ev {
+                Event::Output(id, _) if *id == cur.id => Some(Tick::Event(ev)),
+                _ => {
+                    self.replay.push_back(ev);
+                    None
+                }
+            };
+        }
         let signalled = cur.kill.as_ref().is_some_and(|k| k.signalled);
+        // The group is not yet known to be gone: the trailer is kept and
+        // the kill goes on until it is.
+        let hold = signalled && cur.kill.as_ref().is_some_and(|k| k.verdict.is_none());
         match &ev {
             Event::Started { id, pid, shell_pid } if *id == cur.id && cur.kill.is_none() => {
                 cur.start = Some((*pid, *shell_pid));
@@ -774,23 +839,37 @@ impl Watch {
             }
             Event::Done(id, t) if *id == cur.id => {
                 let (id, t) = (*id, t.clone());
+                if hold {
+                    cur.held = Some(Held::Trailer(t));
+                    if let Some(k) = cur.kill.as_mut() {
+                        k.next = Instant::now();
+                    }
+                    return None;
+                }
                 self.arm();
                 if signalled {
-                    return Tick::Stopped {
+                    return Some(Tick::Stopped {
                         id,
                         why: Stopped::TimedOut { trailer: Some(t) },
-                    };
+                    });
                 }
             }
             Event::Failed(id, e) if *id == cur.id => {
                 let id = *id;
                 let lost = matches!(e, crate::pool::ShellError::TrailerLost);
+                if hold && lost {
+                    cur.held = Some(Held::Lost);
+                    if let Some(k) = cur.kill.as_mut() {
+                        k.next = Instant::now();
+                    }
+                    return None;
+                }
                 self.arm();
                 if signalled && lost {
-                    return Tick::Stopped {
+                    return Some(Tick::Stopped {
                         id,
                         why: Stopped::TimedOut { trailer: None },
-                    };
+                    });
                 }
             }
             Event::Done(id, _) | Event::Failed(id, _) => {
@@ -802,7 +881,7 @@ impl Watch {
             }
             _ => {}
         }
-        Tick::Event(ev)
+        Some(Tick::Event(ev))
     }
 
     /// The clock of the current op ran out (or the settle time after the
@@ -833,6 +912,7 @@ impl Watch {
             sh.abort();
             self.cur = None;
             self.queue.clear();
+            self.replay.clear();
             return Some(Tick::Stopped {
                 id,
                 why: Stopped::NeverStarted,
@@ -851,6 +931,7 @@ impl Watch {
                 sh.abort();
                 self.cur = None;
                 self.queue.clear();
+                self.replay.clear();
                 Some(Tick::Stopped {
                     id,
                     why: Stopped::NoSecondShell(reason),
@@ -862,6 +943,13 @@ impl Watch {
                     Round::Sent => {
                         k.signalled = true;
                         k.next = now + b.term_every;
+                    }
+                    Round::Gone | Round::Stuck if cur.held.is_some() => {
+                        // The trailer is in hand and the group is empty (or
+                        // beyond a KILL): nothing left to wait for.
+                        let h = cur.held.take().expect("checked");
+                        self.arm();
+                        return Some(Tick::Stopped { id, why: h.into() });
                     }
                     Round::Gone | Round::Stuck => {
                         // After a KILL the op is ours even if the group had

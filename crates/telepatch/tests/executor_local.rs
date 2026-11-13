@@ -1897,6 +1897,62 @@ mod limits {
         assert!(!d.path().join("later").exists());
     }
 
+    fn late_child(h: Host<PathBuf>) -> PlaybookFuture {
+        Box::pin(async move {
+            let pidf = p(&h, "ign.pid");
+            let later = p(&h, "later");
+            // The foreground `sleep` dies on the first TERM and the op's
+            // own rc-143 trailer comes at once; the background child
+            // ignores TERM and outlives that trailer.
+            sh!(
+                h,
+                "(trap '' TERM; echo $BASHPID > {pidf}; exec sleep 30771) &\nwhile [ ! -s {pidf} ]; do sleep 0.05; done\necho up\nsleep 30772"
+            )
+            .timeout(Duration::from_secs(1));
+            sh!(h, "touch {later}");
+            Ok(())
+        })
+    }
+
+    /// Kills what a test started, by a marker in its command line.
+    struct Reaper(&'static str);
+    impl Drop for Reaper {
+        fn drop(&mut self) {
+            let _ = std::process::Command::new("pkill")
+                .args(["-KILL", "-f", self.0])
+                .status();
+        }
+    }
+
+    #[test]
+    fn a_child_that_outlives_the_ops_trailer_is_still_killed_after_the_grace() {
+        let _reap = Reaper("sleep 3077[12]");
+        let d = tempfile::tempdir().unwrap();
+        let t = Instant::now();
+        let (r, out) = go(
+            &Playbook::new("late", late_child),
+            vec![spec("h1", d.path())],
+        );
+        let e = t.elapsed();
+        let (op, tail) = failed(&r);
+        assert!(op.ends_with(", timed out after 1s"), "{op}\n{out}");
+        assert!(tail.contains("up"), "{tail}");
+        assert!(!d.path().join("later").exists());
+        // The trailer comes at about 1 s; the TERM-ignoring child keeps the
+        // group, so the stop waits for the grace and the KILL (1 s + 5 s).
+        assert!(e >= Duration::from_secs(6), "stopped too early: {e:?}");
+        assert!(e < Duration::from_secs(20), "{e:?}");
+        let pid: i32 = std::fs::read_to_string(d.path().join("ign.pid"))
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        let alive = std::fs::read_to_string(format!("/proc/{pid}/stat"))
+            .map(|s| !s.rsplit(") ").next().unwrap_or("").starts_with('Z'))
+            .unwrap_or(false);
+        assert!(!alive, "the TERM-ignoring child {pid} survived the run");
+    }
+
     fn lost_term(h: Host<PathBuf>) -> PlaybookFuture {
         Box::pin(async move {
             // The first TERM is absorbed (and re-arms the trap), the second

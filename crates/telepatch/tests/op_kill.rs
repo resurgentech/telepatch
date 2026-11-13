@@ -175,7 +175,10 @@ async fn term_until_gone(k: &mut Shell, pgid: i32) -> usize {
 }
 
 /// [`term_until_gone`] for a group whose op's end is read from `sh`: TERM
-/// until op `id` ends. Returns the events up to its end and the sends.
+/// until op `id` has ended and its group is empty (the trailer alone is
+/// not the end: a background child forked after a TERM went out outlives
+/// it, as in the engine's watchdog). Returns the events up to the op's
+/// end and the sends.
 async fn term_until_end(
     k: &mut Shell,
     sh: &mut Shell,
@@ -183,25 +186,31 @@ async fn term_until_end(
     id: usize,
 ) -> (Vec<Event>, usize) {
     let mut v = Vec::new();
+    let mut ended = false;
     for n in 1..=5 {
         control(k, 100 + n, &format!("kill -TERM -- -{pgid}")).await;
-        let pump = async {
-            while let Some(e) = sh.next_event().await {
-                let end = matches!(&e, Event::Done(i, _) | Event::Failed(i, _) if *i == id);
-                v.push(e);
-                if end {
-                    return;
+        if !ended {
+            let pump = async {
+                while let Some(e) = sh.next_event().await {
+                    let end = matches!(&e, Event::Done(i, _) | Event::Failed(i, _) if *i == id);
+                    v.push(e);
+                    if end {
+                        return;
+                    }
                 }
-            }
-        };
-        if tokio::time::timeout(Duration::from_millis(2500), pump)
-            .await
-            .is_ok()
-        {
+            };
+            ended = tokio::time::timeout(Duration::from_millis(2500), pump)
+                .await
+                .is_ok();
+        }
+        if ended && gone(pgid, Duration::from_millis(1500)).await {
             return (v, n);
         }
     }
-    panic!("op {id} did not end after 5 TERMs: {:?}", members(pgid));
+    panic!(
+        "op {id} (ended: {ended}) left its group after 5 TERMs: {:?}",
+        members(pgid)
+    );
 }
 
 #[tokio::test]
@@ -441,7 +450,7 @@ async fn a_termed_op_still_prints_its_trailer_with_rc_143() {
     let ev = start_and_wait_for(
         &mut sh,
         1,
-        ": SCRIPTMARKER_term\necho up\nsleep 300 &\nsleep 300\n",
+        ": SCRIPTMARKER_term\nsleep 300 &\necho up\nsleep 300\n",
         "up",
     )
     .await;
