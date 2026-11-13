@@ -192,6 +192,26 @@ impl OpSpec {
         }
     }
 
+    /// How long an op of this kind may run when it sets no
+    /// `.timeout(..)`: `pkg` long (a source build or a big download), `sh`,
+    /// raw, resources and git medium, `file` and `repo` short, `svc`
+    /// shorter, `unit`, `group` and `user` shortest. The controller
+    /// enforces it ([`crate::executor`]). (`wait_for` takes its 5
+    /// minutes with its own kind, in T113.)
+    pub fn default_timeout(&self) -> std::time::Duration {
+        use std::time::Duration;
+        const MIN: u64 = 60;
+        Duration::from_secs(match self {
+            OpSpec::Pkg(_) => 30 * MIN,
+            OpSpec::Raw { .. } | OpSpec::Shell(_) | OpSpec::Resource(_) | OpSpec::Git(_) => {
+                10 * MIN
+            }
+            OpSpec::File(_) | OpSpec::Repo(_) => 5 * MIN,
+            OpSpec::Svc(_) => 2 * MIN,
+            OpSpec::Unit(_) | OpSpec::Group(_) | OpSpec::User(_) => MIN,
+        })
+    }
+
     /// Effects of an op of this kind before the caller narrows them.
     pub fn default_writes(&self) -> BTreeSet<Key> {
         match self {
@@ -395,6 +415,47 @@ pub struct OpNode {
     /// `.at_end()`: the op runs after the host's last window, in a window
     /// of its own.
     pub at_end: bool,
+    /// `.timeout(d)`: how long one run of this op may take, counted from
+    /// its start line; the controller stops it after that. `None`: the
+    /// kind's default ([`OpSpec::default_timeout`]).
+    pub timeout: Option<std::time::Duration>,
+}
+
+impl OpNode {
+    /// The timeout the controller enforces: the op's own, else its
+    /// kind's default.
+    pub fn effective_timeout(&self) -> std::time::Duration {
+        self.timeout.unwrap_or_else(|| self.spec.default_timeout())
+    }
+}
+
+/// `90s` as `1m30s`, `5m`, `2s`, `1.5s`, `250ms`: how plans and reports
+/// write a duration.
+pub fn fmt_duration(d: std::time::Duration) -> String {
+    let ms = d.as_millis();
+    if ms == 0 {
+        return "0s".to_string();
+    }
+    if ms < 1000 {
+        return format!("{ms}ms");
+    }
+    let (secs, frac) = (ms / 1000, ms % 1000);
+    let mut o = String::new();
+    if secs >= 3600 {
+        o.push_str(&format!("{}h", secs / 3600));
+    }
+    if secs % 3600 >= 60 {
+        o.push_str(&format!("{}m", secs % 3600 / 60));
+    }
+    if secs % 60 > 0 || frac > 0 || o.is_empty() {
+        if frac > 0 {
+            let f = format!("{frac:03}");
+            o.push_str(&format!("{}.{}s", secs % 60, f.trim_end_matches('0')));
+        } else {
+            o.push_str(&format!("{}s", secs % 60));
+        }
+    }
+    o
 }
 
 /// A source location: the caller of an op builder (`#[track_caller]`).
@@ -563,4 +624,71 @@ pub fn sh_sites<'a>(ops: impl IntoIterator<Item = &'a OpNode>) -> Vec<Site> {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod limit_tests {
+    use std::time::Duration;
+
+    use super::*;
+    use crate::ops::pkg::{Manager, PkgSpec};
+
+    fn node(spec: OpSpec) -> OpNode {
+        OpNode {
+            writes: spec.default_writes(),
+            post: spec.default_post(),
+            spec,
+            run_as: RunAs::root_shell(),
+            reads: Default::default(),
+            guard: None,
+            allow_fail: false,
+            site: None,
+            allowed: Vec::new(),
+            at_end: false,
+            timeout: None,
+        }
+    }
+
+    fn secs(n: u64) -> Duration {
+        Duration::from_secs(n)
+    }
+
+    #[test]
+    fn each_kind_has_a_default_timeout_pkg_long_sh_medium_svc_short() {
+        let pkg = node(OpSpec::Pkg(PkgSpec::new(Manager::Apt, vec!["curl".into()])));
+        let sh = node(OpSpec::Raw {
+            script: "true".into(),
+        });
+        let svc = node(OpSpec::Svc(crate::ops::svc::SvcSpec::new("docker")));
+        let grp = node(OpSpec::Group(crate::ops::group::GroupSpec::new("g")));
+        let file = node(OpSpec::File(crate::ops::file::FileSpec::new("/x")));
+        let git = node(OpSpec::Git(crate::ops::git::GitSpec::new("u")));
+        assert_eq!(pkg.effective_timeout(), secs(30 * 60));
+        assert_eq!(sh.effective_timeout(), secs(10 * 60));
+        assert_eq!(git.effective_timeout(), secs(10 * 60));
+        assert_eq!(file.effective_timeout(), secs(5 * 60));
+        assert_eq!(svc.effective_timeout(), secs(2 * 60));
+        assert_eq!(grp.effective_timeout(), secs(60));
+    }
+
+    #[test]
+    fn an_explicit_timeout_overrides_the_default() {
+        let mut sh = node(OpSpec::Raw {
+            script: "true".into(),
+        });
+        sh.timeout = Some(secs(7));
+        assert_eq!(sh.effective_timeout(), secs(7));
+    }
+
+    #[test]
+    fn durations_print_the_way_a_person_writes_them() {
+        let ms = Duration::from_millis;
+        assert_eq!(fmt_duration(ms(250)), "250ms");
+        assert_eq!(fmt_duration(secs(2)), "2s");
+        assert_eq!(fmt_duration(ms(1500)), "1.5s");
+        assert_eq!(fmt_duration(secs(90)), "1m30s");
+        assert_eq!(fmt_duration(secs(300)), "5m");
+        assert_eq!(fmt_duration(secs(3600 + 120)), "1h2m");
+        assert_eq!(fmt_duration(Duration::ZERO), "0s");
+    }
 }

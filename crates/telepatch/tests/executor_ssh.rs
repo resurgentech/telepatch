@@ -71,6 +71,10 @@ if [ -n "$master" ]; then
   exec sleep 100000
 fi
 [ -e "$cp" ] || { echo "stub ssh: no master at $cp" >&2; exit 255; }
+if [ -n "$TP_STUB_MAX_CHAN" ]; then
+  echo $$ >> "$d/nchan"
+  [ "$(wc -l < "$d/nchan")" -le "$TP_STUB_MAX_CHAN" ] || { echo "stub ssh: session request failed" >&2; exit 255; }
+fi
 log="$d/chan-$$.in"
 printf '# remote: %s\n' "$*" > "$log"
 mkfifo "$log.fifo"
@@ -486,5 +490,79 @@ fn user_created_by_the_run_is_checked_and_opened_in_window_two() {
         create < check,
         "check ran before the account was made:\n{root}"
     );
+    assert_eq!(survivors(&stub.pids()), Vec::<u32>::new());
+}
+
+// ---- .timeout: the second shell ----
+
+fn timed(h: Host<Vars>) -> PlaybookFuture {
+    Box::pin(async move {
+        let later = f(&h, "later");
+        sh!(h, "echo MARK_TIMED; sleep 4.31").timeout(std::time::Duration::from_secs(1));
+        sh!(h, "touch {later}");
+        Ok(())
+    })
+}
+
+/// Stops what a test left running, by a marker in its command line.
+struct Reaper(&'static str);
+impl Drop for Reaper {
+    fn drop(&mut self) {
+        let _ = std::process::Command::new("pkill")
+            .args(["-KILL", "-f", self.0])
+            .status();
+    }
+}
+
+#[test]
+fn a_timed_out_op_is_killed_through_a_second_channel() {
+    let _r = Reaper("sleep 4.31");
+    let stub = Stub::new();
+    let pb = Playbook::new("timed", timed);
+    let t = std::time::Instant::now();
+    let (r, out) = go(&pb, &stub, stub.transport());
+    assert!(
+        t.elapsed() < std::time::Duration::from_millis(3800),
+        "{:?}",
+        t.elapsed()
+    );
+    let HostStatus::Failed { op, .. } = &r.hosts[0].status else {
+        panic!("{:?}\n{out}", r.hosts[0].status)
+    };
+    assert!(op.ends_with(", timed out after 1s"), "{op}");
+    assert!(out.contains("-> FAILED (timed out after 1s)"), "{out}");
+    assert!(!stub.work().join("later").exists());
+    // The root shell and the second shell, both `bash`.
+    let remotes: Vec<String> = stub.channels().into_iter().map(|(r, _)| r).collect();
+    assert_eq!(remotes, [ROOT, ROOT], "{remotes:?}");
+    assert_eq!(survivors(&stub.pids()), Vec::<u32>::new());
+}
+
+#[test]
+fn a_host_that_gives_one_shell_fails_as_a_timeout_and_drops_the_connection() {
+    let _r = Reaper("sleep 4.31");
+    let stub = Stub::new();
+    let pb = Playbook::new("one", timed);
+    let t = std::time::Instant::now();
+    let (r, out) = go(&pb, &stub, stub.transport().env("TP_STUB_MAX_CHAN", "1"));
+    assert!(
+        t.elapsed() < std::time::Duration::from_millis(3800),
+        "{:?}",
+        t.elapsed()
+    );
+    let HostStatus::Failed { op, .. } = &r.hosts[0].status else {
+        panic!("{:?}\n{out}", r.hosts[0].status)
+    };
+    assert!(
+        op.ends_with(", timed out after 1s; no second shell to stop it"),
+        "{op}"
+    );
+    assert!(
+        out.contains("-> FAILED (timed out after 1s; no second shell to stop it)"),
+        "{out}"
+    );
+    assert!(!stub.work().join("later").exists());
+    assert_eq!(r.exit_code(), 1);
+    // The shell and the connection are closed: no ssh process is left.
     assert_eq!(survivors(&stub.pids()), Vec::<u32>::new());
 }

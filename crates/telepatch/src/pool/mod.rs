@@ -21,10 +21,16 @@
 //! becomes [`Event::Started`] and is never output. A skipped op prints no
 //! start line. Under `set -m` (the executor sets it) `pid` is the op's
 //! process group, so a controller can signal the op from a second shell.
+//!
+//! A controller that stopped an op itself (the watchdog in
+//! [`crate::executor`]) calls [`Shell::abandon`]: the op stays in flight
+//! so later bytes are still attributed right, but nothing more is
+//! reported for it (no output, no trailer, no `TrailerLost`), and an
+//! abandoned op alone does not keep [`Shell::next_event`] waiting.
 
 mod split;
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::process::Stdio;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -118,6 +124,8 @@ pub struct Shell {
     nonce: String,
     user: String,
     inflight: VecDeque<usize>,
+    /// Ops in `inflight` the controller gave up on ([`Shell::abandon`]).
+    abandoned: HashSet<usize>,
     pending: VecDeque<Event>,
     partial: HashMap<usize, Vec<u8>>,
     done: HashMap<usize, Result<OpOutput, ShellError>>,
@@ -198,6 +206,7 @@ impl Shell {
             nonce,
             user: user.to_string(),
             inflight: VecDeque::new(),
+            abandoned: HashSet::new(),
             pending: VecDeque::new(),
             partial: HashMap::new(),
             done: HashMap::new(),
@@ -271,19 +280,48 @@ impl Shell {
         }
     }
 
-    /// The next event, or `None` when no op is in flight.
+    /// Give up on op `id` (the controller stopped it and will not get its
+    /// trailer, or does not care): it is no longer reported. Events already
+    /// queued for it are dropped; its later output, its trailer, a
+    /// `TrailerLost` for it and a shell death are swallowed. A no-op for an
+    /// id not in flight.
+    pub fn abandon(&mut self, id: usize) {
+        if !self.inflight.contains(&id) {
+            return;
+        }
+        self.abandoned.insert(id);
+        self.pending.retain(|e| match e {
+            Event::Started { id: i, .. } | Event::Output(i, _) => *i != id,
+            Event::Done(i, _) | Event::Failed(i, _) => *i != id,
+        });
+    }
+
+    /// End this shell now, without waiting for anything: close stdin, kill
+    /// the process, stop reading. Ops still in flight end as
+    /// [`ShellError::Died`] (abandoned ones are not reported). Anything the
+    /// shell started stays running; the caller knows no PID to stop.
+    pub fn abort(&mut self) {
+        drop(self.stdin.take());
+        let _ = self.child.start_kill();
+        self.rx.close();
+    }
+
+    /// The next event, or `None` when no op is in flight (an abandoned op
+    /// does not count).
     pub async fn next_event(&mut self) -> Option<Event> {
         loop {
             if let Some(e) = self.pending.pop_front() {
                 return Some(e);
             }
-            if self.inflight.is_empty() {
+            if self.inflight.iter().all(|i| self.abandoned.contains(i)) {
                 return None;
             }
             let raw = self.rx.recv().await.unwrap_or(Raw::Eof);
             match raw {
                 Raw::Bytes(b) => {
-                    if let Some(&id) = self.inflight.front() {
+                    if let Some(&id) = self.inflight.front()
+                        && !self.abandoned.contains(&id)
+                    {
                         return Some(Event::Output(id, b));
                     }
                 }
@@ -295,8 +333,7 @@ impl Shell {
                     // ended without printing its trailer (it was killed).
                     for _ in 0..pos {
                         let lost = self.inflight.pop_front().unwrap();
-                        self.pending
-                            .push_back(Event::Failed(lost, ShellError::TrailerLost));
+                        self.lose(lost);
                     }
                     self.pending
                         .push_back(Event::Started { id, pid, shell_pid });
@@ -307,11 +344,12 @@ impl Shell {
                     };
                     for _ in 0..pos {
                         let lost = self.inflight.pop_front().unwrap();
-                        self.pending
-                            .push_back(Event::Failed(lost, ShellError::TrailerLost));
+                        self.lose(lost);
                     }
                     self.inflight.pop_front();
-                    self.pending.push_back(Event::Done(t.id, t));
+                    if !self.abandoned.remove(&t.id) {
+                        self.pending.push_back(Event::Done(t.id, t));
+                    }
                 }
                 Raw::Eof => {
                     let status = match self.child.try_wait() {
@@ -320,11 +358,23 @@ impl Shell {
                     };
                     self.dead = Some(format!("shell {status}"));
                     for id in std::mem::take(&mut self.inflight) {
+                        if self.abandoned.remove(&id) {
+                            continue;
+                        }
                         let e = self.died("eof");
                         self.pending.push_back(Event::Failed(id, e));
                     }
                 }
             }
+        }
+    }
+
+    /// `id` left `inflight` without a trailer: report it, unless the
+    /// controller abandoned it.
+    fn lose(&mut self, id: usize) {
+        if !self.abandoned.remove(&id) {
+            self.pending
+                .push_back(Event::Failed(id, ShellError::TrailerLost));
         }
     }
 

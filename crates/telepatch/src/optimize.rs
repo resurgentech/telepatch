@@ -5,16 +5,17 @@
 //!    a barrier. A repo op and a cargo op each also conflict with every
 //!    distro `pkg` op, both ways.
 //! 2. Merge: `pkg` ops with the same manager, mode, wanted, `RunAs`, guard
-//!    and `allow_fail` are folded into the earliest one when
+//!    `allow_fail` and `timeout` (a limit is part of equality) are folded
+//!    into the earliest one when
 //!    [`Graph::hoist_is_safe`] holds, i.e. no other item between the
 //!    earliest and the latest member has an edge to a member. Rustup ops
 //!    (same user, toolchain, profile, installer, `RunAs`, guard and
-//!    `allow_fail`; any wanted, the merged op wanting the stronger) use
+//!    `allow_fail` and `timeout`; any wanted, the merged op wanting the stronger) use
 //!    [`Graph::rustup_hoist_is_safe`] instead: only the moving op's
 //!    effects are checked, and of those only what it adds to the earlier
 //!    op. Then guarded
 //!    ops with an equal spec (any kind except a resource, which never
-//!    merges), `RunAs` and `allow_fail` are folded
+//!    merges), `RunAs`, `allow_fail` and `timeout` are folded
 //!    (svc units compared by key, so a restart of `docker` and one of
 //!    `docker.service` are equal; a restart and a reload are not)
 //!    into the latest one, their guards or-joined, when
@@ -110,6 +111,7 @@ struct MergeKey {
     run_as: RunAs,
     guard: Option<Guard>,
     allow_fail: bool,
+    timeout: Option<std::time::Duration>,
 }
 
 fn merge_key(item: &Item) -> Option<MergeKey> {
@@ -127,6 +129,7 @@ fn merge_key(item: &Item) -> Option<MergeKey> {
             run_as: w.node.run_as.clone(),
             guard: w.node.guard.clone(),
             allow_fail: w.node.allow_fail,
+            timeout: w.node.timeout,
         }),
         _ => None,
     }
@@ -139,6 +142,7 @@ struct SameKey {
     spec: OpSpec,
     run_as: RunAs,
     allow_fail: bool,
+    timeout: Option<std::time::Duration>,
 }
 
 fn same_key(item: &Item) -> Option<SameKey> {
@@ -163,6 +167,7 @@ fn same_key(item: &Item) -> Option<SameKey> {
         spec,
         run_as: w.node.run_as.clone(),
         allow_fail: w.node.allow_fail,
+        timeout: w.node.timeout,
     })
 }
 
@@ -525,6 +530,7 @@ mod tests {
                 site: None,
                 allowed: Vec::new(),
                 at_end: false,
+                timeout: None,
                 spec,
             },
             members: vec![Member {
@@ -617,6 +623,32 @@ mod tests {
         // A merged pkg member keeps its own id in a guard: its `changed` is
         // its own names' (the member rule), not the merged op's.
         assert_eq!(ops[3].node.guard, Some(Guard::Changed(NodeId(3))));
+    }
+
+    #[test]
+    fn a_different_timeout_blocks_a_pkg_merge_and_an_equal_one_merges() {
+        use std::time::Duration;
+        let t = |n: u64| move |o: &mut OpNode| o.timeout = Some(Duration::from_secs(n));
+        let g = optimize(vec![with(pkg(0, "a"), t(5)), with(pkg(1, "b"), t(9))]);
+        assert_eq!(ids(g), [vec![0], vec![1]]);
+        let g = optimize(vec![with(pkg(0, "a"), t(5)), pkg(1, "b")]);
+        assert_eq!(ids(g), [vec![0], vec![1]]);
+        let g = optimize(vec![with(pkg(0, "a"), t(5)), with(pkg(1, "b"), t(5))]);
+        assert_eq!(ids(g), [vec![0, 1]]);
+    }
+
+    #[test]
+    fn a_different_timeout_blocks_the_guarded_merge() {
+        use std::time::Duration;
+        let mk = |id: usize, secs: Option<u64>| {
+            with(restart(id, Guard::Changed(NodeId(0))), move |n| {
+                n.timeout = secs.map(Duration::from_secs)
+            })
+        };
+        let g = optimize(vec![file(0, "/x"), mk(1, Some(5)), mk(2, Some(9))]);
+        assert_eq!(ids(g), [vec![0], vec![1], vec![2]]);
+        let g = optimize(vec![file(0, "/x"), mk(1, Some(5)), mk(2, Some(5))]);
+        assert_eq!(ids(g), [vec![0], vec![1, 2]]);
     }
 
     fn restart(id: usize, guard: Guard) -> Item {

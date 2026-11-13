@@ -346,23 +346,453 @@ struct HostShells {
     target: Rc<Target>,
     root: Shell,
     users: BTreeMap<String, Shell>,
+    /// The second shell that stops an op, opened when the first timeout
+    /// fires ([`Killer`]).
+    killer: Killer,
 }
 
 impl HostShells {
-    /// Close the user shells, then the root shell, then the transport's
-    /// connections (SSH).
+    /// Close the user shells, then the root shell, then the second shell,
+    /// then the transport's connections (SSH).
     async fn close(self) {
         for (_, sh) in self.users {
             sh.close().await;
         }
         self.root.close().await;
+        if let Some(k) = self.killer.shell {
+            k.close().await;
+        }
         close_target(&self.target).await;
+    }
+
+    /// Drop the host's connection now: every shell is ended without
+    /// waiting, then the transport's connections are closed. The host
+    /// cannot run anything more. (`close` still works afterwards.)
+    async fn drop_connections(&mut self) {
+        self.root.abort();
+        for sh in self.users.values_mut() {
+            sh.abort();
+        }
+        if let Some(k) = self.killer.shell.as_mut() {
+            k.abort();
+        }
+        close_target(&self.target).await;
+    }
+
+    /// `who`'s shell and the second shell, for the watchdog.
+    fn watched(&mut self, who: &Principal) -> Option<(&mut Shell, &mut Killer)> {
+        let sh = match who {
+            Principal::Root => Some(&mut self.root),
+            Principal::User(u) => self.users.get_mut(u),
+        }?;
+        Some((sh, &mut self.killer))
     }
 }
 
 async fn close_target(t: &Target) {
     if let Target::Ssh(t) = t {
         t.close().await;
+    }
+}
+
+// ---- the watchdog: the controller's clock and the second shell ----------
+
+use std::collections::VecDeque;
+use std::time::Duration;
+use tokio::time::Instant;
+
+/// The timing of the kill sequence. Policy: TERM to the op's process group
+/// once a second for five seconds, then KILL. Tests pass shorter bounds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KillBounds {
+    /// Between two TERMs.
+    pub term_every: Duration,
+    /// How long TERM is repeated before KILL.
+    pub grace: Duration,
+    /// How long to wait for the op's own trailer once the killer reports
+    /// the group gone, before the result is made up.
+    pub settle: Duration,
+}
+
+impl KillBounds {
+    pub const POLICY: KillBounds = KillBounds {
+        term_every: Duration::from_secs(1),
+        grace: Duration::from_secs(5),
+        settle: Duration::from_secs(1),
+    };
+}
+
+/// The second shell: opened the way `open_user` opens one (a root shell of
+/// the same target, so the same PID namespace), once, when the first
+/// timeout fires, then reused.
+pub struct Killer {
+    target: Rc<Target>,
+    host: String,
+    shell: Option<Shell>,
+    next_id: usize,
+}
+
+/// Why the watchdog took an op out of the stream.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Stopped {
+    /// The clock expired and the controller killed the op's group. `trailer`
+    /// is the op's own trailer (rc 143) when it arrived.
+    TimedOut { trailer: Option<Trailer> },
+    /// The clock expired and the op's process was already gone without a
+    /// trailer (it ended before its EXIT trap ran).
+    EndedWithoutResult,
+    /// No start line came within the limit: the shell is wedged before the
+    /// op began. The shell was aborted.
+    NeverStarted,
+    /// The second shell could not be had (or failed). The shell was
+    /// aborted; the host's connection is the caller's to drop.
+    NoSecondShell(String),
+}
+
+/// What [`Watch::next`] hands back.
+#[derive(Debug)]
+pub enum Tick {
+    Event(Event),
+    Stopped {
+        id: usize,
+        why: Stopped,
+    },
+    /// No op is in flight.
+    Idle,
+}
+
+/// How long the second shell gets for one round trip.
+const KILLER_ROUND: Duration = Duration::from_secs(15);
+
+/// The kill script for the op whose subshell is `pid` (its process group
+/// under `set -m`) and whose parent is the persistent shell `shell_pid`
+/// (the start line's two numbers), run in the second shell like any op:
+/// through its stdin, never on a command line.
+///
+/// It prints `TPK_GONE` (the group is not ours or has no live member: the
+/// leader is gone, or `pid` now belongs to a process that is not the op,
+/// whose parent is not `shell_pid`), `TPK_SENT` (a TERM went to the
+/// group) or, for KILL, `TPK_GONE` or `TPK_STUCK` after waiting up to
+/// four seconds for the group to empty.
+fn kill_script(pid: i32, shell_pid: i32, kill: bool) -> String {
+    let (sig, after) = if kill {
+        (
+            "KILL",
+            "  i=0; res=TPK_STUCK\n\
+             \x20 while [ \"$i\" -lt 40 ]; do\n\
+             \x20   if [ \"$(__tpk_n)\" -eq 0 ]; then res=TPK_GONE; break; fi\n\
+             \x20   sleep 0.1; i=$((i+1))\n\
+             \x20 done\n\
+             \x20 echo $res\n",
+        )
+    } else {
+        ("TERM", "  echo TPK_SENT\n")
+    };
+    format!(
+        "pid={pid}; sp={shell_pid}\n\
+         __tpk_n() {{\n\
+         \x20 local n=0 f l r\n\
+         \x20 for f in /proc/[0-9]*/stat; do\n\
+         \x20   read -r l < \"$f\" 2>/dev/null || continue\n\
+         \x20   r=${{l##*) }}; set -- $r\n\
+         \x20   if [ \"$3\" = \"$pid\" ] && [ \"$1\" != Z ]; then n=$((n+1)); fi\n\
+         \x20 done\n\
+         \x20 echo $n\n\
+         }}\n\
+         lead=0; foreign=0\n\
+         if read -r l < /proc/$pid/stat 2>/dev/null; then\n\
+         \x20 r=${{l##*) }}; set -- $r\n\
+         \x20 if [ \"$3\" = \"$pid\" ] && [ \"$1\" != Z ]; then\n\
+         \x20   if [ \"$2\" = \"$sp\" ]; then lead=1; else foreign=1; fi\n\
+         \x20 fi\n\
+         fi\n\
+         ours=0\n\
+         if [ \"$lead\" = 1 ]; then ours=1\n\
+         elif [ \"$foreign\" != 1 ] && [ \"$(__tpk_n)\" -gt 0 ]; then ours=1; fi\n\
+         if [ \"$ours\" = 0 ]; then\n\
+         \x20 echo TPK_GONE\n\
+         else\n\
+         \x20 kill -{sig} -- \"-$pid\" 2>/dev/null\n\
+         {after}\
+         fi\n"
+    )
+}
+
+/// What the second shell said about one round.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Round {
+    Gone,
+    Sent,
+    Stuck,
+}
+
+impl Killer {
+    pub fn new(target: Rc<Target>, host: String) -> Killer {
+        Killer {
+            target,
+            host,
+            shell: None,
+            next_id: PROBE_BASE << 1,
+        }
+    }
+
+    /// The second shell, opened on first use the way `open_user` opens one
+    /// (a root shell of the same target, so the same PID namespace, where
+    /// root can signal any principal's op).
+    async fn shell(&mut self) -> Result<&mut Shell, String> {
+        if self.shell.is_none() {
+            let who = Principal::Root;
+            let mut s = self.target.open(&self.host, &who, 1).await;
+            if s.got.is_empty() {
+                return Err(refusal(&self.target, &self.host, &who, s.limit));
+            }
+            let mut sh = s.got.remove(0);
+            for extra in s.got {
+                extra.close().await;
+            }
+            if let Err(e) = init_shell(&mut sh).await {
+                sh.close().await;
+                return Err(format!("could not set up the second shell: {e}"));
+            }
+            self.shell = Some(sh);
+        }
+        Ok(self.shell.as_mut().expect("just opened"))
+    }
+
+    /// One round: the kill script for `pid` (`kill`: KILL, else TERM).
+    async fn round(&mut self, pid: i32, shell_pid: i32, kill: bool) -> Result<Round, String> {
+        let id = self.next_id;
+        self.next_id += 1;
+        let script = kill_script(pid, shell_pid, kill);
+        let sh = self.shell().await?;
+        let (_, out) = tokio::time::timeout(KILLER_ROUND, prepare::probe(sh, id, &script))
+            .await
+            .map_err(|_| "the second shell did not answer".to_string())??;
+        if out.contains("TPK_GONE") {
+            Ok(Round::Gone)
+        } else if out.contains("TPK_SENT") {
+            Ok(Round::Sent)
+        } else if out.contains("TPK_STUCK") {
+            Ok(Round::Stuck)
+        } else {
+            Err(format!("the second shell said {:?}", out.trim()))
+        }
+    }
+}
+
+/// The current op's clock and, once it has expired, the kill.
+struct Cur {
+    id: usize,
+    limit: Duration,
+    /// Expiry: the limit after the start line, or, until one comes, after
+    /// the op became the shell's current op.
+    deadline: Instant,
+    /// `(pid, shell pid)` of the start line.
+    start: Option<(i32, i32)>,
+    kill: Option<Kill>,
+}
+
+struct Kill {
+    t0: Instant,
+    /// When the next round runs.
+    next: Instant,
+    /// A TERM or KILL went out: whatever ends the op now is our doing.
+    signalled: bool,
+    /// The killer reported the group gone: wait until `.0` for the op's
+    /// own trailer, then make the result up. `.1`: the controller killed
+    /// it (else it ended by itself without a trailer).
+    verdict: Option<(Instant, bool)>,
+}
+
+/// The clock of one shell's run of ops: ops go in in send order, and the
+/// first one not yet finished is the current op. One clock per shell, as
+/// only one op of a shell runs at a time.
+///
+/// The clock starts at the op's start line ([`Event::Started`]). If none
+/// comes it starts when the op becomes the current op (at the previous
+/// op's end, or at [`Watch::new`] for the first), and its expiry then
+/// drops the shell ([`Stopped::NeverStarted`]). On expiry with a start
+/// line, in the second shell ([`Killer`]): check the PID is still the
+/// op's; send TERM to its process group every `term_every` for `grace`,
+/// then KILL (one TERM can be lost to a child that forked but has not yet
+/// exec'd and still carries the op's TERM trap). The op's own rc-143
+/// trailer is taken if it comes; if none does, the result is made up once
+/// the killer reports the group gone. A trailer that comes later is
+/// ignored ([`Shell::abandon`]).
+pub struct Watch {
+    bounds: KillBounds,
+    queue: VecDeque<(usize, Duration)>,
+    cur: Option<Cur>,
+}
+
+impl Watch {
+    pub fn new(bounds: KillBounds, ops: impl IntoIterator<Item = (usize, Duration)>) -> Watch {
+        let mut w = Watch {
+            bounds,
+            queue: ops.into_iter().collect(),
+            cur: None,
+        };
+        w.arm();
+        w
+    }
+
+    /// The next op becomes the current op; its clock starts now.
+    fn arm(&mut self) {
+        self.cur = self.queue.pop_front().map(|(id, limit)| Cur {
+            id,
+            limit,
+            deadline: Instant::now() + limit,
+            start: None,
+            kill: None,
+        });
+    }
+
+    /// The next event of `sh`, or the end of the current op by the
+    /// controller.
+    pub async fn next(&mut self, sh: &mut Shell, killer: &mut Killer) -> Tick {
+        loop {
+            let Some(cur) = self.cur.as_ref() else {
+                return match sh.next_event().await {
+                    Some(e) => Tick::Event(e),
+                    None => Tick::Idle,
+                };
+            };
+            let wake = match &cur.kill {
+                Some(k) => k.verdict.map_or(k.next, |v| v.0),
+                None => cur.deadline,
+            };
+            // The clock is checked before the stream, so an op that never
+            // stops printing is still stopped.
+            if Instant::now() >= wake {
+                if let Some(t) = self.expired(sh, killer).await {
+                    return t;
+                }
+                continue;
+            }
+            tokio::select! {
+                ev = sh.next_event() => {
+                    return match ev {
+                        Some(ev) => self.seen(ev),
+                        None => Tick::Idle,
+                    };
+                }
+                _ = tokio::time::sleep_until(wake) => {}
+            }
+        }
+    }
+
+    /// An event passes through; it may start the clock or end the op.
+    fn seen(&mut self, ev: Event) -> Tick {
+        let Some(cur) = self.cur.as_mut() else {
+            return Tick::Event(ev);
+        };
+        let signalled = cur.kill.as_ref().is_some_and(|k| k.signalled);
+        match &ev {
+            Event::Started { id, pid, shell_pid } if *id == cur.id && cur.kill.is_none() => {
+                cur.start = Some((*pid, *shell_pid));
+                cur.deadline = Instant::now() + cur.limit;
+            }
+            Event::Done(id, t) if *id == cur.id => {
+                let (id, t) = (*id, t.clone());
+                self.arm();
+                if signalled {
+                    return Tick::Stopped {
+                        id,
+                        why: Stopped::TimedOut { trailer: Some(t) },
+                    };
+                }
+            }
+            Event::Failed(id, e) if *id == cur.id => {
+                let id = *id;
+                let lost = matches!(e, crate::pool::ShellError::TrailerLost);
+                self.arm();
+                if signalled && lost {
+                    return Tick::Stopped {
+                        id,
+                        why: Stopped::TimedOut { trailer: None },
+                    };
+                }
+            }
+            Event::Done(id, _) | Event::Failed(id, _) => {
+                // A later op of the run ended: the current one is over.
+                if let Some(pos) = self.queue.iter().position(|(i, _)| i == id) {
+                    self.queue.drain(..=pos);
+                    self.arm();
+                }
+            }
+            _ => {}
+        }
+        Tick::Event(ev)
+    }
+
+    /// The clock of the current op ran out (or the settle time after the
+    /// killer's report). `None`: carry on.
+    async fn expired(&mut self, sh: &mut Shell, killer: &mut Killer) -> Option<Tick> {
+        let now = Instant::now();
+        let b = self.bounds;
+        let cur = self.cur.as_mut()?;
+        let id = cur.id;
+        // The group is gone and the op's own trailer did not come.
+        if let Some(k) = &cur.kill
+            && let Some((until, timed)) = k.verdict
+            && now >= until
+        {
+            sh.abandon(id);
+            self.arm();
+            let why = if timed {
+                Stopped::TimedOut { trailer: None }
+            } else {
+                Stopped::EndedWithoutResult
+            };
+            return Some(Tick::Stopped { id, why });
+        }
+        let Some((pid, shell_pid)) = cur.start else {
+            // No start line: the shell is wedged before the op began and
+            // there is no PID to kill.
+            sh.abandon(id);
+            sh.abort();
+            self.cur = None;
+            self.queue.clear();
+            return Some(Tick::Stopped {
+                id,
+                why: Stopped::NeverStarted,
+            });
+        };
+        let k = cur.kill.get_or_insert(Kill {
+            t0: now,
+            next: now,
+            signalled: false,
+            verdict: None,
+        });
+        let kill = now.duration_since(k.t0) >= b.grace;
+        match killer.round(pid, shell_pid, kill).await {
+            Err(reason) => {
+                sh.abandon(id);
+                sh.abort();
+                self.cur = None;
+                self.queue.clear();
+                Some(Tick::Stopped {
+                    id,
+                    why: Stopped::NoSecondShell(reason),
+                })
+            }
+            Ok(r) => {
+                let now = Instant::now();
+                match r {
+                    Round::Sent => {
+                        k.signalled = true;
+                        k.next = now + b.term_every;
+                    }
+                    Round::Gone | Round::Stuck => {
+                        // After a KILL the op is ours even if the group had
+                        // emptied already.
+                        k.signalled |= kill;
+                        k.verdict = Some((now + b.settle, k.signalled));
+                    }
+                }
+                None
+            }
+        }
     }
 }
 
@@ -1613,7 +2043,9 @@ impl HostExec {
             Outcome::Changed => "changed".to_string(),
             Outcome::Unchanged if note.is_empty() => "ok".to_string(),
             Outcome::Unchanged => format!("ok ({note})"),
+            Outcome::Failed if !note.is_empty() => format!("FAILED ({note})"),
             Outcome::Failed => format!("FAILED rc={rc}"),
+            Outcome::AllowedFail if !note.is_empty() => format!("failed ({note}, allowed)"),
             Outcome::AllowedFail => format!("failed rc={rc} (allowed)"),
             Outcome::NotRun => "not run".to_string(),
             Outcome::Skipped => format!("skipped (when {})", when.as_deref().unwrap_or("")),
@@ -1942,6 +2374,7 @@ impl Executor for HostExec {
                 site: None,
                 allowed: Vec::new(),
                 at_end: false,
+                timeout: None,
             };
             let id = self.seq;
             let who = &q.run_as.principal;
@@ -2342,11 +2775,71 @@ impl Executor for HostExec {
                 }
             }
 
-            // Collect the run in order.
-            while let Some(ev) = match self.shell_for(&who) {
-                Some(sh) => sh.next_event().await,
-                None => None,
-            } {
+            // Collect the run in order, under the controller's clock: the
+            // current op has its limit from its start line ([`Watch`]).
+            // (After a failed send the shell is dead: nothing to time.)
+            let timed: &[WindowOp] = if send_err.is_some() {
+                &[]
+            } else {
+                &window.ops[start..end]
+            };
+            let mut watch = Watch::new(
+                KillBounds::POLICY,
+                timed.iter().map(|w| (w.id.0, w.node.effective_timeout())),
+            );
+            loop {
+                let tick = match self.shells.watched(&who) {
+                    Some((sh, killer)) => watch.next(sh, killer).await,
+                    None => Tick::Idle,
+                };
+                let ev = match tick {
+                    Tick::Event(ev) => ev,
+                    Tick::Idle => break,
+                    Tick::Stopped { id, why } => {
+                        let Some(&i) = index.get(&id) else { continue };
+                        let w = &window.ops[i];
+                        self.header(&mut live[i], w, &descs[i]);
+                        self.flush_partial(&mut live[i]);
+                        done[i] = true;
+                        let lim = crate::trace::fmt_duration(w.node.effective_timeout());
+                        // The host cannot go on after these two.
+                        let (note, drop_host) = match &why {
+                            Stopped::TimedOut { .. } => (format!("timed out after {lim}"), false),
+                            Stopped::EndedWithoutResult => {
+                                ("ended without a result".to_string(), false)
+                            }
+                            Stopped::NeverStarted => (
+                                format!("op never started within {lim}; shell dropped"),
+                                true,
+                            ),
+                            Stopped::NoSecondShell(_) => (
+                                format!("timed out after {lim}; no second shell to stop it"),
+                                true,
+                            ),
+                        };
+                        if failed_seen {
+                            self.finish_op(w, &descs[i], Outcome::NotRun, 0, false, "");
+                        } else if w.node.allow_fail && !drop_host {
+                            self.finish_op(w, &descs[i], Outcome::AllowedFail, -1, false, &note);
+                        } else {
+                            failed_seen = true;
+                            let mut tail = last_lines(&live[i].tail, TAIL_LINES);
+                            if let Stopped::NoSecondShell(reason) = &why {
+                                // Why there was none, for whoever reads the failure.
+                                if !tail.is_empty() {
+                                    tail.push('\n');
+                                }
+                                tail.push_str(reason);
+                            }
+                            self.finish_op(w, &descs[i], Outcome::Failed, -1, false, &note);
+                            self.fail(w, &format!("{}, {note}", descs[i]), -1, tail);
+                        }
+                        if drop_host {
+                            self.shells.drop_connections().await;
+                        }
+                        continue;
+                    }
+                };
                 match ev {
                     Event::Started { .. } => {}
                     Event::Output(id, bytes) => {
@@ -2550,11 +3043,13 @@ async fn run_one<V: 'static>(
         .with_only(only.iter().cloned());
     let probe = host.clone();
     let pb = Playbook::new(pb_name, pb_run);
+    let target_rc = target.clone();
     let shells = HostShells {
         host: name.clone(),
         target,
         root: shell,
         users: BTreeMap::new(),
+        killer: Killer::new(target_rc, name.clone()),
     };
     let mut engine = Engine::new(HostExec::new(&name, shells, sink.clone(), check));
     let res = engine.run_host(&pb, host).await;
@@ -2751,6 +3246,7 @@ mod tests {
                 site: None,
                 allowed: Vec::new(),
                 at_end: false,
+                timeout: None,
             },
         }
     }
@@ -2840,5 +3336,264 @@ mod tests {
             action_line(&w, &[], &known, &s).as_deref(),
             Some("will restart, every run; allowed unguarded-restart: leaks memory")
         );
+    }
+}
+
+/// The watchdog over local shells (`LocalTransport::new().uid(0)` is a
+/// transport setting, not root), with short bounds. Every process a test
+/// starts is killed on drop of its [`Reaper`].
+#[cfg(test)]
+mod watchdog_tests {
+    use super::*;
+    use crate::ops::shell::raw_body;
+    use crate::trailer::ShellResult;
+
+    fn bounds() -> KillBounds {
+        KillBounds {
+            term_every: Duration::from_millis(150),
+            grace: Duration::from_millis(600),
+            settle: Duration::from_millis(300),
+        }
+    }
+
+    fn local_target() -> Rc<Target> {
+        Rc::new(Target::Local(LocalTransport::new().uid(0)))
+    }
+
+    async fn shell(t: &Target) -> Shell {
+        let mut s = t.open("local", &Principal::Root, 1).await;
+        assert!(s.limit.is_none(), "{:?}", s.limit);
+        let mut sh = s.got.remove(0);
+        init_shell(&mut sh).await.unwrap();
+        sh
+    }
+
+    fn op(sh: &Shell, id: usize, body: &str) -> String {
+        wrap(OpKind::Sh, &raw_body(body), id, sh.nonce())
+    }
+
+    /// Kills what a test started, by a marker in its command line.
+    struct Reaper(Vec<String>);
+    impl Drop for Reaper {
+        fn drop(&mut self) {
+            for m in &self.0 {
+                let _ = std::process::Command::new("pkill")
+                    .args(["-KILL", "-f", m])
+                    .status();
+            }
+        }
+    }
+
+    /// Everything up to the end of the watch: the events seen, and how it
+    /// ended (`None`: the stream ran dry). Panics after 20 s.
+    async fn drive(
+        w: &mut Watch,
+        sh: &mut Shell,
+        k: &mut Killer,
+    ) -> (Vec<Event>, Option<(usize, Stopped)>) {
+        let r = tokio::time::timeout(Duration::from_secs(20), async {
+            let mut v = Vec::new();
+            loop {
+                match w.next(sh, k).await {
+                    Tick::Event(e) => v.push(e),
+                    Tick::Idle => return (v, None),
+                    Tick::Stopped { id, why } => return (v, Some((id, why))),
+                }
+            }
+        })
+        .await;
+        r.expect("the watchdog did not end the op")
+    }
+
+    fn pgid(events: &[Event]) -> i32 {
+        events
+            .iter()
+            .find_map(|e| match e {
+                Event::Started { pid, .. } => Some(*pid),
+                _ => None,
+            })
+            .expect("no start line")
+    }
+
+    fn members(pgid: i32) -> Vec<i32> {
+        let mut v = Vec::new();
+        for e in std::fs::read_dir("/proc").unwrap().flatten() {
+            let Some(pid) = e.file_name().to_str().and_then(|n| n.parse::<i32>().ok()) else {
+                continue;
+            };
+            let Ok(s) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
+                continue;
+            };
+            let Some(i) = s.rfind(')') else { continue };
+            let f: Vec<&str> = s[i + 2..].split(' ').collect();
+            if f.get(2).and_then(|g| g.parse::<i32>().ok()) == Some(pgid) && f[0] != "Z" {
+                v.push(pid);
+            }
+        }
+        v
+    }
+
+    async fn next_op_runs(sh: &mut Shell, k: &mut Killer, id: usize) {
+        let s = op(sh, id, "echo next");
+        sh.send(id, &s).await.unwrap();
+        let mut w = Watch::new(bounds(), [(id, Duration::from_secs(10))]);
+        let (ev, stop) = drive(&mut w, sh, k).await;
+        assert!(stop.is_none(), "{stop:?}");
+        let Some(Event::Done(_, t)) = ev.last() else {
+            panic!("{ev:?}")
+        };
+        assert_eq!(t.typed::<ShellResult>().unwrap().rc, 0);
+    }
+
+    #[tokio::test]
+    async fn expiry_kills_the_group_and_the_op_ends_with_its_own_rc_143_trailer() {
+        let t = local_target();
+        let mut sh = shell(&t).await;
+        let mut k = Killer::new(t.clone(), "local".into());
+        let s = op(&sh, 1, "sleep 300 & sleep 301 & wait");
+        sh.send(1, &s).await.unwrap();
+        let mut w = Watch::new(bounds(), [(1, Duration::from_millis(300))]);
+        let t0 = std::time::Instant::now();
+        let (ev, stop) = drive(&mut w, &mut sh, &mut k).await;
+        let Some((1, Stopped::TimedOut { trailer: Some(tr) })) = stop else {
+            panic!("{stop:?} {ev:?}")
+        };
+        assert_eq!(tr.typed::<ShellResult>().unwrap().rc, 143);
+        assert!(t0.elapsed() < Duration::from_secs(3), "{:?}", t0.elapsed());
+        assert_eq!(members(pgid(&ev)), Vec::<i32>::new());
+        next_op_runs(&mut sh, &mut k, 2).await;
+    }
+
+    #[tokio::test]
+    async fn an_op_that_ignores_term_is_killed_after_the_grace_and_the_result_is_made_up() {
+        let t = local_target();
+        let mut sh = shell(&t).await;
+        let mut k = Killer::new(t.clone(), "local".into());
+        let s = op(&sh, 1, "trap '' TERM; sleep 302");
+        sh.send(1, &s).await.unwrap();
+        let mut w = Watch::new(bounds(), [(1, Duration::from_millis(300))]);
+        let t0 = std::time::Instant::now();
+        let (ev, stop) = drive(&mut w, &mut sh, &mut k).await;
+        assert!(
+            matches!(stop, Some((1, Stopped::TimedOut { trailer: None }))),
+            "{stop:?} {ev:?}"
+        );
+        // After the limit and the grace, not before.
+        assert!(
+            t0.elapsed() >= Duration::from_millis(850),
+            "{:?}",
+            t0.elapsed()
+        );
+        assert!(t0.elapsed() < Duration::from_secs(5), "{:?}", t0.elapsed());
+        assert_eq!(members(pgid(&ev)), Vec::<i32>::new());
+        // The abandoned op's trailer, if one ever comes, is not reported.
+        next_op_runs(&mut sh, &mut k, 2).await;
+    }
+
+    #[tokio::test]
+    async fn a_lost_term_is_repeated_and_the_op_ends_inside_the_grace_with_its_own_trailer() {
+        let t = local_target();
+        let mut sh = shell(&t).await;
+        let mut k = Killer::new(t.clone(), "local".into());
+        // The first TERM is absorbed (and re-arms the trap); the second ends
+        // the op. The short foreground sleep dies with each group TERM.
+        let body = "trap 'trap \"exit 143\" TERM' TERM\nwhile :; do sleep 0.05; done";
+        let s = op(&sh, 1, body);
+        sh.send(1, &s).await.unwrap();
+        let mut w = Watch::new(bounds(), [(1, Duration::from_millis(300))]);
+        let t0 = std::time::Instant::now();
+        let (ev, stop) = drive(&mut w, &mut sh, &mut k).await;
+        let Some((1, Stopped::TimedOut { trailer: Some(tr) })) = stop else {
+            panic!("a single TERM then KILL: {stop:?}")
+        };
+        assert_eq!(tr.typed::<ShellResult>().unwrap().rc, 143);
+        // 300 ms limit + one repeat (150 ms), well inside the 600 ms grace.
+        assert!(
+            t0.elapsed() < Duration::from_millis(1200),
+            "{:?}",
+            t0.elapsed()
+        );
+        assert_eq!(members(pgid(&ev)), Vec::<i32>::new());
+    }
+
+    #[tokio::test]
+    async fn an_op_with_no_trailer_that_is_gone_is_reported_as_ended_without_a_result() {
+        let t = local_target();
+        let mut sh = shell(&t).await;
+        let mut k = Killer::new(t.clone(), "local".into());
+        // `exec` replaces the op's subshell: its EXIT trap never runs.
+        let s = op(&sh, 1, "exec true");
+        sh.send(1, &s).await.unwrap();
+        let mut w = Watch::new(bounds(), [(1, Duration::from_millis(300))]);
+        let t0 = std::time::Instant::now();
+        let (_, stop) = drive(&mut w, &mut sh, &mut k).await;
+        assert_eq!(stop, Some((1, Stopped::EndedWithoutResult)));
+        assert!(t0.elapsed() < Duration::from_secs(3), "{:?}", t0.elapsed());
+        next_op_runs(&mut sh, &mut k, 2).await;
+    }
+
+    #[tokio::test]
+    async fn an_op_inside_its_limit_is_untouched() {
+        let t = local_target();
+        let mut sh = shell(&t).await;
+        let mut k = Killer::new(t.clone(), "local".into());
+        let s = op(&sh, 1, "sleep 0.2; echo quick");
+        sh.send(1, &s).await.unwrap();
+        let mut w = Watch::new(bounds(), [(1, Duration::from_secs(10))]);
+        let (ev, stop) = drive(&mut w, &mut sh, &mut k).await;
+        assert!(stop.is_none(), "{stop:?}");
+        assert!(matches!(ev.last(), Some(Event::Done(1, _))), "{ev:?}");
+        assert!(k.shell.is_none(), "no second shell without a timeout");
+    }
+
+    #[tokio::test]
+    async fn no_start_line_drops_the_shell_and_reports_never_started() {
+        let t = local_target();
+        let mut sh = shell(&t).await;
+        let mut k = Killer::new(t.clone(), "local".into());
+        let mut reap = Reaper(vec!["sleep 3017".into()]);
+        // An unwrapped command wedges the shell; the wrapped op queues
+        // behind it and never starts.
+        sh.send(1, "sleep 3017\n").await.unwrap();
+        let s = op(&sh, 2, "echo never");
+        sh.send(2, &s).await.unwrap();
+        let mut w = Watch::new(bounds(), [(2, Duration::from_millis(300))]);
+        let t0 = std::time::Instant::now();
+        let (ev, stop) = drive(&mut w, &mut sh, &mut k).await;
+        assert_eq!(stop, Some((2, Stopped::NeverStarted)), "{ev:?}");
+        assert!(t0.elapsed() < Duration::from_secs(3), "{:?}", t0.elapsed());
+        assert!(
+            k.shell.is_none(),
+            "there is no PID to kill, no second shell"
+        );
+        // The shell is dropped: it ends, and ends promptly.
+        tokio::time::timeout(Duration::from_secs(5), sh.close())
+            .await
+            .expect("the dropped shell did not end");
+        // The unwrapped `sleep` is no op of ours: no PID is known, so the
+        // test stops it.
+        reap.0.push("sleep 3017".into());
+    }
+
+    #[tokio::test]
+    async fn no_second_shell_drops_the_shell_and_says_so() {
+        let t = local_target();
+        let mut sh = shell(&t).await;
+        // A target that cannot open a shell: an ssh that does not exist.
+        let dead = Rc::new(Target::Ssh(SshTransport::new().ssh("/nonexistent/tp-ssh")));
+        let mut k = Killer::new(dead, "h".into());
+        let s = op(&sh, 1, "sleep 303");
+        sh.send(1, &s).await.unwrap();
+        let mut reap = Reaper(vec![]);
+        reap.0.push("sleep 303".into());
+        let mut w = Watch::new(bounds(), [(1, Duration::from_millis(300))]);
+        let (ev, stop) = drive(&mut w, &mut sh, &mut k).await;
+        let Some((1, Stopped::NoSecondShell(why))) = stop else {
+            panic!("{stop:?} {ev:?}")
+        };
+        assert!(!why.is_empty(), "the reason is kept");
+        tokio::time::timeout(Duration::from_secs(5), sh.close())
+            .await
+            .expect("the dropped shell did not end");
     }
 }

@@ -31,6 +31,9 @@ fn op_line(out: &mut String, id: usize, op: &OpNode, os: &Os) {
     if op.allow_fail {
         out.push_str(" allow_fail");
     }
+    if let Some(d) = op.timeout {
+        let _ = write!(out, " timeout {}", crate::trace::fmt_duration(d));
+    }
     if !op.post.is_empty() {
         let p: Vec<String> = op.post.iter().map(|(k, v)| format!("{k}={v}")).collect();
         let _ = write!(out, " post [{}]", p.join(", "));

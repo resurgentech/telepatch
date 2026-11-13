@@ -1794,3 +1794,320 @@ fn rustup_finds_the_installer_s_rustup_under_cargo_home() {
     assert_eq!(r2.hosts[0].status, HostStatus::Ok, "{}", r2.render());
     assert_eq!(inst_log(d.path()).lines().count(), 1);
 }
+
+// --- T101: .timeout, enforced by the controller ---
+
+mod limits {
+    use super::*;
+    use std::time::{Duration, Instant};
+    use telepatch::Host;
+
+    fn failed(r: &Report) -> (&String, &String) {
+        let HostStatus::Failed { op, tail, .. } = &r.hosts[0].status else {
+            panic!("{:?}", r.hosts[0].status)
+        };
+        (op, tail)
+    }
+
+    fn slow(h: Host<PathBuf>) -> PlaybookFuture {
+        Box::pin(async move {
+            let later = p(&h, "later");
+            sh!(h, "echo started; sleep 20").timeout(Duration::from_secs(1));
+            sh!(h, "touch {later}");
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn a_timed_out_op_is_reported_as_a_timeout_fails_its_role_and_skips_the_rest() {
+        let d = tempfile::tempdir().unwrap();
+        let t = Instant::now();
+        let (r, out) = go(&Playbook::new("slow", slow), vec![spec("h1", d.path())]);
+        assert!(t.elapsed() < Duration::from_secs(15), "{:?}", t.elapsed());
+        assert_eq!(r.exit_code(), 1);
+        let (op, tail) = failed(&r);
+        assert!(op.ends_with(", timed out after 1s"), "{op}");
+        assert!(tail.contains("started"), "{tail}");
+        assert!(out.contains("-> FAILED (timed out after 1s)"), "{out}");
+        assert!(!d.path().join("later").exists());
+        assert!(r.render().contains("timed out after 1s"), "{}", r.render());
+        // The role failed and the rest of the run did not run.
+        let ops = &r.hosts[0].ops;
+        assert_eq!(format!("{:?}", ops[0].outcome), "Failed");
+        assert_eq!(format!("{:?}", ops[1].outcome), "NotRun");
+    }
+
+    fn ghost(h: Host<PathBuf>) -> PlaybookFuture {
+        Box::pin(async move {
+            let g = p(&h, "ghost");
+            // The background child must die with the op's process group.
+            sh!(h, "(sleep 2; touch {g}) & wait").timeout(Duration::from_millis(500));
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn a_timeout_kills_the_whole_process_group_including_a_background_child() {
+        let d = tempfile::tempdir().unwrap();
+        let (r, out) = go(&Playbook::new("ghost", ghost), vec![spec("h1", d.path())]);
+        assert!(failed(&r).0.contains("timed out after 500ms"), "{out}");
+        std::thread::sleep(Duration::from_secs(3));
+        assert!(!d.path().join("ghost").exists(), "a child outlived its op");
+    }
+
+    fn ignores_term(h: Host<PathBuf>) -> PlaybookFuture {
+        Box::pin(async move {
+            let later = p(&h, "later");
+            // TERM is ignored by the op and its child: only KILL ends it.
+            sh!(
+                h,
+                "trap '' TERM; echo hung; (trap '' TERM; sleep 30); echo never"
+            )
+            .timeout(Duration::from_secs(1));
+            sh!(h, "touch {later}");
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn an_op_that_ignores_term_is_killed_after_the_grace_and_is_still_a_timeout() {
+        let d = tempfile::tempdir().unwrap();
+        let t = Instant::now();
+        let (r, out) = go(
+            &Playbook::new("term", ignores_term),
+            vec![spec("h1", d.path())],
+        );
+        let e = t.elapsed();
+        // 1 s limit + 5 s grace before KILL.
+        assert!(
+            e >= Duration::from_secs(6) && e < Duration::from_secs(20),
+            "{e:?}"
+        );
+        let (op, tail) = failed(&r);
+        assert!(op.ends_with(", timed out after 1s"), "{op}");
+        assert!(tail.contains("hung") && !tail.contains("never"), "{tail}");
+        assert!(out.contains("-> FAILED (timed out after 1s)"), "{out}");
+        assert!(!d.path().join("later").exists());
+    }
+
+    fn lost_term(h: Host<PathBuf>) -> PlaybookFuture {
+        Box::pin(async move {
+            // The first TERM is absorbed (and re-arms the trap), the second
+            // ends the op with its own rc-143 trailer.
+            sh!(
+                h,
+                "trap 'trap \"exit 143\" TERM' TERM\necho looping\nwhile :; do sleep 0.05; done"
+            )
+            .timeout(Duration::from_millis(500));
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn a_lost_term_is_repeated_and_the_op_ends_inside_the_grace() {
+        let d = tempfile::tempdir().unwrap();
+        let t = Instant::now();
+        let (r, out) = go(
+            &Playbook::new("lost", lost_term),
+            vec![spec("h1", d.path())],
+        );
+        let e = t.elapsed();
+        // KILL would come at 0.5 s + 5 s; the repeated TERM (1 s) ends it.
+        assert!(
+            e < Duration::from_secs(4),
+            "{e:?} (a single TERM then KILL?)"
+        );
+        assert!(failed(&r).0.ends_with(", timed out after 500ms"), "{out}");
+    }
+
+    fn fast(h: Host<PathBuf>) -> PlaybookFuture {
+        Box::pin(async move {
+            let later = p(&h, "later");
+            sh!(h, "echo quick").timeout(Duration::from_secs(30));
+            sh!(h, "touch {later}");
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn an_op_inside_its_timeout_is_untouched() {
+        let d = tempfile::tempdir().unwrap();
+        let (r, out) = go(&Playbook::new("fast", fast), vec![spec("h1", d.path())]);
+        assert_eq!(
+            r.hosts[0].status,
+            HostStatus::Changed,
+            "{}\n{out}",
+            r.render()
+        );
+        assert!(d.path().join("later").exists());
+        assert!(!out.contains("timed out"), "{out}");
+    }
+
+    fn no_trailer(h: Host<PathBuf>) -> PlaybookFuture {
+        Box::pin(async move {
+            // Its start line is printed, then `exec` replaces the op's
+            // subshell, so the EXIT trap (the trailer) never runs.
+            sh!(h, "exec true").timeout(Duration::from_millis(500));
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn an_op_that_ends_with_no_trailer_is_bounded_and_reported_as_ended_without_a_result() {
+        let d = tempfile::tempdir().unwrap();
+        let t = Instant::now();
+        let (r, out) = go(&Playbook::new("nt", no_trailer), vec![spec("h1", d.path())]);
+        // About the limit plus the grace, rather than hanging.
+        assert!(t.elapsed() < Duration::from_secs(8), "{:?}", t.elapsed());
+        assert_eq!(r.exit_code(), 1);
+        let (op, _) = failed(&r);
+        assert!(op.ends_with(", ended without a result"), "{op}");
+        assert!(out.contains("-> FAILED (ended without a result)"), "{out}");
+        assert!(!out.contains("timed out"), "{out}");
+    }
+
+    fn allowed_then_next_window(h: Host<PathBuf>) -> PlaybookFuture {
+        Box::pin(async move {
+            let later = p(&h, "later");
+            sh!(h, "sleep 20")
+                .timeout(Duration::from_millis(500))
+                .allow_fail();
+            // A fact read ends the window: what follows is a later one.
+            let _ = h.bin_exists("tp-no-such-bin-zz").await;
+            sh!(h, "echo second window; touch {later}");
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn the_persistent_shell_runs_a_later_window_after_a_kill() {
+        let d = tempfile::tempdir().unwrap();
+        let (r, out) = go(
+            &Playbook::new("aw", allowed_then_next_window),
+            vec![spec("h1", d.path())],
+        );
+        assert_ne!(r.exit_code(), 1, "{}\n{out}", r.render());
+        assert!(
+            out.contains("-> failed (timed out after 500ms, allowed)"),
+            "{out}"
+        );
+        assert!(d.path().join("later").exists(), "{out}");
+        assert!(out.contains("second window"), "{out}");
+    }
+
+    fn zero(h: Host<PathBuf>) -> PlaybookFuture {
+        Box::pin(async move {
+            sh!(h, "true").timeout(Duration::ZERO);
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn a_zero_timeout_is_a_trace_error() {
+        let d = tempfile::tempdir().unwrap();
+        let (r, _) = go(&Playbook::new("zero", zero), vec![spec("h1", d.path())]);
+        let HostStatus::Error(e) = &r.hosts[0].status else {
+            panic!("{:?}", r.hosts[0].status)
+        };
+        assert!(e.contains("the duration must be more than zero"), "{e}");
+    }
+
+    fn twice(h: Host<PathBuf>) -> PlaybookFuture {
+        Box::pin(async move {
+            // The second call replaces the first.
+            sh!(h, "sleep 20")
+                .timeout(Duration::from_secs(600))
+                .timeout(Duration::from_millis(500));
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn a_second_timeout_call_replaces_the_first() {
+        let d = tempfile::tempdir().unwrap();
+        let (r, out) = go(&Playbook::new("tw", twice), vec![spec("h1", d.path())]);
+        assert!(failed(&r).0.ends_with(", timed out after 500ms"), "{out}");
+    }
+
+    fn limited_plan(h: Host<()>) {
+        sh!(h, "echo a").timeout(Duration::from_secs(90));
+        sh!(h, "echo b");
+    }
+
+    #[test]
+    fn the_plan_shows_an_explicit_limit_and_hides_a_default() {
+        use telepatch::facts::os::Os;
+        let h = Host::new(
+            "t",
+            Os::parse("ID=debian\nVERSION_ID=12\n").unwrap(),
+            Rc::new(()),
+        );
+        limited_plan(h.clone());
+        let plan = telepatch::plan::render_host("t", &h.os, &h.snapshot());
+        let lines: Vec<&str> = plan.lines().filter(|l| l.starts_with("  #")).collect();
+        assert!(lines[0].ends_with(" timeout 1m30s"), "{}", lines[0]);
+        assert!(!lines[1].contains("timeout"), "{}", lines[1]);
+    }
+
+    fn big_file(h: Host<PathBuf>) -> PlaybookFuture {
+        Box::pin(async move {
+            let f = p(&h, "big.txt");
+            let body: String = (0..30000)
+                .map(|i| format!("line {i} of the big file\n"))
+                .collect();
+            h.file(&f).content(body).timeout(Duration::from_secs(60));
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn a_file_over_two_hundred_kib_applies_byte_exact_with_a_timeout_set() {
+        let d = tempfile::tempdir().unwrap();
+        let (r, out) = go(&Playbook::new("big", big_file), vec![spec("h1", d.path())]);
+        assert_eq!(
+            r.hosts[0].status,
+            HostStatus::Changed,
+            "{}\n{out}",
+            r.render()
+        );
+        let want: String = (0..30000)
+            .map(|i| format!("line {i} of the big file\n"))
+            .collect();
+        assert!(want.len() > 200 * 1024);
+        let got = std::fs::read_to_string(d.path().join("big.txt")).unwrap();
+        assert!(
+            got == want,
+            "content differs ({} vs {})",
+            got.len(),
+            want.len()
+        );
+    }
+
+    fn sentinel(h: Host<PathBuf>) -> PlaybookFuture {
+        Box::pin(async move {
+            let leak = p(&h, "leak");
+            // The pattern's own argv does not match itself; the comment
+            // matches the op's script, were it ever in an argv.
+            sh!(
+                h,
+                "# ZQXJ_SENTINEL_42\nsleep 1\ngrep -la 'ZQXJ_SENTINE[L]_42' /proc/[0-9]*/cmdline | tee {leak}; true"
+            )
+            .timeout(Duration::from_secs(30));
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn a_running_op_s_script_is_in_no_process_s_argv_with_a_timeout_set() {
+        let d = tempfile::tempdir().unwrap();
+        let (r, out) = go(&Playbook::new("s", sentinel), vec![spec("h1", d.path())]);
+        assert_eq!(
+            r.hosts[0].status,
+            HostStatus::Changed,
+            "{}\n{out}",
+            r.render()
+        );
+        let leak = std::fs::read_to_string(d.path().join("leak")).unwrap_or_default();
+        assert_eq!(leak, "", "the script is readable in /proc cmdline");
+    }
+}

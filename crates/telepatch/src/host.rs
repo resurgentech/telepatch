@@ -218,6 +218,7 @@ impl<V> Host<V> {
             site: Some(Site::caller()),
             allowed: Vec::new(),
             at_end: false,
+            timeout: None,
         };
         let id = self.trace.borrow_mut().push(Node::Op(node));
         OpHandle {
@@ -398,6 +399,7 @@ impl OpHandle {
             site: Some(Site::caller()),
             allowed: Vec::new(),
             at_end: false,
+            timeout: None,
         };
         let id = self.trace.borrow_mut().push(Node::Op(node));
         OpHandle {
@@ -447,6 +449,22 @@ impl OpHandle {
         self.edit(|op| op.allow_fail = true).clone()
     }
 
+    /// Stop one run of this op after `d`. The controller's clock starts at
+    /// the op's start line; on expiry a second shell kills the op's
+    /// process group and the op fails, reported as timed out. Without it
+    /// the op has its kind's default ([`OpSpec::default_timeout`]). A zero
+    /// duration is a trace error. A second call replaces the first.
+    #[track_caller]
+    pub fn timeout(&self, d: std::time::Duration) -> OpHandle {
+        if d.is_zero() {
+            self.record_error(TraceError::new(
+                "timeout(..): the duration must be more than zero",
+            ));
+            return self.clone();
+        }
+        self.edit(|op| op.timeout = Some(d)).clone()
+    }
+
     /// Run this op only when `guard` holds: any composition of earlier
     /// ops' `.changed()` and `.ok()` with `|`, `&` and `!`. A false guard
     /// skips the op (reported `skipped`, with the guard). A second call
@@ -487,7 +505,7 @@ impl OpHandle {
 }
 
 /// The handle methods every op takes (`.allow`, `.reads`, `.writes`,
-/// `.allow_fail`, `.when`, `.at_end`, `.post`), on a typed handle that
+/// `.allow_fail`, `.when`, `.timeout`, `.at_end`, `.post`), on a typed handle that
 /// wraps an [`OpHandle`] as its field `0`: each edits the node as the
 /// `OpHandle` method does and returns the typed handle, owned, so a chain
 /// keeps its type (`h.svc(u).restart().when(g)` is a `SvcHandle`).
@@ -522,6 +540,12 @@ macro_rules! op_builders {
             #[track_caller]
             pub fn when(&self, guard: $crate::trace::Guard) -> Self {
                 self.0.when(guard);
+                self.clone()
+            }
+            /// See [`OpHandle::timeout`].
+            #[track_caller]
+            pub fn timeout(&self, d: std::time::Duration) -> Self {
+                self.0.timeout(d);
                 self.clone()
             }
             /// See [`OpHandle::at_end`].

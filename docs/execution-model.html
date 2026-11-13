@@ -222,7 +222,7 @@ nav.toc a:hover { text-decoration: underline; }
 <p><code>want</code> is a hint. The executor gets the whole answer up front and plans with it:</p>
 <ul>
   <li><code>got == 0</code> for <code>Root</code> is a host failure, reported like any other unreachable host.</li>
-  <li><code>got == 1</code> always works. One shell, no PTY, ops sequential, hangs handled by <code>timeout</code> inside the shell. Everything is designed to be correct at degree one, so a host that only gives one shell is slower, never broken.</li>
+  <li><code>got == 1</code> always works. One shell, no PTY, ops sequential, hangs handled by the controller's clock and a second shell that kills the op's process group. Everything is designed to be correct at degree one, so a host that only gives one shell is slower, never broken.</li>
   <li><code>got &gt;= 2</code> lets the executor assign roles: the first shell without a PTY for ops whose output is parsed, the second with a PTY for ops a human might watch, any further ones raising per-host concurrency once within-host parallelism exists.</li>
 </ul>
 <p>The optimizer never sees any of this. It emits the per-host graph; the executor schedules it onto however many shells it was given, and the UI shows the <code>limit</code> when a host came up short.</p>
@@ -237,19 +237,19 @@ nav.toc a:hover { text-decoration: underline; }
 </section>
 
 <figure>
-<svg viewBox="0 0 880 250" role="img" aria-label="Two streams over one persistent shell: commands pipelined into stdin, output and nonce-tagged trailers coming back on stdout, with the engine never waiting between commands.">
-  <rect x="20" y="20" width="840" height="210" rx="8" class="d-box"/>
+<svg viewBox="0 0 910 250" role="img" aria-label="Two streams over one persistent shell: commands pipelined into stdin, each printing a start line before its body, output and nonce-tagged trailers coming back on stdout, with the engine never waiting between commands.">
+  <rect x="20" y="20" width="870" height="210" rx="8" class="d-box"/>
   <text x="36" y="44" class="d-label">one persistent shell · ssh host bash</text>
 
   <text x="36" y="80" class="d-label">stdin →</text>
-  <rect x="110" y="66" width="150" height="24" rx="3" class="d-box-accent"/>
-  <text x="118" y="82" class="d-mono-sm">( useradd … ); trailer</text>
-  <rect x="266" y="66" width="200" height="24" rx="3" class="d-box-accent"/>
-  <text x="274" y="82" class="d-mono-sm">( apt-get install … ); trailer</text>
-  <rect x="472" y="66" width="160" height="24" rx="3" class="d-box-accent"/>
-  <text x="480" y="82" class="d-mono-sm">( file nginx.conf ); trailer</text>
-  <rect x="638" y="66" width="200" height="24" rx="3" class="d-box-accent"/>
-  <text x="646" y="82" class="d-mono-sm">[ changed ] &amp;&amp; ( restart ); trailer</text>
+  <rect x="110" y="66" width="164" height="24" rx="3" class="d-box-accent"/>
+  <text x="118" y="82" class="d-mono-sm">( start useradd ); trailer</text>
+  <rect x="280" y="66" width="176" height="24" rx="3" class="d-box-accent"/>
+  <text x="288" y="82" class="d-mono-sm">( start apt-get … ); trailer</text>
+  <rect x="462" y="66" width="160" height="24" rx="3" class="d-box-accent"/>
+  <text x="470" y="82" class="d-mono-sm">( start file … ); trailer</text>
+  <rect x="628" y="66" width="250" height="24" rx="3" class="d-box-accent"/>
+  <text x="636" y="82" class="d-mono-sm">[ changed ] &amp;&amp; ( start restart ); trailer</text>
 
   <text x="36" y="150" class="d-label">stdout ←</text>
   <rect x="110" y="120" width="40" height="24" rx="3" class="d-box"/>
@@ -272,7 +272,7 @@ nav.toc a:hover { text-decoration: underline; }
   <text x="36" y="204" class="d-muted">attributes the bytes between them to the op that produced them, and parses each trailer into that op's typed result.</text>
   <text x="36" y="222" class="d-muted">The guard on the restart is evaluated by the shell, from a variable the file op set.</text>
 </svg>
-<figcaption class="caption">Pipelined ops on one shell. Time runs left to right; trailer boxes are the nonce-tagged result lines. Nothing on the host knows it is being driven by anything other than a person typing fast.</figcaption>
+<figcaption class="caption">Pipelined ops on one shell. Time runs left to right; trailer boxes are the nonce-tagged result lines. Each op also prints a start line before its body (the <code>start</code> in the stdin boxes), which the engine reads for the op's PID and never shows. Nothing on the host knows it is being driven by anything other than a person typing fast.</figcaption>
 </figure>
 
 <section class="prose">
@@ -285,16 +285,17 @@ echo "__tp_${nonce} ${id} {\"rc\":${rc},\"changed\":${changed}}"</code></pre>
 <pre><code><span class="k">struct</span> FileResult { rc: i32, changed: bool }          <span class="c">// parser generated from the type</span>
 <span class="k">impl</span> Op <span class="k">for</span> File { <span class="k">type</span> Result = FileResult; <span class="k">fn</span> template(&amp;<span class="k">self</span>) -&gt; Script { … } }</code></pre>
 <p>A template that forgets a field fails to compile, not fails at three in the morning. The nonce is random per run so output cannot spoof a trailer. Each op runs in a subshell so working directory and environment never leak from one op to the next; the only state that persists on purpose is the small set of variables guards read.</p>
+<p>The persistent shell runs under <code>set -m</code>, so each op's subshell is its own process group (its process group id is its PID), and a controller can signal the whole op, the op's children and its <code>&amp;</code> jobs included, from a second shell. The subshell sets its EXIT and TERM traps, then prints a start line, <code>__tpS_&lt;nonce&gt; &lt;id&gt; &lt;pid&gt; &lt;shell pid&gt;</code>, just before its body. The PID is valid until that op's trailer arrives, and the shell pid lets a second shell check that the PID is still the op's before it signals. The op's stderr is swapped for the length of the subshell: bash prints a job notice when a process is signalled, and that notice quotes the whole op script, which must never reach the stream (an op's own stderr still does). A TERM makes the subshell exit 143, so a stopped op still prints its trailer; a KILL leaves none, and the controller makes the result up.</p>
 
 <h3>What the shell gives us for free</h3>
 <ul>
-  <li><strong>A real terminal per op.</strong> On the PTY shell the bytes between two trailers are exactly what a terminal would have shown: colors, progress bars, cursor movement. The stream log stores them with timestamps, and xterm.js or ghostty-wasm replays them with the same code path as live.</li>
+  <li><strong>A real terminal per op.</strong> On the PTY shell the bytes between an op's start line and its trailer are exactly what the op printed, and what a terminal would have shown: colors, progress bars, cursor movement. Start lines are never shown. The stream log stores them with timestamps, and xterm.js or ghostty-wasm replays them with the same code path as live.</li>
   <li><strong>Facts in bulk.</strong> One <code>dpkg-query -W -f='${Package}\t${db:Status-Status}\n'</code> answers every package question; one <code>stat -c</code> with a format string answers every file question. Non-distro sources' probes join the same prepare batch and run in the op's principal. The engine parses; the host just prints.</li>
   <li><strong>Interactive ops work.</strong> Stdin to the PTY shell reaches whatever is in the foreground, so a prompt that genuinely needs a human can get one, through the UI.</li>
   <li><strong>Non-Linux hosts work to the extent their shell does.</strong> There is no binary to build per architecture and nothing that assumes <code>/proc</code>.</li>
 </ul>
 <p>Where POSIX shell gets genuinely ugly for an op, the backstop is a helper script or static binary that telepatch owns, pushed lazily the first time that op kind runs on a host and cached by hash. That is a toolbox the shell calls, not a resident process.</p>
-<p>Two costs, on the record: a hung op blocks its shell until the <code>timeout</code> wrapper fires or a second shell kills it, and only the PTY shell can forward stdin cleanly. Both are acceptable.</p>
+<p>Two costs, on the record: a hung op blocks its shell until the controller's clock expires and a second shell kills it, and only the PTY shell can forward stdin cleanly. Both are acceptable.</p>
 </section>
 
 <section class="prose" id="trace">
@@ -686,7 +687,7 @@ echo "__tp_${nonce} ${id} {\"rc\":${rc},\"changed\":${changed}}"</code></pre>
 </table>
 </div>
 <section class="prose">
-<p>Every op takes the same handle methods: <code>.when(g)</code> and <code>.at_end()</code> (<a href="#d-triggers">Change triggers</a>), <code>.allow(Policy, reason)</code> (<a href="#d-policy">Policy errors</a>), <code>.retry(n)</code> and <code>.timeout(d)</code> (<a href="#d-run-controls">Run controls</a>), <code>.allow_fail()</code>, <code>.needs_reboot()</code> (<a href="#d-reboot">Reboot</a>). Of these <code>.when</code>, <code>.at_end()</code>, <code>.allow(..)</code> and <code>.allow_fail()</code> are built.</p>
+<p>Every op takes the same handle methods: <code>.when(g)</code> and <code>.at_end()</code> (<a href="#d-triggers">Change triggers</a>), <code>.allow(Policy, reason)</code> (<a href="#d-policy">Policy errors</a>), <code>.retry(n)</code> and <code>.timeout(d)</code> (<a href="#d-run-controls">Run controls</a>), <code>.allow_fail()</code>, <code>.needs_reboot()</code> (<a href="#d-reboot">Reboot</a>). Of these <code>.when</code>, <code>.at_end()</code>, <code>.allow(..)</code>, <code>.allow_fail()</code> and <code>.timeout(d)</code> are built.</p>
 <p>Facts, as distinct from ops: <code>os</code> (family, distro, version, codename; a rolling distro, one whose os-release says <code>BUILD_ID=rolling</code>, has the version <code>rolling</code>, since its <code>VERSION_ID</code> is a build date that drifts weekly and nothing reads it), <code>exists(p)</code>, <code>bin_exists(cmd)</code> and <code>bin_version(cmd)</code> are built; <code>user_info(u)</code> (home, shell, exists), <code>stat(p)</code>, <code>pkg_installed(n)</code>, the general <code>check(cmd)</code> that returns rc and stdout, and <code>h.assert(..)</code> are designed (<a href="#d-facts">Facts and assertions</a>). Of the old tier two, <code>git</code> and <code>reboot</code> have rows above, <code>unarchive</code> is <code>h.file(p).unpack(fetched)</code>, and <code>mount</code> and <code>firewall</code> are among the proposals nobody has ruled on (<a href="#held">Held, and out</a>).</p>
 <p>The four galaxy roles are the real porting cost. <code>geerlingguy.docker</code> is repo + pkg + svc + user groups, maybe 20 lines. <code>gantsign.golang</code> is a <code>pkg</code> with a binary-release source, and <code>stephdewit.nvm</code> is a <code>mise</code> tool. <code>geerlingguy.firewall</code> needs the firewall proposal, which is unruled.</p>
 </section>
@@ -1390,7 +1391,7 @@ vars = { admin_users = ["bot", "ml"] }</code></pre>
 <section class="prose" id="d-run-controls">
 <h3>Run controls</h3>
 <p>How many hosts at a time, which roles, and how long to wait.</p>
-<p class="status">Status: <strong>built</strong>: <code>.allow_fail()</code>, <code>--serial</code>, <code>--max-fail</code> (a host it holds back is reported <code>skipped</code>, <em>max-fail n reached</em>; failed, blocked and error count; hosts already started finish) and <code>--only</code> (a role called inside a named role runs with it; a name the playbook did not trace is an error listing those it did). <strong>designed</strong>: <code>.retry</code>, <code>.timeout</code>, <code>wait_for</code></p>
+<p class="status">Status: <strong>built</strong>: <code>.allow_fail()</code>, <code>--serial</code>, <code>--max-fail</code> (a host it holds back is reported <code>skipped</code>, <em>max-fail n reached</em>; failed, blocked and error count; hosts already started finish) and <code>--only</code> (a role called inside a named role runs with it; a name the playbook did not trace is an error listing those it did). <code>.timeout(d)</code>, enforced by the controller (below). <strong>designed</strong>: <code>.retry</code>, <code>wait_for</code></p>
 <pre><code>$ tp-basic run site --inventory inventory.toml --limit web \
       --serial 2 --max-fail 1 --only docker,telegraf</code></pre>
 <pre><code>h.fetch(url).sha256(sum).retry(3).timeout(5 * MIN);
@@ -1400,7 +1401,13 @@ h.wait_for(Port::tcp(5432)).timeout(60 * SEC);    <span class="c">// fails the r
 <ul>
   <li><code>--serial n</code> applies to <code>n</code> hosts at a time. <code>--max-fail n</code> stops starting hosts once more than <code>n</code> have failed; hosts already started finish.</li>
   <li><code>--only</code> runs the named roles and skips the rest.</li>
-  <li><code>.retry(n)</code> and <code>.timeout(d)</code> are available on every op.</li>
+  <li><code>.retry(n)</code> and <code>.timeout(d)</code> are available on every op. A zero duration is a trace error, and a second <code>.timeout</code> call replaces the first.</li>
+  <li><code>.timeout(d)</code> is enforced by the controller, not on the host. The clock starts at the op's start line (not at the send, so an op queued behind a slow one is not charged for the wait) and there is one clock per shell, as only one op of a shell runs at a time. Defaults, for an op with no <code>.timeout</code>: <code>pkg</code> 30 minutes; <code>sh</code>, <code>resource</code> and <code>git</code> 10 minutes; <code>file</code> and <code>repo</code> 5 minutes; <code>svc</code> 2 minutes; <code>unit</code>, <code>group</code> and <code>user</code> 1 minute; <code>wait_for</code> 5 minutes once it is built. The plan shows an explicit limit and hides a default, and a limit is part of op equality, so two <code>pkg</code> ops with different limits do not merge.</li>
+  <li>On expiry the controller opens a second shell, once per host and only when a timeout first fires (the same <code>ssh</code> destination or container, a root shell, so the same PID namespace and root can signal any principal's op). In it, it checks that the PID is still the op's (its parent is the shell pid from the start line and its process group is its PID) and sends TERM to the process group. <strong>TERM is sent again every second for five seconds, then KILL.</strong> One TERM is not enough: a child that has forked but not yet exec'd still carries the op's TERM trap and absorbs the signal, so the op carries on. Repeating it gives the op its rc-143 trailer; KILL is the bound. A trailer is taken if it arrives. If none does (KILL was needed, or the op ended without one) the result is made up once the second shell reports the group gone, and a trailer for that op that arrives later is ignored. The op is reported <code>FAILED (timed out after d)</code>, taken from the controller's record of the kill, never from an exit code; with <code>.allow_fail()</code> it is <code>failed (timed out after d, allowed)</code> and the run goes on. Otherwise its role fails and the later ops of the run are skipped by the halt flag. The persistent shell is still usable after a kill.</li>
+  <li>If no start line comes, the clock starts when the op becomes the shell's current op (at the previous op's trailer, or at the send for the first op of a run), with the same limit. On expiry there is no PID to kill: the shell is wedged before the op began, so the host's shells are closed and the host fails with <em>op never started within d; shell dropped</em>.</li>
+  <li>An op that ends without a trailer (a command that failed to exec before bash started, or an <code>exec</code> that replaces the op's subshell, so its EXIT trap never runs) is bounded by the same clock. If the second shell finds the PID gone and no trailer, the op is reported <code>FAILED (ended without a result)</code>, not as a timeout.</li>
+  <li>One shell only: if the second shell cannot be opened (no channel is left, <code>MaxSessions</code> with no further master, a refusal), the host's connection is dropped (the shells and the transport are closed) and the host fails with <em>timed out after d; no second shell to stop it</em>.</li>
+  <li>Accepted cost: the clock lives in the controller. If the controller dies or the network drops mid-op, nothing kills the op on the host (an on-host backstop is deferred). A service started through <code>systemctl</code> is not the op's child and survives a kill; so does a process that left the process group (<code>setsid</code>).</li>
   <li><code>wait_for</code> is an op with no change of its own: a port, a path, or a unit reaching active.</li>
 </ul>
 </section>
@@ -1664,7 +1671,7 @@ sh!(h, <span class="w">"sed -i 's/^Types: deb$/Types: deb deb-src/' {sources}"</
 h.pkg([<span class="w">"vendor-agent"</span>]).allow_fail();                    <span class="c">// failure recorded, role continues</span>
 <span class="k">let</span> r = h.pkg([<span class="w">"vendor-agent"</span>]).allow_fail();
 h.svc(<span class="w">"x"</span>).restart().when(r.ok());                       <span class="c">// outcome as a guard; no sync</span>
-h.fetch(url).sha256(sum).retry(3).timeout(5 * MIN);       <span class="c">// on every op; the timeout runs on the host</span>
+h.fetch(url).sha256(sum).retry(3).timeout(5 * MIN);       <span class="c">// on every op; the controller enforces the timeout</span>
 h.wait_for(Port::tcp(5432)).timeout(60 * SEC);            <span class="c">// fails the role if it never opens</span>
 <span class="c">// HACK(resource: diff as a typed check): the escape hatch keeps ok_if</span>
 sh!(h, <span class="w">"diff a b"</span>).ok_if(|rc| rc &lt;= 1);                  <span class="c">// failed_when, typed</span>

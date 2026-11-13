@@ -180,3 +180,46 @@ fn ssh_exec_runs_as_a_user_the_run_creates() {
     println!("second run: changed {changed}");
     none_left();
 }
+
+fn timeout_pb(h: Host<()>) -> PlaybookFuture {
+    Box::pin(async move {
+        // A group of two `sleep`s; the op's clock stops it. `allow_fail`
+        // lets the run go on, as a later op on the same persistent shell.
+        sh!(h, "sleep 3051 & sleep 3052 & wait")
+            .timeout(Duration::from_secs(2))
+            .allow_fail();
+        let _ = h.bin_exists("tp-no-such-bin").await;
+        sh!(h, "touch /srv/tp-after-timeout");
+        Ok(())
+    })
+}
+
+/// `.timeout` over a real sshd: the second shell (`sudo -n -H bash`, a
+/// second channel) takes the op's process group down, the shell that ran
+/// the op is still usable, and the next op runs. Run by T104.
+#[test]
+#[ignore = "needs docker and the network"]
+fn ssh_exec_timeout_kills_the_group_and_the_next_op_runs() {
+    let _serial = SERIAL.blocking_lock();
+    let d = Sshd::start();
+    let pb = Playbook::new("timeout", timeout_pb);
+    let r = go(&d, &pb);
+    assert_ne!(r.exit_code(), 1, "{}", r.render());
+    assert_eq!(
+        exec(
+            &d,
+            "test -e /srv/tp-after-timeout && echo present || echo absent"
+        ),
+        "present\n",
+        "the next op did not run: {}",
+        r.render()
+    );
+    // Both sleeps are gone (the pattern's own command line does not match
+    // itself: `[12]` is not `1` or `2`).
+    let left = exec(
+        &d,
+        "for f in /proc/[0-9]*/cmdline; do tr '\\0' ' ' < \"$f\" 2>/dev/null; echo; done | grep -c 'sleep 305[12]'",
+    );
+    assert_eq!(left.trim(), "0", "a sleep outlived its op");
+    none_left();
+}

@@ -168,6 +168,7 @@ mod tests {
             site: None,
             allowed: Vec::new(),
             at_end: false,
+            timeout: None,
         })
     }
 
