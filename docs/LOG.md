@@ -1609,3 +1609,31 @@ are appended, never edited in; a hook refuses rewrites.
 - Gate E green: 924 passed; lint clean; tp_basic 50 passed, unchanged.
 - tp_basic: stale `bash -l` comment in rust_build.rs corrected.
 - Commits: telepatch 9adc138; tp_basic 46c7aaf
+
+## 2026-11-13 — T106 Inverse capture for `file` and `unit`
+
+- Every file and unit form records `existed`, `was_type`, `was_mode`,
+  `was_owner`, `created_top` and `backup` (stage path) in `FileResult`.
+  Copied forms `cp -a`; `.absent()` and `.unpack`'s old tree move
+  (renames); `.from(local_dir)` copies replaced files plus a `created`
+  manifest; mode/owner-only changes save no bytes; unchanged ops save
+  nothing.
+- Backups on the target's own filesystem (FU-Q3): `tp_fsroot` device
+  walk, `TP_FS_ROOTS` test seam; `<root>/.telepatch/tmp/<run>/undo/
+  <user>/<id>` linked from `<stage>/<run>/undo/…`; `fsroots` index.
+  Mount points and nested mounts refused before a move. No fallback to
+  the stage's filesystem. Only a uid-0 shell creates `.telepatch` at a
+  walked root.
+- Root-shell preparation op before each capturing `as_user` run; cleanup
+  on every host end (fresh root shell if the old one is gone), kept
+  across a reboot barrier; stale sweep of dead runs older than 24 h,
+  younger ones warned (FU-Q4 default).
+- `has_inverse` true for file and unit; note cells and "Roles as
+  transactions" row updated.
+- tp_basic: test-only playbook `undo_fs` and its `test-vm.sh` setup
+  (64 MiB ext4 loop mount at `/srv/tpfs`), written here, run in T104.
+- Snapshots: telepatch 13, tp_basic 117 moved (capture lines only,
+  checked by script), 13 new undo_fs plans.
+- Gate E green: telepatch 975 passed, lint clean; tp_basic 52 passed,
+  check-conversion ok, test-oracle-selftest ok.
+- Commits: telepatch 4c1ff3b; tp_basic 7611fef
