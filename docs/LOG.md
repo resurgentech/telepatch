@@ -1555,3 +1555,23 @@ are appended, never edited in; a hook refuses rewrites.
   `cargo test --workspace` 5 times green (886 passed); lint clean;
   tp_basic unchanged. No file under `src/`.
 - Commits: telepatch 257d92e
+
+## 2026-11-12 — T102 Reboot marks and the playbook barrier
+
+- `.needs_reboot()` on every op handle; `h.reboot().if_pending()` records
+  `Node::Reboot` (not `Node::Barrier`). Plan: `needs_reboot` flag, `reboot
+  if pending` line. Windows never span a reboot node; nothing hoists across.
+- A marked member that changed (per member for a merged `pkg`) is appended
+  to `${TP_RUN_DIR:-/run/telepatch}/reboot-pending` through the root shell
+  after its run is collected, before a failure is acted on.
+- Barrier: apply everything before it, probe the mark (an earlier run's
+  counts). Over SSH: `systemctl reboot`, drop every shell, poll a fresh
+  root shell until `${TP_BOOT_ID:-/proc/sys/kernel/random/boot_id}`
+  changes (deadline 10 min), login and killer shells reopen lazily,
+  confirmed facts forgotten. `--local`, docker, `--reboot never`: host
+  stops with `reboot pending at barrier` (status `reboot pending`, exit 1).
+- End of run lists `reboot pending`; `--reboot auto` reboots once more.
+  `--reboot` conflicts with `--check`; a check stops at a barrier that may
+  be pending. Note: reboot row and `#d-reboot` marked built.
+- Gate E green: 915 passed; lint clean; tp_basic 48 passed, unchanged.
+- Commits: telepatch fec9bd6
