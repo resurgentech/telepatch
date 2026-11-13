@@ -1637,3 +1637,18 @@ are appended, never edited in; a hook refuses rewrites.
 - Gate E green: telepatch 975 passed, lint clean; tp_basic 52 passed,
   check-conversion ok, test-oracle-selftest ok.
 - Commits: telepatch 4c1ff3b; tp_basic 7611fef
+
+## 2026-11-13 — T107 Inverse capture for `repo` and `user`
+
+- `RepoResult`: `key_created`, `file_created`, `backup`; an existing apt
+  source or `.dnf` body is backed up by T106's `tp_save` on its own
+  filesystem before the rewrite (seam test with the link); a backup
+  failure fails the op before the rewrite.
+- `UserResult`: `was_shell` (null when `usermod -s` did not run),
+  `groups_added` (only the groups the account lacked); no hash, shadow
+  field or checksum in any output (tested).
+- `has_inverse`: user true, repo true unless `RepoKind::Unset`; a repo
+  window sets `undo_used`; note cells and transactions rows updated.
+- Snapshots: telepatch 4, tp_basic 49, capture lines only.
+- Gate E green: telepatch 987 passed, lint clean; tp_basic 52 passed.
+- Commits: telepatch f9a1024; tp_basic 18c5fba
