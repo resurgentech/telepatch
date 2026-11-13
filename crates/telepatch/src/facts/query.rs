@@ -125,7 +125,7 @@ impl Fact {
     /// Turn the probe's stdout into the fact's value.
     pub fn parse(&self, stdout: &str) -> Value {
         if let Fact::Check(_) = self {
-            return parse_check(stdout);
+            return parse_check_run(stdout, 1).remove(0);
         }
         let mut lines = stdout.lines();
         let first = lines.next().unwrap_or("").trim();
@@ -285,71 +285,118 @@ fn pkg_probe(name: &str, family: Option<&Family>) -> String {
     }
 }
 
-/// Run `cmd` in a fresh bash. Stdout is preserved, including a trailing
-/// newline; stderr is discarded so it does not join the shell's merged
-/// stream. The temp file is removed before the probe returns.
-///
-/// The command reaches bash on fd 9 from a quoted here-doc, never as an
-/// argument (no size cap, not in `ps`). The delimiter is a digest of the
-/// command plus a counter: a script cannot hold a line equal to a digest of
-/// itself, and if one ever did, the counter moves to the next delimiter
-/// ([`check_probe_with`] is the error form).
+/// Run `cmd` in a fresh bash: a run of one ([`check_run_probe`]).
 fn check_probe(cmd: &str) -> String {
+    check_run_probe(&[cmd])
+}
+
+/// Run a run of checks in one fresh bash (T115). Each command is a
+/// single-quoted variable (`tp_c1='...'`) and runs as `( eval "$tp_c1" )` in
+/// its own subshell, stdout to its own temp file, stderr discarded, stdin
+/// `/dev/null`. So `exit n`, `cd`, variables and `set -e` stay in that check,
+/// and a syntax error is confined to its `eval` (rc 2). Then the probe
+/// prints, per check, rc, byte length, stdout and one newline, so a trailing
+/// newline survives. The temp directory is removed before the probe returns.
+///
+/// The script reaches bash on fd 9 from a quoted here-doc, never as an
+/// argument (no size cap, not in `ps`). The delimiter is a digest of the
+/// commands plus a counter: a script cannot hold a line equal to a digest of
+/// itself, and if one ever did, the counter moves to the next delimiter
+/// ([`check_run_probe_with`] is the error form).
+pub fn check_run_probe(cmds: &[&str]) -> String {
     for counter in 0..64 {
-        if let Ok(s) = check_probe_with(cmd, counter) {
+        if let Ok(s) = check_run_probe_with(cmds, counter) {
             return s;
         }
     }
     unreachable!("64 delimiters in a row each equal a line of the command")
 }
 
-/// [`check_probe`] with the delimiter for `counter`; an error when a line of
-/// `cmd` equals it.
-fn check_probe_with(cmd: &str, counter: u32) -> Result<String, crate::trailer::RenderError> {
+/// [`check_run_probe`] with the delimiter for `counter`; an error when a
+/// line of the script equals it.
+fn check_run_probe_with(
+    cmds: &[&str],
+    counter: u32,
+) -> Result<String, crate::trailer::RenderError> {
     use sha2::{Digest, Sha256};
-    let digest: String = Sha256::digest(cmd.as_bytes())
+    let mut h = Sha256::new();
+    for c in cmds {
+        h.update((c.len() as u64).to_le_bytes());
+        h.update(c.as_bytes());
+    }
+    let digest: String = h
+        .finalize()
         .iter()
         .take(8)
         .map(|b| format!("{b:02x}"))
         .collect();
     let delim = format!("__tp_C_{digest}_{counter}");
-    let body = crate::trailer::heredoc_body(cmd, &delim)?;
+    let mut script = String::from("d=$1\n");
+    for (i, c) in cmds.iter().enumerate() {
+        let n = i + 1;
+        script.push_str(&format!("tp_c{n}={}\n", quote(c)));
+        script.push_str(&format!(
+            "( eval \"$tp_c{n}\" ) >\"$d/{n}\" 2>/dev/null </dev/null\ntp_r{n}=$?\n"
+        ));
+    }
+    for n in 1..=cmds.len() {
+        script.push_str(&format!(
+            "printf '%s\\n' \"$tp_r{n}\"\nwc -c < \"$d/{n}\" | tr -d '[:space:]'\nprintf '\\n'\ncat \"$d/{n}\"\nprintf '\\n'\n"
+        ));
+    }
+    let body = crate::trailer::heredoc_body(&script, &delim)?;
+    // No temp directory: every check answers rc 1 and nothing.
+    let empty = "printf '1\\n0\\n\\n'\n".repeat(cmds.len());
     Ok(format!(
-        "tp_f=$(mktemp 2>/dev/null) || tp_f=\n\
-         if [ -z \"$tp_f\" ]; then printf '%s\\n%s\\n' 1 0; else\n\
-         bash /dev/fd/9 >\"$tp_f\" 2>/dev/null 9<<'{delim}'\n\
+        "tp_d=$(mktemp -d 2>/dev/null) || tp_d=\n\
+         if [ -z \"$tp_d\" ]; then\n\
+         {empty}\
+         else\n\
+         bash /dev/fd/9 \"$tp_d\" 2>/dev/null 9<<'{delim}'\n\
          {body}\
-         tp_rc=$?\n\
-         printf '%s\\n' \"$tp_rc\"\n\
-         wc -c < \"$tp_f\" | tr -d '[:space:]'\n\
-         printf '\\n'\n\
-         cat \"$tp_f\"\n\
-         rm -f -- \"$tp_f\"\n\
+         rm -rf -- \"$tp_d\"\n\
          fi\n"
     ))
 }
 
-fn parse_check(stdout: &str) -> Value {
-    let Some((rc_line, rest)) = stdout.split_once('\n') else {
+/// The answers of a run of `n` checks, in order. A missing or short answer
+/// is rc 1 and no stdout, as a failed read.
+pub fn parse_check_run(stdout: &str, n: usize) -> Vec<Value> {
+    let mut rest = stdout.as_bytes();
+    (0..n).map(|_| take_check(&mut rest)).collect()
+}
+
+fn take_check(rest: &mut &[u8]) -> Value {
+    fn line(rest: &mut &[u8]) -> Option<String> {
+        let i = rest.iter().position(|b| *b == b'\n')?;
+        let l = String::from_utf8_lossy(&rest[..i]).trim().to_string();
+        *rest = &rest[i + 1..];
+        Some(l)
+    }
+    let Some(rc) = line(rest) else {
+        *rest = &[];
         return Value::Check(Check {
             rc: 1,
             stdout: String::new(),
         });
     };
-    let Some((len_line, rest)) = rest.split_once('\n') else {
+    let rc = rc.parse().unwrap_or(1);
+    let Some(len) = line(rest) else {
+        *rest = &[];
         return Value::Check(Check {
-            rc: rc_line.trim().parse().unwrap_or(1),
+            rc,
             stdout: String::new(),
         });
     };
-    let rc = rc_line.trim().parse().unwrap_or(1);
-    let len: usize = len_line.trim().parse().unwrap_or(0);
-    let bytes = rest.as_bytes();
-    let take = len.min(bytes.len());
-    Value::Check(Check {
-        rc,
-        stdout: String::from_utf8_lossy(&bytes[..take]).into_owned(),
-    })
+    let len: usize = len.parse().unwrap_or(0);
+    let take = len.min(rest.len());
+    let body = String::from_utf8_lossy(&rest[..take]).into_owned();
+    *rest = &rest[take..];
+    // The newline after the body separates it from the next check.
+    if rest.first() == Some(&b'\n') {
+        *rest = &rest[1..];
+    }
+    Value::Check(Check { rc, stdout: body })
 }
 
 /// A fact plus the shell it is asked in. Root's `which cargo` and a login
@@ -473,12 +520,40 @@ mod tests {
     fn check_probe_takes_the_command_on_fd_9() {
         let probe = check_probe("echo hi");
         assert!(
-            probe.contains("bash /dev/fd/9 >\"$tp_f\" 2>/dev/null 9<<'__tp_C_"),
+            probe.contains("bash /dev/fd/9 \"$tp_d\" 2>/dev/null 9<<'__tp_C_"),
             "{probe}"
         );
         assert!(!probe.contains("bash -c"), "{probe}");
         // The same command always renders the same probe.
         assert_eq!(probe, check_probe("echo hi"));
         assert_ne!(probe, check_probe("echo ho"));
+    }
+
+    #[test]
+    fn a_run_probe_holds_each_command_in_its_own_quoted_variable() {
+        let probe = check_run_probe(&["echo 'a'", "exit 3", "pwd"]);
+        assert!(probe.contains(r"tp_c1='echo '\''a'\'''"), "{probe}");
+        assert!(probe.contains("tp_c2='exit 3'"), "{probe}");
+        assert!(probe.contains("tp_c3='pwd'"), "{probe}");
+        assert!(
+            probe.contains("( eval \"$tp_c3\" ) >\"$d/3\" 2>/dev/null </dev/null"),
+            "{probe}"
+        );
+        // One bash for the whole run.
+        assert_eq!(probe.matches("bash /dev/fd/9").count(), 1, "{probe}");
+    }
+
+    #[test]
+    fn a_run_answer_splits_per_check() {
+        let got = parse_check_run("0\n2\nhi\n3\n0\n\n0\n2\na\n\n\n", 3);
+        let c = |rc, s: &str| {
+            Value::Check(Check {
+                rc,
+                stdout: s.into(),
+            })
+        };
+        assert_eq!(got, vec![c(0, "hi"), c(3, ""), c(0, "a\n")]);
+        // A short answer fills the rest with a failed read.
+        assert_eq!(parse_check_run("", 2), vec![c(1, ""), c(1, "")]);
     }
 }

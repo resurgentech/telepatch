@@ -177,7 +177,7 @@ use crate::engine::{
     Applied, Crossed, Engine, EngineError, Executor, HostInfo, RebootAt, Split, Window, WindowKind,
     WindowOp,
 };
-use crate::facts::query::FactQuery;
+use crate::facts::query::{Fact, FactQuery, check_run_probe, parse_check_run};
 use crate::host::Host;
 use crate::key::Value;
 use crate::ops::pkg::{PkgMode, Wanted};
@@ -2659,15 +2659,44 @@ impl Executor for HostExec {
             self.block(why);
             return queries.iter().map(default).collect();
         }
+        // Group the queries into probes: a maximal run of `check` reads with
+        // one `RunAs`, adjacent in this round's order, is one probe (one
+        // bash); every other read is a probe of its own (T115).
+        let mut probes: Vec<std::ops::Range<usize>> = Vec::new();
+        for (i, q) in queries.iter().enumerate() {
+            let joins = match (probes.last(), &q.fact) {
+                (Some(r), Fact::Check(_)) => {
+                    let prev = &queries[r.end - 1];
+                    matches!(prev.fact, Fact::Check(_)) && prev.run_as == q.run_as
+                }
+                _ => false,
+            };
+            if joins {
+                probes.last_mut().unwrap().end = i + 1;
+            } else {
+                probes.push(i..i + 1);
+            }
+        }
         // Render and send all probes, then collect.
         let mut ids = Vec::new();
         let mut sent_err = None;
-        for q in queries {
+        for r in &probes {
+            let q = &queries[r.start];
+            let script = if matches!(q.fact, Fact::Check(_)) {
+                let cmds: Vec<&str> = queries[r.clone()]
+                    .iter()
+                    .filter_map(|q| match &q.fact {
+                        Fact::Check(c) => Some(c.as_str()),
+                        _ => None,
+                    })
+                    .collect();
+                check_run_probe(&cmds)
+            } else {
+                q.fact.probe_for(&host.os)
+            };
             self.seq += 1;
             let node = OpNode {
-                spec: OpSpec::Raw {
-                    script: q.fact.probe_for(&host.os),
-                },
+                spec: OpSpec::Raw { script },
                 run_as: q.run_as.clone(),
                 reads: Default::default(),
                 writes: Default::default(),
@@ -2699,16 +2728,20 @@ impl Executor for HostExec {
             }
         }
         let mut values = Vec::new();
-        for (q, id) in queries.iter().zip(&ids) {
+        for (r, id) in probes.iter().zip(&ids) {
+            let q = &queries[r.start];
             let got = match self.shell_for(&q.run_as) {
                 Some(sh) => prepare::collect(sh, *id).await,
                 None => Err("no shell".to_string()),
             };
             match got {
+                Ok((_, out)) if matches!(q.fact, Fact::Check(_)) => {
+                    values.extend(parse_check_run(&out, r.len()));
+                }
                 Ok((_, out)) => values.push(q.fact.parse(&out)),
                 Err(e) => {
                     sent_err = sent_err.or(Some(e));
-                    values.push(default(q));
+                    values.extend(queries[r.clone()].iter().map(default));
                 }
             }
         }
@@ -2716,6 +2749,7 @@ impl Executor for HostExec {
             values.push(default(&queries[values.len()]));
         }
         self.sink.event(json!({"ev":"facts","host":self.name,"window":window,
+            "probes": probes.len(),
             "answers": queries.iter().zip(&values).map(|(q, v)| format!("{q} = {v}")).collect::<Vec<_>>()}));
         if let Some(e) = sent_err {
             self.block(format!("reading facts: {e}"));

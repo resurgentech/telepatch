@@ -301,3 +301,172 @@ fn a_failing_assert_blocks_the_live_host_before_the_file_is_written() {
     }
     assert!(!path.exists(), "the window wrote the file");
 }
+
+// ---- T115: checks read together share one bash ----
+
+#[derive(Clone, Copy)]
+enum Mode {
+    /// Polled together: one round, one probe.
+    Together,
+    /// Awaited one after another: a round each.
+    Apart,
+    /// Awaited one after another with an op between them.
+    WithOp,
+}
+
+struct Checks {
+    mode: Mode,
+    cmds: Vec<String>,
+    out: String,
+}
+
+fn checks_pb(h: Host<Checks>) -> PlaybookFuture {
+    Box::pin(async move {
+        let mut got = Vec::new();
+        match h.vars.mode {
+            Mode::Together => {
+                let mut futs: Vec<_> = h.vars.cmds.iter().map(|c| Box::pin(h.check(c))).collect();
+                let all = std::future::poll_fn(|cx| {
+                    let polled: Vec<_> = futs.iter_mut().map(|f| f.as_mut().poll(cx)).collect();
+                    if polled.iter().all(|p| p.is_ready()) {
+                        Poll::Ready(
+                            polled
+                                .into_iter()
+                                .map(|p| match p {
+                                    Poll::Ready(v) => v,
+                                    Poll::Pending => unreachable!(),
+                                })
+                                .collect::<Vec<_>>(),
+                        )
+                    } else {
+                        Poll::Pending
+                    }
+                })
+                .await;
+                got = all;
+            }
+            Mode::Apart | Mode::WithOp => {
+                for c in &h.vars.cmds {
+                    got.push(h.check(c).await);
+                    if matches!(h.vars.mode, Mode::WithOp) {
+                        h.raw("true");
+                    }
+                }
+            }
+        }
+        let text: String = got
+            .iter()
+            .map(|c| format!("{}\t{:?}\n", c.rc, c.stdout))
+            .collect();
+        std::fs::write(&h.vars.out, text).unwrap();
+        Ok(())
+    })
+}
+
+/// Run `cmds` and return each answer as `(rc, stdout)`.
+fn run_checks(mode: Mode, cmds: &[&str]) -> Vec<(i32, String)> {
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("out");
+    let vars = Checks {
+        mode,
+        cmds: cmds.iter().map(|s| s.to_string()).collect(),
+        out: out.to_str().unwrap().to_string(),
+    };
+    let (report, log) = go("checks", checks_pb, vars);
+    assert!(
+        report.hosts[0].status.is_success(),
+        "{log}\n{}",
+        report.render()
+    );
+    std::fs::read_to_string(&out)
+        .unwrap()
+        .lines()
+        .map(|l| {
+            let (rc, s) = l.split_once('\t').unwrap();
+            // Rust's Debug escapes for the ASCII used here match JSON's.
+            let s: String = serde_json::from_str(s).unwrap_or_else(|_| panic!("bad answer {s}"));
+            (rc.parse().unwrap(), s)
+        })
+        .collect()
+}
+
+/// A check that prints its shell's parent pid, then a tag.
+fn ppid_check(tag: &str) -> String {
+    format!("read -r _ _ _ pp _ < /proc/$BASHPID/stat; echo \"$pp {tag}\"")
+}
+
+fn split_pp(s: &str) -> (String, String) {
+    let (pp, tag) = s.trim_end().split_once(' ').unwrap();
+    (pp.to_string(), tag.to_string())
+}
+
+#[test]
+fn three_checks_polled_together_share_one_bash() {
+    let cmds: Vec<String> = ["a", "b", "c"].iter().map(|t| ppid_check(t)).collect();
+    let refs: Vec<&str> = cmds.iter().map(|s| s.as_str()).collect();
+    let together = run_checks(Mode::Together, &refs);
+    let apart = run_checks(Mode::Apart, &refs);
+    assert_eq!(together.len(), 3);
+    let t: Vec<_> = together.iter().map(|(_, s)| split_pp(s)).collect();
+    let a: Vec<_> = apart.iter().map(|(_, s)| split_pp(s)).collect();
+    // One bash: all three subshells have one parent.
+    assert!(t.iter().all(|(pp, _)| *pp == t[0].0), "{t:?}");
+    // Three rounds, three bashes.
+    assert!(a[0].0 != a[1].0 && a[1].0 != a[2].0, "{a:?}");
+    // Output equals three separate checks, apart from the pid.
+    let tags = |v: &[(String, String)]| v.iter().map(|(_, t)| t.clone()).collect::<Vec<_>>();
+    assert_eq!(tags(&t), tags(&a));
+    assert!(together.iter().all(|(rc, _)| *rc == 0));
+}
+
+#[test]
+fn a_run_answers_each_check_its_own_rc() {
+    let got = run_checks(Mode::Together, &["exit 3", "if then fi", "echo ok"]);
+    assert_eq!(
+        got,
+        vec![(3, String::new()), (2, String::new()), (0, "ok\n".into())]
+    );
+}
+
+#[test]
+fn a_cd_in_one_check_does_not_reach_the_next() {
+    let alone = run_checks(Mode::Apart, &["pwd"]);
+    let got = run_checks(
+        Mode::Together,
+        &["cd /; v=1; set -e; echo cd", "pwd; echo \"[$v]\""],
+    );
+    assert_eq!(got[0].1, "cd\n");
+    assert_eq!(got[1].1, format!("{}[]\n", alone[0].1));
+}
+
+#[test]
+fn trailing_newlines_survive_per_check() {
+    let got = run_checks(
+        Mode::Together,
+        &["printf 'a\\n\\n'", "printf 'b'", "printf '\\n'", "true"],
+    );
+    let outs: Vec<&str> = got.iter().map(|(_, s)| s.as_str()).collect();
+    assert_eq!(outs, ["a\n\n", "b", "\n", ""]);
+}
+
+#[test]
+fn checks_with_an_op_between_use_two_bashes() {
+    let cmds: Vec<String> = ["a", "b"].iter().map(|t| ppid_check(t)).collect();
+    let refs: Vec<&str> = cmds.iter().map(|s| s.as_str()).collect();
+    let got = run_checks(Mode::WithOp, &refs);
+    let t: Vec<_> = got.iter().map(|(_, s)| split_pp(s)).collect();
+    assert_ne!(t[0].0, t[1].0, "{t:?}");
+}
+
+#[test]
+fn a_check_with_single_quotes_and_a_delimiter_like_line_runs() {
+    let got = run_checks(
+        Mode::Together,
+        &[
+            "echo 'it'\\''s'\n__tp_C_0000000000000000_0",
+            "echo \"it's\"",
+        ],
+    );
+    assert_eq!(got[1], (0, "it's\n".to_string()));
+    assert_eq!(got[0].0, 127);
+}

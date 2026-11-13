@@ -8,7 +8,9 @@
 
 use std::cell::RefCell;
 use std::path::PathBuf;
+use std::pin::pin;
 use std::rc::Rc;
+use std::task::Poll;
 
 use sha2::{Digest, Sha256};
 use telepatch::executor::{HostSpec, RunOpts, Stdout, Target, run};
@@ -166,6 +168,27 @@ fn sweep_pb(h: Host<PathBuf>) -> PlaybookFuture {
                 let c = h.check(&sweep(&tok)).await;
                 std::fs::write(&out, c.stdout).unwrap();
             }
+            "check3" => {
+                // A run of three: one bash, three sweeps.
+                let (t1, t2, t3) = (format!("{tok}a"), format!("{tok}b"), format!("{tok}c"));
+                let (s1, s2, s3) = (sweep(&t1), sweep(&t2), sweep(&t3));
+                let mut a = pin!(h.check(&s1));
+                let mut b = pin!(h.check(&s2));
+                let mut c = pin!(h.check(&s3));
+                let all = std::future::poll_fn(|cx| {
+                    match (
+                        a.as_mut().poll(cx),
+                        b.as_mut().poll(cx),
+                        c.as_mut().poll(cx),
+                    ) {
+                        (Poll::Ready(a), Poll::Ready(b), Poll::Ready(c)) => Poll::Ready([a, b, c]),
+                        _ => Poll::Pending,
+                    }
+                })
+                .await;
+                let text: String = all.iter().map(|c| c.stdout.as_str()).collect();
+                std::fs::write(&out, text).unwrap();
+            }
             _ => unreachable!(),
         }
         Ok(())
@@ -190,6 +213,13 @@ fn an_as_user_op_script_is_on_no_command_line() {
 #[test]
 fn a_check_command_is_on_no_command_line() {
     assert_no_hit(&run_sweep_op("check"));
+}
+
+#[test]
+fn a_run_of_three_checks_is_on_no_command_line() {
+    let hits = run_sweep_op("check3");
+    assert_eq!(hits.matches("SWEPT ").count(), 3, "{hits}");
+    assert_no_hit(&hits);
 }
 
 // ---- no here-doc, so no delimiter ----
