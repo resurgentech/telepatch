@@ -1520,3 +1520,24 @@ are appended, never edited in; a hook refuses rewrites.
   `tmp/t101-rejected/` kept.
 - Gate E green: 853 passed; tp_basic unchanged.
 - Commits: telepatch ec67ee1
+
+## 2026-11-12 — T114 `as_user` ops run in the user's persistent login shell
+
+- One login shell per user per host, fed over stdin like every other
+  shell; an `as_user` op is a plain `( … )` subshell in it. No per-op
+  `bash -l`, `env -i` or here-doc. Shells keyed by `RunAs`.
+- `as_user("root")`: a second transport root shell turned into
+  `exec env -i HOME=… USER=… LOGNAME=… SHELL=… PATH=… bash -l` (values
+  from `getent passwd`), then a hello; `init_shell` and the T101
+  watchdog cover it. Non-root `as_user` on local and docker stays
+  deferred (OS-2 default). No passwd entry blocks the host.
+- `__tp_f`, `__tp_dr`, `__tp_run` set in place; guards across shells
+  are constants; the daemon-reload flag is carried across shells.
+- Staleness rules 1-6 as written (OS-3 default; `OpNode::stales`),
+  lazy reopen (`   login shell u reopened: <rule> after #N`, event
+  `login_reopened`), an op that can stale its own shell ends its run,
+  `h.as_user(u).relogin()` (plan `relogin u`). The group clause of rule
+  1 is inert: `group` ops carry no members.
+- tests/no_argv.rs adapted; tests/login_shell.rs (17); note amended.
+- Gate E green: 884 passed; lint clean; tp_basic 48 passed, unchanged.
+- Commits: telepatch 7be0643
