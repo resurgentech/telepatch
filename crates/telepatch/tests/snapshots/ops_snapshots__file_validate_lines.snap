@@ -20,87 +20,9 @@ trap 'exit 143' TERM
 rc=0; changed=0; skipped=0; installed=()
 tp_id=0
 printf '\n__tpS_testnonce 0 %s %s\n' "$BASHPID" "$$"
+[ "${__tp_hv-}" = fe76955f7a14ddf7 ] && declare -F tp_save >/dev/null || { echo "telepatch: shell helpers missing or stale (want fe76955f7a14ddf7)" >&2; exit 125; }
 rc=0; changed=0
 tp_p='/etc/ssh/sshd_config'
-tp_sbx() { [ "${TP_SANDBOX_REQUIRED-}" = 1 ] || return 0; local p s=${TP_SANDBOX-}; s=${s%/}; for p; do case $p/ in */../*) ;; /*) [ -n "$s" ] && [ -d "$s" ] && case $p/ in "$s"/*) continue;; esac;; esac; echo "telepatch: sandbox: refusing $p (TP_SANDBOX_REQUIRED is set; tests must use telepatch::testing::sandbox)" >&2; return 1; done; }
-tp_fsroot() {
-  local d=$1 r s= q v a; case $d in /*) ;; *) d=$PWD/$d;; esac
-  IFS=: read -ra a <<<"${TP_FS_ROOTS-}"
-  for r in "${a[@]}"; do r=${r%/}; [ -n "$r" ] || continue; case "$d/" in "$r"/*) [ ${#r} -gt ${#s} ] && s=$r;; esac; done
-  if [ -n "$s" ]; then printf %s "$s"; return; fi
-  while [ ! -e "$d" ] && [ ! -L "$d" ]; do d=$(dirname -- "$d"); done
-  v=$(stat -c %d -- "$d")
-  while q=$(dirname -- "$d"); [ "$q" != "$d" ] && [ "$(stat -c %d -- "$q")" = "$v" ]; do d=$q; done
-  printf %s "$d"
-}
-tp_was() {
-  if [ -L "$1" ]; then tp_wt=symlink; elif [ -d "$1" ]; then tp_wt=dir; elif [ -e "$1" ]; then tp_wt=file; else return 0; fi
-  tp_ex=1; tp_wm=$(stat -c %a -- "$1"); tp_wo=$(stat -c %U:%G -- "$1")
-}
-tp_try() { local p=$1 w=$2 e; shift 2; e=$("$@" 2>&1) || { echo "telepatch: file $p: cannot save undo data: $w: ${e##*: }" >&2; return 1; }; }
-tp_mkd() { [ -d "$2" ] || tp_try "$tp_up" "$2" mkdir -m "$1" -- "$2"; }
-tp_idx() { grep -qxF -- "$1" "$2" 2>/dev/null || (umask 077; printf '%s\n' "$1" >> "$2"); }
-tp_undo() {
-  tp_bd=; tp_bk=; [ -n "${__tp_run-}" ] || return 0
-  local sd=${TP_FETCH_STAGE:-/var/tmp/telepatch} u r s t i n=
-  tp_sbx "$sd" || return 1
-  tp_up=$1; u=$(id -un); r=$(tp_fsroot "$1"); s=$sd/$__tp_run; t=$r/.telepatch/tmp/$__tp_run
-  [ -d "$r" ] || { echo "telepatch: file $1: is a mount point" >&2; return 1; }
-  if [ "$r" != "$(tp_fsroot "$sd")" ] && [ ! -d "$t/undo/$u" ]; then
-    case ":${TP_FS_ROOTS-}:" in *":$r:"*) ;; *) [ "$(id -u)" = 0 ] || { echo "telepatch: file $1: cannot save undo data: $t/undo/$u: not prepared" >&2; return 1; };; esac
-  fi
-  tp_try "$1" "$s/undo" mkdir -p -m 711 -- "$s/undo" && tp_mkd 700 "$s/undo/$u" || return 1
-  tp_bk=$s/undo/$u/$tp_id
-  if [ "$r" = "$(tp_fsroot "$sd")" ]; then tp_bd=$tp_bk
-  else
-    if [ ! -d "$t/undo/$u" ]; then
-      tp_sbx "$r/.telepatch" || return 1
-      [ -d "$t" ] || n=1
-      for i in "$r/.telepatch" "$r/.telepatch/tmp" "$t" "$t/undo"; do
-        tp_mkd 711 "$i" || return 1
-        if [ "$i" = "$t" ] && [ -n "$n" ]; then tp_try "$1" "$s/fsroots" tp_idx "$r" "$s/fsroots" || return 1; fi
-      done
-      tp_mkd 700 "$t/undo/$u" || return 1
-    fi
-    tp_bd=$t/undo/$u/$tp_id
-  fi
-  tp_try "$1" "$tp_bd" mkdir -p -m 700 -- "$tp_bd" || return 1
-  [ "$tp_bd" = "$tp_bk" ] || tp_try "$1" "$tp_bk" ln -sfn -- "$tp_bd" "$tp_bk"
-}
-tp_save() {
-  [ "${tp_ex-}" = 1 ] && [ -z "${tp_sv-}" ] || return 0; tp_sv=1
-  tp_undo "$1" && { [ -z "$tp_bd" ] || tp_try "$1" "$tp_bd/old" cp -a${2:+L} -- "$1" "$tp_bd/old"; } || { tp_bk=; return 1; }
-}
-tp_mnt() {
-  local p=${1%/} r a; IFS=: read -ra a <<<"${TP_FS_ROOTS-}"
-  for r in "${a[@]}"; do [ "${r%/}" = "$p" ] && return 0; done
-  [ ! -L "$p" ] && [ -e "$p" ] && [ "$(stat -c %d -- "$p")" != "$(stat -c %d -- "$(dirname -- "$p")")" ]
-}
-tp_nest() {
-  local p=${1%/} r a; IFS=: read -ra a <<<"${TP_FS_ROOTS-}"
-  for r in "${a[@]}"; do r=${r%/}; case "$r/" in "$p"/?*) printf %s "$r"; return 0;; esac; done
-  [ -d "$p" ] && [ ! -L "$p" ] || return 1
-  r=$(find "$p" -mindepth 1 -type d -printf '%D %p\n' 2>/dev/null | awk -v d="$(stat -c %d -- "$p")" '$1 != d { sub(/^[^ ]* /, ""); print; exit }')
-  [ -n "$r" ] && printf %s "$r"
-}
-tp_gate() {
-  local m
-  if tp_mnt "$1"; then echo "telepatch: file $1: is a mount point" >&2; return 1; fi
-  if m=$(tp_nest "$1"); then echo "telepatch: file $1: a filesystem is mounted under it ($m)" >&2; return 1; fi
-  [ -n "${2-}" ] && return 0
-  tp_undo "$1" || { tp_bk=; return 1; }
-}
-tp_mk() {
-  local x=$1; tp_cx=
-  while [ ! -e "$x" ] && [ ! -L "$x" ]; do tp_cx=$x; x=$(dirname -- "$x"); done
-  (umask 022; mkdir -p -- "$1")
-}
-tp_open() { [ -n "${tp_og-}" ] || { tp_undo "$tp_p" && tp_og=1 || { tp_bk=; return 1; }; }; }
-tp_note() { [ -z "$tp_bd" ] || tp_try "$tp_p" "$tp_bd/created" tp_idx "$1 $2" "$tp_bd/created"; }
-tp_cp() {
-  tp_open || return 1; [ -z "$tp_bd" ] && return 0
-  tp_try "$tp_p" "$tp_bd/old/$2" mkdir -p -- "$(dirname -- "$tp_bd/old/$2")" && tp_try "$tp_p" "$tp_bd/old/$2" cp -a -- "$1" "$tp_bd/old/$2"
-}
 tp_was "$tp_p"
 if [ -d "$tp_p" ]; then echo "telepatch: $tp_p is a directory" >&2; rc=1; fi
 if [ "$rc" -eq 0 ]; then

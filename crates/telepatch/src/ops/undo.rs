@@ -1,5 +1,5 @@
-//! Inverse capture (T106): the shell helpers a file op's script includes
-//! and the script that removes what they made.
+//! Inverse capture (T106): the shell helpers every shell defines when it
+//! opens (T126) and the script that removes what they made.
 //!
 //! A backup lives on the target's own filesystem. On the stage's filesystem
 //! that is `<stage>/<run>/undo/<user>/<id>/`; elsewhere it is
@@ -17,7 +17,8 @@ use crate::ops::file::FileSpec;
 use crate::sh::quote;
 use crate::trace::OpSpec;
 
-/// The helpers, once per op script (after `tp_p=`). `tp_was P` records what
+/// The helpers, defined once per shell by `init_shell` ([`init_text`], T126),
+/// not in each op script: a capturing op starts with [`guard_line`]. `tp_was P` records what
 /// P is; `tp_save P [L]` backs it up (once) as `$tp_bd/old` and sets `tp_bk`
 /// (the stage path), `L` following a symlink; `tp_gate P` refuses a mount
 /// point and a tree holding one, then opens the backup dir for a move;
@@ -113,6 +114,41 @@ tp_cp() {
 }
 "#
 );
+
+/// FNV-1a, 64 bit: a hash that is the same on every build and toolchain
+/// (it appears in plan snapshots), unlike `DefaultHasher`.
+pub const fn fnv1a64(b: &[u8]) -> u64 {
+    let mut h: u64 = 0xcbf29ce484222325;
+    let mut i = 0;
+    while i < b.len() {
+        h ^= b[i] as u64;
+        h = h.wrapping_mul(0x100000001b3);
+        i += 1;
+    }
+    h
+}
+
+/// The helpers' version: [`fnv1a64`] of [`HELPERS`], 16 hex digits. A shell
+/// carries it as `__tp_hv`; the guard line of an op names it.
+pub fn helpers_hash() -> String {
+    format!("{:016x}", fnv1a64(HELPERS.as_bytes()))
+}
+
+/// What a shell is sent once when it opens: the helpers and the version
+/// they carry. A subshell (an op's `( ... )`) inherits both.
+pub fn init_text() -> String {
+    format!("{HELPERS}__tp_hv={}\n", helpers_hash())
+}
+
+/// The first line of a capturing op: the shell must carry this build's
+/// helpers (`__tp_hv` and the functions), else the op ends with rc 125 and
+/// a message, before it captures or changes anything.
+pub fn guard_line() -> String {
+    let h = helpers_hash();
+    format!(
+        "[ \"${{__tp_hv-}}\" = {h} ] && declare -F tp_save >/dev/null || {{ echo \"telepatch: shell helpers missing or stale (want {h})\" >&2; exit 125; }}\n"
+    )
+}
 
 /// The shell function that removes one run's data: the per-filesystem
 /// directory under each root the run's `fsroots` lists (a real directory
@@ -218,7 +254,7 @@ pub fn capture_word(spec: &OpSpec, user: &str) -> Option<String> {
 /// not make prints a `telepatch: undo preparation` line; the op's own
 /// capture then fails with `not prepared`.
 pub fn prepare_script(user: &str, words: &[String]) -> String {
-    let mut s = String::from(HELPERS);
+    let mut s = guard_line();
     s.push_str(&format!(
         r#"tp_u={}
 tp_sd=${{TP_FETCH_STAGE:-/var/tmp/telepatch}}

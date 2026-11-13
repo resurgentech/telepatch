@@ -334,6 +334,13 @@ __tp_emit() {
   for __tp_x in "${installed[@]}"; do __tp_i="$__tp_i${__tp_i:+,}\"$(__tp_esc "$__tp_x")\""; done
 "#;
 
+/// `script` for a shell that was not opened by the executor (a script run
+/// by hand, a test): the helpers and their version first, as `init_shell`
+/// sends them. Without `__tp_run` nothing is saved (T106).
+pub fn with_helpers(script: &str) -> String {
+    format!("{}{script}", crate::ops::undo::init_text())
+}
+
 /// The full script for one op: body wrapped in the trailer subshell.
 /// `id` is the op's trace index; `nonce` is random per run.
 pub fn render_op(op: &OpNode, id: usize, nonce: &str, os: &Os) -> String {

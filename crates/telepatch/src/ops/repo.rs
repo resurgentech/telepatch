@@ -37,7 +37,7 @@ use std::ops::Deref;
 use crate::facts::os::Family;
 use crate::host::{Host, OpHandle, TraceError};
 use crate::key::{Key, Value};
-use crate::ops::undo::HELPERS;
+use crate::ops::undo::guard_line;
 use crate::sh::quote;
 use crate::trace::{OpSpec, Principal};
 
@@ -181,12 +181,14 @@ impl RepoSpec {
     }
 
     pub fn render(&self) -> String {
-        let mut o = format!("tp_n={}\n", quote(&self.name));
+        let mut o = String::new();
         if self.kind != RepoKind::Unset {
-            // T107: the capture helpers; `tp_kc` / `tp_fc` say this op
-            // created the key / the source file.
-            o.push_str(HELPERS);
+            // T107: the capture helpers (the shell's, T126: the guard says
+            // so); `tp_kc` / `tp_fc` say this op created the key / the
+            // source file.
+            o.push_str(&guard_line());
         }
+        o.push_str(&format!("tp_n={}\n", quote(&self.name)));
         match &self.kind {
             RepoKind::Unset => {
                 o.push_str(

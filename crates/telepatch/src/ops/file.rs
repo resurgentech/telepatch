@@ -116,13 +116,16 @@ impl FileSpec {
     ) -> String {
         let body = self.content.as_ref().map(|c| c.script_body(reveal));
         let word = path.map_or_else(|| self.path_word(), str::to_string);
-        let mut o = format!("{head}rc=0; changed=0\ntp_p={word}\n");
+        // The helpers are the shell's (T126); the guard says so.
+        let mut o = format!(
+            "{}{head}rc=0; changed=0\ntp_p={word}\n",
+            crate::ops::undo::guard_line()
+        );
         if matches!(body, Some(ScriptBody::Hidden)) {
             o.push_str("# (secret)\n");
         }
         // Every form records what the path was before it changes anything,
-        // and may save it: one copy of the helpers per script.
-        o.push_str(crate::ops::undo::HELPERS);
+        // and may save it, with the helpers the shell defined.
         o.push_str("tp_was \"$tp_p\"\n");
         o.push_str(pre);
         match self.kind {
@@ -399,7 +402,7 @@ mod render_tests {
         );
         assert!(script.contains("sub/b.txt"), "{script}");
         assert!(script.contains("a.txt"), "{script}");
-        let own = script.len() - crate::ops::undo::HELPERS.len();
+        let own = script.len();
         assert!(own < 5000, "op script grew to {own}");
     }
 }

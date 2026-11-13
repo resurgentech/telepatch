@@ -26,7 +26,10 @@ fn wrapped(h: &Host<()>, id: NodeId) -> String {
 /// raw stdout.
 fn bash(script: &str, dir: &std::path::Path, path_prefix: Option<&std::path::Path>) -> String {
     let mut c = Command::new("bash");
-    c.arg("-c").arg(script).current_dir(dir).env("HOME", dir);
+    c.arg("-c")
+        .arg(telepatch::trailer::with_helpers(script))
+        .current_dir(dir)
+        .env("HOME", dir);
     if let Some(p) = path_prefix {
         let old = std::env::var("PATH").unwrap();
         c.env("PATH", format!("{}:{old}", p.display()));

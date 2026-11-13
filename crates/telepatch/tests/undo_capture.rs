@@ -11,7 +11,7 @@ use std::rc::Rc;
 
 use telepatch::executor::{HostSpec, RunOpts, Stdout, Target, run};
 use telepatch::facts::os::Os;
-use telepatch::trailer::{FileResult, render_op, split_stream};
+use telepatch::trailer::{FileResult, render_op, split_stream, with_helpers};
 use telepatch::transport::local::LocalTransport;
 use telepatch::{Host, Node, NodeId, Playbook, PlaybookFuture, TraceError, role, sh};
 
@@ -43,7 +43,7 @@ fn run_op(h: &Host<()>, id: NodeId, e: &Env) -> (String, FileResult) {
     };
     let mut c = Command::new("/bin/bash");
     c.arg("-c")
-        .arg(script)
+        .arg(with_helpers(&script))
         .env_remove("TP_FS_ROOTS")
         .env_remove("__tp_run")
         .env("TP_SANDBOX", e.stage.parent().unwrap())
@@ -1403,7 +1403,7 @@ fn a_secret_write_prints_no_body_in_its_trailer_or_stream() {
     };
     let out = Command::new("/bin/bash")
         .arg("-c")
-        .arg(script)
+        .arg(with_helpers(&script))
         .env("TP_SANDBOX", e.stage.parent().unwrap())
         .env("TP_FETCH_STAGE", &e.stage)
         .env("__tp_run", RUN)

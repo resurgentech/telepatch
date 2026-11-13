@@ -44,7 +44,7 @@ fn farm(d: &Path) -> PathBuf {
 fn run(h: &Host<()>, id: NodeId, d: &Path) -> (String, FileResult) {
     let out = Command::new("/bin/bash")
         .arg("-c")
-        .arg(wrapped(h, id))
+        .arg(telepatch::trailer::with_helpers(&wrapped(h, id)))
         .current_dir(d)
         .env("PATH", farm(d))
         .output()

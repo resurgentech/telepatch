@@ -1462,7 +1462,13 @@ async fn init_shell(shell: &mut Shell) -> Result<(), String> {
     // group (pgid = its pid), which a controller can signal from a second
     // shell. It also makes bash report a signalled job; the op wrapper
     // sends that notice to /dev/null ([`crate::trailer`]).
-    let script = format!("set -m\n{}{ack}", crate::ops::fetch::shell_init());
+    // The undo helpers and their version (T126): defined once here, so an op
+    // script carries a guard line and no helper text.
+    let script = format!(
+        "set -m\n{}{}{ack}",
+        crate::ops::fetch::shell_init(),
+        crate::ops::undo::init_text()
+    );
     shell.send(0, &script).await.map_err(|e| e.to_string())?;
     let (rc, out) = prepare::collect(shell, 0).await?;
     if rc == 0 {

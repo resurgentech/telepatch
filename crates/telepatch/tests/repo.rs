@@ -99,7 +99,7 @@ fn bash(script: &str, d: &Path, path: &str) -> std::process::Output {
     Command::new("/usr/bin/env")
         .arg("bash")
         .arg("-c")
-        .arg(redirect(script, d))
+        .arg(redirect(&telepatch::trailer::with_helpers(script), d))
         .current_dir(d)
         .env("PATH", path)
         .output()
@@ -316,7 +316,10 @@ fn repo_without_curl_errors_clearly_and_installs_nothing() {
     let out = Command::new(tools.join("env"))
         .arg("bash")
         .arg("-c")
-        .arg(redirect(&wrapped(&h, id), d.path()))
+        .arg(redirect(
+            &telepatch::trailer::with_helpers(&wrapped(&h, id)),
+            d.path(),
+        ))
         .env("PATH", &path)
         .output()
         .unwrap();
@@ -731,7 +734,7 @@ fn run_capture(h: &Host<()>, id: NodeId, d: &Path, roots: Option<&Path>) -> (Rep
     let mut c = Command::new("/usr/bin/env");
     c.arg("bash")
         .arg("-c")
-        .arg(redirect(&script, d))
+        .arg(redirect(&telepatch::trailer::with_helpers(&script), d))
         .current_dir(d)
         .env("PATH", full_path(d))
         .env_remove("TP_FS_ROOTS")

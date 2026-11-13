@@ -54,6 +54,20 @@ fn op_line(out: &mut String, id: usize, op: &OpNode, os: &Os) {
     }
 }
 
+/// The header line that names the shell helpers' version once (T126), for a
+/// plan with a capturing op (one whose script starts with the guard line);
+/// nothing otherwise. The helper text itself is not in a plan.
+fn helpers_line<'a>(out: &mut String, ops: impl IntoIterator<Item = &'a OpNode>, os: &Os) {
+    let guard = crate::ops::undo::guard_line();
+    if ops
+        .into_iter()
+        .any(|o| o.spec.script(os).starts_with(&guard))
+    {
+        let h = crate::ops::undo::helpers_hash();
+        let _ = writeln!(out, "shell helpers: undo {}", &h[..8]);
+    }
+}
+
 /// The warning line for one `sh!` site.
 pub fn sh_warning(site: &Site) -> String {
     format!("warning: sh! in a role body at {site}")
@@ -80,6 +94,14 @@ pub fn render_host(name: &str, os: &Os, trace: &Trace) -> String {
         os.family, os.distro, os.version
     );
     let _ = writeln!(out, "blocking reads: {}", trace.blocking_reads());
+    helpers_line(
+        &mut out,
+        trace.nodes.iter().filter_map(|n| match n {
+            Node::Op(op) => Some(op),
+            _ => None,
+        }),
+        os,
+    );
     let mut stack: Vec<&str> = Vec::new();
     let mut headed = false;
     for (i, node) in trace.nodes.iter().enumerate() {
@@ -186,6 +208,11 @@ pub fn render_windows_with(
         os.family, os.distro, os.version
     );
     let _ = writeln!(out, "blocking reads: {blocking_reads}");
+    helpers_line(
+        &mut out,
+        windows.iter().flat_map(|w| w.ops.iter().map(|o| &o.node)),
+        os,
+    );
     let barrier = |out: &mut String, after: usize| {
         for _ in reboots.iter().filter(|n| **n == after) {
             let _ = writeln!(out, "\n-- reboot if pending --");

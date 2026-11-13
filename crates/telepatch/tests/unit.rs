@@ -238,7 +238,7 @@ fn unit_dir(d: &Path) -> PathBuf {
 fn run_script(script: &str, d: &Path, bin: &Path) -> (String, FileResult) {
     let out = Command::new("/bin/bash")
         .arg("-c")
-        .arg(script)
+        .arg(telepatch::trailer::with_helpers(script))
         .current_dir(d)
         .env("PATH", with_path(bin))
         .env("TP_UNIT_DIR", unit_dir(d))
