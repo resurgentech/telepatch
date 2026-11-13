@@ -244,6 +244,168 @@ pub fn cleanup_script() -> String {
     "rm -rf -- \"${TP_FETCH_STAGE:-/var/tmp/telepatch}\"/\"${__tp_run:?}\"\n".to_string()
 }
 
+/// The cache uses in a prepare probe's output: each `fuse <sum> <dir>` line
+/// `tp_one` printed for an item it found in, or put into, a cache
+/// directory. `<sum>` is 64 lower-case hex digits and `<dir>` an absolute
+/// path (the rest of the line); anything else is ignored.
+pub(crate) fn parse_uses(out: &str) -> Vec<(String, String)> {
+    out.lines()
+        .filter_map(|l| l.strip_prefix("fuse "))
+        .filter_map(|r| r.split_once(' '))
+        .filter(|(s, d)| {
+            s.len() == 64
+                && s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+                && d.starts_with('/')
+        })
+        .map(|(s, d)| (s.to_string(), d.to_string()))
+        .collect()
+}
+
+/// The end-of-run cache script (T121), one probe on the root shell, after
+/// the last window and before the stage is removed: for every directory the
+/// registry `<main>/../caches` lists, plus the main cache and every
+/// directory in `uses` (`(sum, dir)`, from [`parse_uses`]), it merges this
+/// run's uses into `<dir>/.telepatch-usage`, adopts files with no line,
+/// drops lines of missing files and removes the files unused for more than
+/// 90 days. See "Cache lifetime" in the note (#d-fetch).
+///
+/// It removes only a regular file (not a link) whose name is 64 lower-case
+/// hex digits directly in a registered directory, and only after the record
+/// that no longer lists it is written; a record that cannot be read is set
+/// aside and nothing is removed from that directory in that run. Every path
+/// goes through its own `tp_sbx` first (a refused registry line is kept and
+/// not touched). Without `flock` nothing is written, and it says so.
+/// Output: `cache <dir>: removed n items (x MB) unused for 90 days`, and
+/// `telepatch: ..` warnings. The clock is `TP_CACHE_NOW` (epoch seconds).
+pub fn usage_script(uses: &[(String, String)]) -> String {
+    let mut s = String::from("(\numask 022\n");
+    s.push_str(crate::sandbox::SBX);
+    s.push_str("tp_u=(");
+    for (sum, dir) in uses {
+        s.push(' ');
+        s.push_str(&quote(&format!("{sum} {dir}")));
+    }
+    s.push_str(" )\n");
+    s.push_str(USAGE);
+    s.push_str("tp_cu\n)\n");
+    s
+}
+
+const USAGE: &str = r#"tp_hex() { [ ${#1} -eq 64 ] && case $1 in *[!0123456789abcdef]*) return 1;; esac; }
+tp_cd1() {
+  local d=$1 now=$2 rec lk tmp f s t o n u line body bad=0 cnt=0 bytes=0 sz mb rest
+  local -A last own present
+  local -a expired=()
+  rec=$d/.telepatch-usage; lk=$d/.telepatch-usage.lock; tmp=$d/.telepatch-usage.tmp.$$
+  tp_sbx "$rec" "$lk" "$tmp" || return 2
+  [ -d "$d" ] || return 1
+  { exec 9>>"$lk"; } 2>/dev/null || { echo "telepatch: cache $d: usage not recorded: cannot open $lk"; return 2; }
+  flock -x -w 30 9 || { exec 9>&-; echo "telepatch: cache $d: usage not recorded: the record is locked"; return 2; }
+  if [ -e "$rec" ] || [ -L "$rec" ]; then
+    if [ -L "$rec" ] || [ ! -f "$rec" ]; then
+      bad=1
+    elif ! body=$(cat -- "$rec" 2>/dev/null); then
+      bad=1
+    else
+      n=0
+      while IFS= read -r line || [ -n "$line" ]; do
+        n=$((n+1))
+        if [ "$n" -eq 1 ]; then [ "$line" = v1 ] || { bad=1; break; }; continue; fi
+        case $line in *$'\t'*$'\t'*) ;; *) bad=1; break;; esac
+        s=${line%%$'\t'*}; rest=${line#*$'\t'}; t=${rest%%$'\t'*}; o=${rest#*$'\t'}
+        tp_hex "$s" || { bad=1; break; }
+        case $t in ''|*[!0123456789]*) bad=1; break;; esac
+        [ ${#t} -le 12 ] || { bad=1; break; }
+        case $o in *$'\t'*) bad=1; break;; esac
+        last[$s]=$t; own[$s]=$o
+      done <<<"$body"
+      [ "$n" -ge 1 ] || bad=1
+    fi
+  fi
+  if [ "$bad" = 1 ]; then
+    mv -n -- "$rec" "$rec.bad-$now" 2>/dev/null
+    if [ -e "$rec" ] || [ -L "$rec" ]; then
+      exec 9>&-; echo "telepatch: cache $d: usage record unreadable and could not be set aside; nothing recorded or removed there"; return 2
+    fi
+    echo "telepatch: cache $d: usage record unreadable, set aside as .telepatch-usage.bad-$now; a new one is started"
+    last=(); own=()
+  fi
+  for u in "${tp_u[@]}"; do
+    [ "${u#* }" = "$d" ] || continue
+    s=${u%% *}
+    tp_hex "$s" || continue
+    if [ -f "$d/$s" ] && [ ! -L "$d/$s" ]; then last[$s]=$now; fi
+  done
+  for f in "$d"/*; do
+    s=${f##*/}
+    tp_hex "$s" || continue
+    [ -f "$f" ] && [ ! -L "$f" ] || continue
+    present[$s]=1
+    [ -n "${last[$s]-}" ] || last[$s]=$now
+  done
+  {
+    printf 'v1\n'
+    for s in $(printf '%s\n' "${!present[@]}" | sort); do
+      t=${last[$s]}
+      if [ $((now - t)) -gt 7776000 ]; then expired+=("$s"); continue; fi
+      printf '%s\t%s\t%s\n' "$s" "$t" "${own[$s]-}"
+    done
+  } > "$tmp" 2>/dev/null || { rm -f -- "$tmp"; exec 9>&-; echo "telepatch: cache $d: usage not recorded: cannot write $tmp"; return 2; }
+  mv -f -- "$tmp" "$rec" 2>/dev/null || { rm -f -- "$tmp"; exec 9>&-; echo "telepatch: cache $d: usage not recorded: cannot replace $rec"; return 2; }
+  for s in "${expired[@]}"; do
+    f=$d/$s
+    [ -f "$f" ] && [ ! -L "$f" ] || continue
+    sz=$(stat -c %s -- "$f" 2>/dev/null || echo 0)
+    if rm -f -- "$f" 2>/dev/null && [ ! -e "$f" ]; then cnt=$((cnt+1)); bytes=$((bytes+sz)); fi
+  done
+  if [ "$cnt" -gt 0 ]; then
+    mb=$((bytes/1048576)).$(( (bytes%1048576)*10/1048576 ))
+    echo "cache $d: removed $cnt items ($mb MB) unused for 90 days"
+  fi
+  exec 9>&-
+  return 0
+}
+tp_cu() {
+  local now cm cp rg lk d u nl=$'\n' seen line rc
+  local -a cand=() dirs=() keep=()
+  now=${TP_CACHE_NOW-}; case $now in ''|*[!0123456789]*) now=$(date +%s);; esac
+  cm=${TP_FETCH_CACHE:-/var/cache/telepatch/sha256}; cm=${cm%/}; cp=${cm%/*}
+  rg=$cp/caches; lk=$cp/.caches.lock
+  [ "${#tp_u[@]}" -gt 0 ] || [ -f "$rg" ] || [ -d "$cm" ] || return 0
+  if ! command -v flock >/dev/null 2>&1; then echo "telepatch: cache usage not recorded: flock is not on the host"; return 0; fi
+  tp_sbx "$rg" "$lk" "$rg.tmp.$$" || return 0
+  if [ ! -d "$cp" ]; then
+    [ "${#tp_u[@]}" -gt 0 ] || return 0
+    mkdir -p -- "$cp" 2>/dev/null || { echo "telepatch: cache usage not recorded: cannot create $cp"; return 0; }
+  fi
+  { exec 8>>"$lk"; } 2>/dev/null || { echo "telepatch: cache usage not recorded: cannot open $lk"; return 0; }
+  flock -x -w 30 8 || { echo "telepatch: cache usage not recorded: the cache registry is locked"; return 0; }
+  if [ -f "$rg" ]; then
+    while IFS= read -r line || [ -n "$line" ]; do cand+=("$line"); done < "$rg"
+  fi
+  for u in "${tp_u[@]}"; do cand+=("${u#* }"); done
+  if [ -d "$cm" ]; then cand+=("$cm"); fi
+  seen=$nl
+  for line in "${cand[@]}"; do
+    case $line in /?*) ;; *) continue;; esac
+    case $line in */..|*/../*|*/.|*/./*) continue;; esac
+    line=${line%/}
+    # Only the main cache or a per-filesystem cache is ever a cache
+    # directory; any other line is dropped, never read or expired.
+    [ "$line" = "$cm" ] || case $line in */.telepatch/cache/sha256) ;; *) echo "telepatch: cache registry $rg: ignoring $line: not a telepatch cache directory"; continue;; esac
+    case $seen in *"$nl$line$nl"*) continue;; esac
+    seen+=$line$nl
+    dirs+=("$line")
+  done
+  for d in "${dirs[@]}"; do
+    tp_cd1 "$d" "$now"; rc=$?
+    [ "$rc" -eq 1 ] || keep+=("$d")
+  done
+  { for d in "${keep[@]}"; do printf '%s\n' "$d"; done; } > "$rg.tmp.$$" 2>/dev/null && mv -f -- "$rg.tmp.$$" "$rg" 2>/dev/null || { rm -f -- "$rg.tmp.$$"; echo "telepatch: cache registry $rg: not written"; }
+  return 0
+}
+"#;
+
 /// `tp_run`, this run's staging directory, from the shell's `$__tp_run`.
 pub(crate) const TP_RUN: &str = "tp_run=\"$tp_sd\"/\"$__tp_run\"\n";
 
@@ -549,6 +711,17 @@ tp_stg() {
   e=$(tp_idx "$r" "$tp_run/fsroots" 2>&1) || { echo "fetch $i nostage $r: ${e##*: }"; return 1; }
   tp_keep=1
 }
+tp_use() { printf 'fuse %s %s\n' "$1" "${2%/}"; }
+tp_reg() {
+  local d=${1%/} rg=${tp_cd%/*}/caches
+  tp_sbx "$rg" "$d" || return 0
+  (umask 022; mkdir -p -- "${rg%/*}") 2>/dev/null || return 0
+  (
+    if command -v flock >/dev/null 2>&1; then exec 8>>"${rg%/*}/.caches.lock" && flock -x -w 30 8 || exit 0; fi
+    grep -qxF -- "$d" "$rg" 2>/dev/null || printf '%s\n' "$d" >> "$rg"
+  ) 2>/dev/null
+  return 0
+}
 tp_one() {
   local i=$1 u=$2 s=$3 up=$4 t=${5-} f p rc err got r= h
   if [ -n "$t" ]; then
@@ -561,13 +734,13 @@ tp_one() {
       if [ -f "$f" ] && [ "$(sha256sum "$f" 2>/dev/null | cut -d' ' -f1)" = "$s" ]; then
         tp_check "$i" "$f" "$up" || return 0
         tp_link "$f" "f-$s" || { echo "fetch $i fail ${tp_dl:-sh} 1 cannot create $tp_run"; return 0; }
-        echo "fetch $i cached"; return 0
+        echo "fetch $i cached"; tp_use "$s" "$r/.telepatch/cache/sha256"; return 0
       fi
     fi
     f="$tp_cd/$s"
     if [ -f "$f" ] && [ "$(sha256sum "$f" 2>/dev/null | cut -d' ' -f1)" = "$s" ]; then
       tp_check "$i" "$f" "$up" || return 0
-      echo "fetch $i cached"; return 0
+      echo "fetch $i cached"; tp_use "$s" "$tp_cd"; return 0
     fi
   fi
   if [ -z "$tp_dl" ]; then echo "fetch $i notool"; return 0; fi
@@ -594,13 +767,13 @@ tp_one() {
     tp_check "$i" "$p" "$up" || { rm -f -- "$p"; return 0; }
     if [ -n "$r" ]; then
       if (umask 022; mkdir -p -- "$tp_c") && chmod 644 "$p" && mv -f -- "$p" "$tp_c/$s" && tp_link "$tp_c/$s" "f-$s"; then
-        echo "fetch $i fetched"
+        echo "fetch $i fetched"; tp_reg "$tp_c"; tp_use "$s" "$tp_c"
       else
         rm -f -- "$p"
         echo "fetch $i fail $tp_dl 1 cannot write the cache $tp_c"
       fi
     elif (umask 022; mkdir -p -- "$tp_cd") && mv -f -- "$p" "$tp_cd/.$s.part" && chmod 644 "$tp_cd/.$s.part" && mv -f -- "$tp_cd/.$s.part" "$tp_cd/$s"; then
-      echo "fetch $i fetched"
+      echo "fetch $i fetched"; tp_reg "$tp_cd"; tp_use "$s" "$tp_cd"
     else
       rm -f -- "$p" "$tp_cd/.$s.part"
       echo "fetch $i fail $tp_dl 1 cannot write the cache $tp_cd"
@@ -961,6 +1134,16 @@ mod tests {
                 "fetch http://x/a: download timed out after 7s".into()
             )]
         );
+    }
+
+    #[test]
+    fn parse_uses_takes_a_lower_case_sum_and_an_absolute_dir_and_nothing_else() {
+        let a = "a".repeat(64);
+        let out = format!(
+            "fetch 0 cached\nfuse {a} /c/with space\nfuse {} /c\nfuse {a} rel\nfuse short /c\nfuse {a}\nxfuse {a} /c\n",
+            "A".repeat(64)
+        );
+        assert_eq!(parse_uses(&out), [(a, "/c/with space".to_string())]);
     }
 
     #[test]

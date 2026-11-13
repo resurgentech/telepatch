@@ -586,6 +586,9 @@ pub trait ShellSet {
     ) -> Option<(&mut Shell, &mut crate::executor::Killer)> {
         None
     }
+    /// Prepare's fetch output: the cache directories it found items in or put
+    /// them into (`fuse` lines), for the end-of-run usage record (T121).
+    fn note_cache_uses(&mut self, _out: &str) {}
 }
 
 fn shell_of<'a, S: ShellSet>(shells: &'a mut S, who: &RunAs) -> Result<&'a mut Shell, String> {
@@ -817,6 +820,7 @@ pub async fn prepare_window<S: ShellSet>(
                     Bounded::Done(_, out) => out,
                     Bounded::Stopped(why, out) => {
                         let msg = crate::ops::fetch::stopped(&fetch_items, &out, &why, limit);
+                        shells.note_cache_uses(&out);
                         // Every item answered before the stop: read them.
                         if msg.is_empty() {
                             out
@@ -831,6 +835,7 @@ pub async fn prepare_window<S: ShellSet>(
                 probe(root, id, &script).await?.1
             }
         };
+        shells.note_cache_uses(&out);
         for (it, found) in fetch_items
             .iter()
             .zip(crate::ops::fetch::parse(&fetch_items, &out))
@@ -1063,6 +1068,7 @@ pub async fn prepare_window<S: ShellSet>(
         };
         if matches!(p.source, Source::BinaryRelease(_)) {
             // Resolved, fetched and verified on the host: a failure blocks.
+            shells.note_cache_uses(out.as_deref().unwrap_or(""));
             let name = p.names.first().map(String::as_str).unwrap_or("");
             match crate::ops::pkg::binary_release_prepared(window.number, name, out.as_deref()) {
                 Ok(Some(w)) => will.will_create.push(w),

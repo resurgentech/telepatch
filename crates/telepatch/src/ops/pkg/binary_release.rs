@@ -432,7 +432,7 @@ impl BinaryRelease {
                 .unwrap_or_default()
         ));
         s.push_str(
-            "case \"$tp_o\" in\n  'fetch 0 cached'|'fetch 0 fetched'|'fetch 0 staged') ;;\n  *) rmdir -- \"$tp_run\" 2>/dev/null; return 0;;\nesac\n\
+            "case \"${tp_o%%$'\\n'*}\" in\n  'fetch 0 cached'|'fetch 0 fetched'|'fetch 0 staged') ;;\n  *) rmdir -- \"$tp_run\" 2>/dev/null; return 0;;\nesac\n\
              if [ -n \"$tp_sum\" ]; then tp_f=\"$tp_cd/$tp_sum\"; if [ -L \"$tp_run/f-$tp_sum\" ]; then tp_f=\"$tp_run/f-$tp_sum\"; fi; tp_got=$tp_sum\n\
              else tp_f=\"$tp_run/u-$(printf %s \"$tp_url\" | sha256sum | cut -c1-32)\"; tp_got=$(sha256sum \"$tp_f\" | cut -d' ' -f1); fi\n\
              if ! (umask 077; mkdir -p -- \"$tp_run\" && printf '%s %s %s\\n' \"$tp_got\" \"${tp_want:--}\" \"$tp_f\" > \"$tp_dec\"); then echo \"br block cannot write $tp_dec\"; return 0; fi\n\

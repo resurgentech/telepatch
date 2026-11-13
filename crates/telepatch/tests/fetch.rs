@@ -375,8 +375,12 @@ if [ -f "$D/www/$n" ]; then cp "$D/www/$n" "$out"; else echo "wget: server retur
             "the staging dir is cleaned"
         );
     }
+    /// The cache entries; the usage record and its lock (T121) are not entries.
     fn cache(&self) -> Vec<String> {
         ls(&self.p("cache"))
+            .into_iter()
+            .filter(|n| !n.starts_with(".telepatch-usage"))
+            .collect()
     }
 }
 
@@ -2012,8 +2016,14 @@ fn a_from_and_an_unpack_under_another_filesystem_download_and_cache_there_and_th
     // after the run: the cache stays on fsB, the main cache was not used,
     // and the run's tmp is gone
     assert_eq!(e.cache(), Vec::<String>::new());
+    // (the usage record and its lock, T121, are beside the entries)
     assert_eq!(ls(&fsb.join(".telepatch/cache/sha256")), {
-        let mut v = vec![sa.clone(), st.clone()];
+        let mut v = vec![
+            sa.clone(),
+            st.clone(),
+            ".telepatch-usage".to_string(),
+            ".telepatch-usage.lock".to_string(),
+        ];
         v.sort();
         v
     });

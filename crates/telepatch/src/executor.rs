@@ -407,6 +407,9 @@ struct HostShells {
     /// The second shell that stops an op, opened when the first timeout
     /// fires ([`Killer`]).
     killer: Killer,
+    /// `(sum, dir)` of every cache entry this run's prepare found or put in a
+    /// cache directory (T121), for the end-of-run usage record.
+    cache_uses: BTreeSet<(String, String)>,
 }
 
 impl HostShells {
@@ -632,7 +635,7 @@ impl Killer {
             for extra in s.got {
                 extra.close().await;
             }
-            if let Err(e) = init_shell(&mut sh).await {
+            if let Err(e) = init_shell(&mut sh, false).await {
                 sh.close().await;
                 return Err(format!("could not set up the second shell: {e}"));
             }
@@ -1127,6 +1130,10 @@ impl prepare::ShellSet for HostShells {
         self.shell_of(who)
     }
 
+    fn note_cache_uses(&mut self, out: &str) {
+        self.cache_uses.extend(crate::ops::fetch::parse_uses(out));
+    }
+
     fn watched_shell(&mut self, who: &RunAs) -> Option<(&mut Shell, &mut Killer)> {
         self.watched(who)
     }
@@ -1173,7 +1180,7 @@ impl prepare::ShellSet for HostShells {
                 sh
             }
         };
-        if let Err(e) = init_shell(&mut sh).await {
+        if let Err(e) = init_shell(&mut sh, false).await {
             sh.close().await;
             return Err(format!("could not set up the shell for user {name}: {e}"));
         }
@@ -1449,7 +1456,13 @@ fn source_vars(w: &WindowOp) -> String {
 /// `TP_SANDBOX_REQUIRED=1` (the tests) the handshake also checks, once,
 /// that the stage, cache, run directory and `TP_FS_ROOTS` lie under
 /// `$TP_SANDBOX`, and the open fails with the refusal when they do not.
-async fn init_shell(shell: &mut Shell) -> Result<(), String> {
+///
+/// `run_lock`, for the root shell of a run only (T121): the shell takes a
+/// shared `flock` on `<main cache>/../.lock` (`RUN_LOCK`) and holds it until it
+/// closes, so `cache purge` (T123) can take it exclusively only when no run is
+/// in progress. A second or login shell does not, nor does the shell that only
+/// runs the end-of-run cleanup of a host whose own is gone.
+async fn init_shell(shell: &mut Shell, run_lock: bool) -> Result<(), String> {
     // An op's wrapper runs its body in a subshell, so the assignment goes
     // in front of it, in the shell itself; the wrapped no-op is the
     // handshake that it ran.
@@ -1470,9 +1483,10 @@ async fn init_shell(shell: &mut Shell) -> Result<(), String> {
     // The undo helpers and their version (T126): defined once here, so an op
     // script carries a guard line and no helper text.
     let script = format!(
-        "set -m\n{}{}{ack}",
+        "set -m\n{}{}{}{ack}",
         crate::ops::fetch::shell_init(),
-        crate::ops::undo::init_text()
+        crate::ops::undo::init_text(),
+        if run_lock { RUN_LOCK } else { "" }
     );
     shell.send(0, &script).await.map_err(|e| e.to_string())?;
     let (rc, out) = prepare::collect(shell, 0).await?;
@@ -1482,6 +1496,22 @@ async fn init_shell(shell: &mut Shell) -> Result<(), String> {
         Err(format!("exit {rc}: {out}"))
     }
 }
+
+/// The root shell's run lock: a shared `flock -n` on fd 7 of
+/// `<main cache>/../.lock` (`/var/cache/telepatch/.lock`), kept for as long
+/// as the shell lives. Best effort: without `flock`, or when the file cannot
+/// be opened or the lock is refused (a purge holds it), the run goes on
+/// without it. The path is checked with its own `tp_sbx`. It is a statement
+/// list for the shell itself, not an op, so the lock outlives the handshake.
+const RUN_LOCK: &str = concat!(
+    crate::sandbox::sbx_def!(),
+    r#"__tp_l=${TP_FETCH_CACHE:-/var/cache/telepatch/sha256}; __tp_l=${__tp_l%/}; __tp_l=${__tp_l%/*}/.lock
+if command -v flock >/dev/null 2>&1 && tp_sbx "$__tp_l" 2>/dev/null; then
+  { (umask 022; mkdir -p -- "${__tp_l%/*}") 2>/dev/null; exec 7>>"$__tp_l"; } 2>/dev/null && flock -s -n 7 || exec 7>&-
+fi
+unset __tp_l
+"#
+);
 
 /// After a `unit` op sent as a source: a change sets the window flag.
 const UNIT_FLAG: &str = "if [ \"$__tp_rc\" -eq 0 ] && [ \"$__tp_x\" = true ]; then __tp_dr=1; fi\n";
@@ -2829,6 +2859,36 @@ impl HostExec {
         Ok(())
     }
 
+    /// The end-of-run cache probe (T121): one script on the root shell,
+    /// before [`HostExec::cleanup_stage`], on every run that reaches the
+    /// end, a failed host too ([`crate::ops::fetch::usage_script`]). It
+    /// records what the run used and removes what went unused for 90 days.
+    /// When the root shell is gone nothing is recorded, and no fresh shell
+    /// is opened for it (unlike the cleanup): a missed record is accepted,
+    /// a removal made without this run's uses is not. A `--check` run does
+    /// not run it: it changes nothing on the host.
+    async fn record_cache_usage(&mut self) {
+        if self.check.is_some() {
+            return;
+        }
+        let uses: Vec<(String, String)> = self.shells.cache_uses.iter().cloned().collect();
+        let script = crate::ops::fetch::usage_script(&uses);
+        self.seq += 1;
+        match prepare::probe(&mut self.shells.root, self.seq, &script).await {
+            Ok((_, out)) => {
+                for l in out
+                    .lines()
+                    .filter(|l| l.starts_with("telepatch: ") || l.starts_with("cache "))
+                {
+                    self.say(l.to_string());
+                }
+            }
+            Err(why) => self.say(format!(
+                "telepatch: cache usage not recorded: no root shell ({why})"
+            )),
+        }
+    }
+
     /// Remove what the run left on the host: its staging directory and the
     /// undo data it made, on every filesystem the run's `fsroots` lists
     /// ([`crate::ops::undo::cleanup_script`]). Best effort: a failure is not
@@ -2873,7 +2933,7 @@ impl HostExec {
         for extra in s.got {
             extra.close().await;
         }
-        if let Err(e) = init_shell(&mut sh).await {
+        if let Err(e) = init_shell(&mut sh, false).await {
             sh.close().await;
             return Err(e);
         }
@@ -3957,7 +4017,7 @@ async fn run_one<V: 'static>(
     for extra in shells.got {
         extra.close().await;
     }
-    let os = match init_shell(&mut shell).await {
+    let os = match init_shell(&mut shell, true).await {
         Ok(()) => read_os(&mut shell).await,
         Err(e) => Err(e),
     };
@@ -3984,11 +4044,13 @@ async fn run_one<V: 'static>(
         homes: BTreeMap::new(),
         sink: sink.clone(),
         killer: Killer::new(target_rc, name.clone()),
+        cache_uses: BTreeSet::new(),
     };
     let mut exec = HostExec::new(&name, shells, sink.clone(), check);
     exec.set_reboot(reboot.0, reboot.1, pb_name);
     let mut engine = Engine::new(exec);
     let res = engine.run_host(&pb, host).await;
+    engine.executor.record_cache_usage().await;
     engine.executor.cleanup_stage().await;
     let (mut rep, shells) = engine.executor.finish(res);
     rep.not_selected = probe.not_selected_roles();
@@ -4323,7 +4385,7 @@ mod watchdog_tests {
         let mut s = t.open("local", &Principal::Root, 1).await;
         assert!(s.limit.is_none(), "{:?}", s.limit);
         let mut sh = s.got.remove(0);
-        init_shell(&mut sh).await.unwrap();
+        init_shell(&mut sh, false).await.unwrap();
         sh
     }
 

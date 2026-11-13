@@ -449,7 +449,7 @@ impl HostExec {
         for extra in s.got {
             extra.close().await;
         }
-        if let Err(e) = init_shell(&mut sh).await {
+        if let Err(e) = init_shell(&mut sh, true).await {
             sh.close().await;
             return Err(format!("could not set up the root shell: {e}"));
         }
