@@ -1500,3 +1500,23 @@ are appended, never edited in; a hook refuses rewrites.
   written, run by T104.
 - Gate E green: 816 passed; tp_basic unchanged.
 - Commits: telepatch dd71572
+
+## 2026-11-12 — T113 `.retry`, `wait_for` and the fetch limits
+
+- `.retry(n)` by the controller: a retried op ends its run; on a
+  failure or timeout with retries left the executor waits 1, 2, 4 .. 30
+  s and re-sends the gated script (halt cleared) with a new start line
+  and clock. One `attempt k of n+1 failed (..); retrying in Ns` line per
+  failed attempt; the last attempt is reported and read by guards.
+- `h.wait_for(Port::tcp | Wait::path | Wait::unit)` (`ops/wait.rs`):
+  own deadline (exit 124), controller backstop d + 15 s, default 5 min,
+  no change, not run in `--check`, skipped without systemd.
+- Fetch: `.retry`/`.timeout` merged by max; default 10 min per attempt
+  (RT-4 still open). Each attempt bounded by `curl --max-time` /
+  `wget --timeout` (no coreutils `timeout`); the prepare fetch probe
+  runs under T101's watchdog with the summed deadline.
+- Note: `wait_for` row, handle methods and Run controls marked built.
+  The T110 stash "T101 rejected: bash -c wrapper (2026-11-12)" dropped;
+  `tmp/t101-rejected/` kept.
+- Gate E green: 853 passed; tp_basic unchanged.
+- Commits: telepatch ec67ee1
