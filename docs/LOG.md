@@ -1421,3 +1421,20 @@ are appended, never edited in; a hook refuses rewrites.
 - Gate green. One retry of the commit gate after a flaky,
   untouched `shell_pool::shell_death_fails_in_flight_ops`.
 - Commits: telepatch c949f93, tp_basic bece6a2
+
+## 2026-11-12 — T100 `--serial`, `--max-fail`, `--only`
+
+- `run --serial n` runs n hosts at a time, in the order given (a fair
+  semaphore). `--serial 0` is a usage error.
+- `run --max-fail n`: once more than n hosts end failed, blocked or in
+  error, hosts not yet started are reported `skipped` (`max-fail n
+  reached`), and the exit code is 1. Started hosts finish. Without
+  `--serial` every host has already started.
+- `run --only a,b`: `#[role]` skips the body of a top-level role that is
+  not named. Its marks stay in the trace, and the report lists `skipped
+  by --only`. A role called inside a named role runs with it. A name
+  the playbook did not trace is an error listing the roles it did.
+- `executor::run_with` + `RunControls`; `run`/`run_check` unchanged.
+  All three work under `--check`.
+- 16 tests in `tests/run_controls.rs`. Gate E green; no snapshot moved.
+- Commits: telepatch d57755f
