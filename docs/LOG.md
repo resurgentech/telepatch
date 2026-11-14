@@ -1981,3 +1981,24 @@ are appended, never edited in; a hook refuses rewrites.
   remove-on-sight of the legacy record.
 - Gate E and check-sandbox green. tp_basic unchanged.
 - Commits: telepatch 7800867
+
+## 2026-11-14 — T104 Goals 8 and 9 proofs (run; step kept open)
+
+- Every proof ran on veritech04, 1 GiB tp-* VMs, one at a time. Passed:
+  `test-live-ssh` 6/6, incl. T101's timeout kill over ssh + `sudo -n -H`;
+  the other 12 telepatch `test-live-*`; tp_basic `test-edge` (CHANGED 0,
+  identical); `test-services`; `test-vm local_user`; `test-vm undo_fs`
+  with the T136 cache case; `test-vm-oracle dev_desktop_kept` (identical,
+  3 intended); `test-vm dev_desktop` with `--check` 0 / `--check --diff` 2.
+- Fixed on the way (test or harness faults, no engine change): live
+  user test expected the pre-T88 line form; undo_fs read root-only paths
+  without sudo and expected run 2 CHANGED 0 despite its listing sh!; the
+  oracle's VM names held `_`; test-vm.sh gained the T136 cache checks and
+  the dev_desktop --check proof.
+- Not proved: the main-cache `cache usage` line (no main cache exists in
+  the undo_fs case; GAP); one unexplained ~10 min hang in a docker-
+  transport run (`unit_rocky`, not reproduced; suspect `pool/mod.rs:416`
+  close vs docker exec stdin EOF). openbao failed once in the shared
+  batch VM (`docker create` exit 1, stderr not captured), passed fresh.
+  The step stays queued. veritech04 vt-* set unchanged; no tp-* left.
+- Commits: telepatch 293866f; tp_basic 2dd7ccd
