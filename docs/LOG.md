@@ -1831,3 +1831,18 @@ are appended, never edited in; a hook refuses rewrites.
   written (runs in T104), self-test green. Gate E and check-sandbox
   green; no snapshot moved.
 - Commits: telepatch fbc8725; tp_basic bd1cefd
+
+## 2026-11-13 — T116 `--max-fail` needs `--serial`; an unknown `--only` role is a usage error
+
+- `--max-fail` without `--serial`: exit 2 before anything opens.
+- `#[role]` registers its name in a `linkme` slice (via
+  `telepatch::__private`); `telepatch::roles()` lists them sorted.
+  `run --only x` with no such role: exit 2, `roles: …`, closest (edit
+  distance <= 2) first, checked before inventory or any transport.
+- A real role a host's trace never reaches: `<host>: --only x: not
+  traced on this host`, one closing warning if no host traced it, exit
+  unchanged. T100's run_controls tests adapted.
+- Tests: cli.rs 2 new, run_controls.rs 8 new/adapted, tp_basic
+  roles_registered.rs. Red then green (FOREMAN rerun red). Gate E and
+  check-sandbox green; no snapshot moved.
+- Commits: telepatch 30611ac; tp_basic affd0a3
