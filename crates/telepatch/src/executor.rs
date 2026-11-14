@@ -411,7 +411,7 @@ struct HostShells {
     /// fires ([`Killer`]).
     killer: Killer,
     /// `(sum, dir)` of every cache entry this run's prepare found or put in a
-    /// cache directory (T121), for the end-of-run usage record.
+    /// cache directory, for the end-of-run probe (T135).
     cache_uses: BTreeSet<(String, String)>,
     /// The sums every prepared window's fetch ops name (T122).
     fetched_sums: BTreeSet<String>,
@@ -640,7 +640,7 @@ impl Killer {
             for extra in s.got {
                 extra.close().await;
             }
-            if let Err(e) = init_shell(&mut sh, false).await {
+            if let Err(e) = init_shell(&mut sh, None).await {
                 sh.close().await;
                 return Err(format!("could not set up the second shell: {e}"));
             }
@@ -1209,7 +1209,7 @@ impl prepare::ShellSet for HostShells {
                 sh
             }
         };
-        if let Err(e) = init_shell(&mut sh, false).await {
+        if let Err(e) = init_shell(&mut sh, None).await {
             sh.close().await;
             return Err(format!("could not set up the shell for user {name}: {e}"));
         }
@@ -1486,12 +1486,10 @@ fn source_vars(w: &WindowOp) -> String {
 /// that the stage, cache, run directory and `TP_FS_ROOTS` lie under
 /// `$TP_SANDBOX`, and the open fails with the refusal when they do not.
 ///
-/// `run_lock`, for the root shell of a run only (T121): the shell takes a
-/// shared `flock` on `<main cache>/../.lock` (`RUN_LOCK`) and holds it until it
-/// closes, so `cache purge` (T123) can take it exclusively only when no run is
-/// in progress. A second or login shell does not, nor does the shell that only
-/// runs the end-of-run cleanup of a host whose own is gone.
-async fn init_shell(shell: &mut Shell, run_lock: bool) -> Result<(), String> {
+/// `owner`, for the root shell of a run outside `--check` only
+/// ([`cache_owner`]): the encoded owner directory prepare marks under when it
+/// touches a cache item (T135).
+async fn init_shell(shell: &mut Shell, owner: Option<&str>) -> Result<(), String> {
     // An op's wrapper runs its body in a subshell, so the assignment goes
     // in front of it, in the shell itself; the wrapped no-op is the
     // handshake that it ran.
@@ -1512,10 +1510,9 @@ async fn init_shell(shell: &mut Shell, run_lock: bool) -> Result<(), String> {
     // The undo helpers and their version (T126): defined once here, so an op
     // script carries a guard line and no helper text.
     let script = format!(
-        "set -m\n{}{}{}{ack}",
-        crate::ops::fetch::shell_init(),
+        "set -m\n{}{}{ack}",
+        crate::ops::fetch::shell_init(owner),
         crate::ops::undo::init_text(),
-        if run_lock { RUN_LOCK } else { "" }
     );
     shell.send(0, &script).await.map_err(|e| e.to_string())?;
     let (rc, out) = prepare::collect(shell, 0).await?;
@@ -1526,21 +1523,13 @@ async fn init_shell(shell: &mut Shell, run_lock: bool) -> Result<(), String> {
     }
 }
 
-/// The root shell's run lock: a shared `flock -n` on fd 7 of
-/// `<main cache>/../.lock` (`/var/cache/telepatch/.lock`), kept for as long
-/// as the shell lives. Best effort: without `flock`, or when the file cannot
-/// be opened or the lock is refused (a purge holds it), the run goes on
-/// without it. The path is checked with its own `tp_sbx`. It is a statement
-/// list for the shell itself, not an op, so the lock outlives the handshake.
-const RUN_LOCK: &str = concat!(
-    crate::sandbox::sbx_def!(),
-    r#"__tp_l=${TP_FETCH_CACHE:-/var/cache/telepatch/sha256}; __tp_l=${__tp_l%/}; __tp_l=${__tp_l%/*}/.lock
-if command -v flock >/dev/null 2>&1 && tp_sbx "$__tp_l" 2>/dev/null; then
-  { (umask 022; mkdir -p -- "${__tp_l%/*}") 2>/dev/null; exec 7>>"$__tp_l"; } 2>/dev/null && flock -s -n 7 || exec 7>&-
-fi
-unset __tp_l
-"#
-);
+/// The owner directory a run's root shell marks cache items under (T135),
+/// already encoded ([`crate::ops::fetch::owner_dir`]): none under
+/// `--check`, which changes nothing on the host.
+fn cache_owner(playbook: &str, check: bool) -> Option<String> {
+    (!check && crate::ops::fetch::valid_playbook_name(playbook))
+        .then(|| crate::ops::fetch::owner_dir(playbook))
+}
 
 /// After a `unit` op sent as a source: a change sets the window flag.
 const UNIT_FLAG: &str = "if [ \"$__tp_rc\" -eq 0 ] && [ \"$__tp_x\" = true ]; then __tp_dr=1; fi\n";
@@ -2888,23 +2877,19 @@ impl HostExec {
         Ok(())
     }
 
-    /// The end-of-run cache probe (T121): one script on the root shell,
+    /// The end-of-run cache probe (T135): one script on the root shell,
     /// before [`HostExec::cleanup_stage`], on every run that reaches the
-    /// end, a failed host too ([`crate::ops::fetch::usage_script`]). It
-    /// records what the run used and removes what went unused for 90 days.
-    /// When the root shell is gone nothing is recorded, and no fresh shell
-    /// is opened for it (unlike the cleanup): a missed record is accepted,
-    /// a removal made without this run's uses is not. A `--check` run does
-    /// not run it: it changes nothing on the host.
+    /// end, a failed host too ([`crate::ops::fetch::end_script`]). It removes
+    /// what went unaccessed for 90 days and, on an entitled run, what
+    /// `playbook` no longer fetches. When the root shell is gone nothing is
+    /// removed, and no fresh shell is opened for it (unlike the cleanup). A
+    /// `--check` run does not run it: it changes nothing on the host.
     ///
-    /// T122: the probe also merges `playbook` into the owners of what the
-    /// run used and, when the run is entitled, removes what the playbook no
-    /// longer fetches. `unentitled` is the reason it is not ("Cache
-    /// ownership" in the note): `None` when the run is a real, unrestricted
-    /// one that the engine ended `Ok`; the host's own outcome and the record
-    /// lock are judged here.
-    async fn record_cache_usage(&mut self, playbook: &str, unentitled: Option<String>) {
-        let valid = crate::ops::fetch::valid_playbook_name(playbook);
+    /// `unentitled` is the reason the run may not drop the playbook's
+    /// markers ("Cache ownership" in the note): `None` when the run is a
+    /// real, unrestricted one that the engine ended `Ok`; the host's own
+    /// outcome is judged here.
+    async fn end_cache(&mut self, playbook: &str, unentitled: Option<String>) {
         let mut why = unentitled;
         if why.is_none() {
             match &self.verdict {
@@ -2912,29 +2897,16 @@ impl HostExec {
                 Some(s) => why = Some(format!("the host ended {}", s.label())),
             }
         }
-        if why.is_none() && !valid {
-            why = Some("the playbook name cannot be recorded".to_string());
+        if let Some(w) = &why {
+            self.say(format!("cache: ownership not checked ({w})"));
         }
         if self.check.is_some() {
-            // A check changes nothing on the host, so no probe is sent.
-            if let Some(w) = why {
-                self.say(format!("cache: ownership not checked ({w})"));
-            }
             return;
         }
         let uses: Vec<(String, String)> = self.shells.cache_uses.iter().cloned().collect();
-        let own = crate::ops::fetch::Ownership {
-            playbook: valid.then(|| playbook.to_string()),
-            fetched: self.shells.fetched_sums.clone(),
-            entitled: why.is_none(),
-        };
-        let script = crate::ops::fetch::usage_script(&uses, &own);
+        let owner = why.is_none().then_some(playbook);
+        let script = crate::ops::fetch::end_script(&uses, &self.shells.fetched_sums, owner);
         self.seq += 1;
-        let mut said_why = false;
-        if let Some(w) = &why {
-            self.say(format!("cache: ownership not checked ({w})"));
-            said_why = true;
-        }
         match prepare::probe(&mut self.shells.root, self.seq, &script).await {
             Ok((_, out)) => {
                 for l in out
@@ -2943,28 +2915,8 @@ impl HostExec {
                 {
                     self.say(l.to_string());
                 }
-                // A directory whose record could not be locked or read removed
-                // nothing for ownership either: said once.
-                if !said_why
-                    && out.lines().any(|l| {
-                        l.starts_with("telepatch: cache")
-                            && (l.contains("not recorded") || l.contains("unreadable"))
-                    })
-                {
-                    self.say(
-                        "cache: ownership not checked (a cache usage record was not held)"
-                            .to_string(),
-                    );
-                }
             }
-            Err(why) => {
-                self.say(format!(
-                    "telepatch: cache usage not recorded: no root shell ({why})"
-                ));
-                if !said_why {
-                    self.say("cache: ownership not checked (no root shell)".to_string());
-                }
-            }
+            Err(e) => self.say(format!("telepatch: cache not checked: no root shell ({e})")),
         }
     }
 
@@ -3012,7 +2964,7 @@ impl HostExec {
         for extra in s.got {
             extra.close().await;
         }
-        if let Err(e) = init_shell(&mut sh, false).await {
+        if let Err(e) = init_shell(&mut sh, None).await {
             sh.close().await;
             return Err(e);
         }
@@ -4109,7 +4061,7 @@ async fn run_one<V: 'static>(
     for extra in shells.got {
         extra.close().await;
     }
-    let os = match init_shell(&mut shell, true).await {
+    let os = match init_shell(&mut shell, cache_owner(pb_name, check.is_some()).as_deref()).await {
         Ok(()) => read_os(&mut shell).await,
         Err(e) => Err(e),
     };
@@ -4152,10 +4104,7 @@ async fn run_one<V: 'static>(
             .err()
             .map(|_| "the run did not trace and prepare every window".to_string())
     };
-    engine
-        .executor
-        .record_cache_usage(pb_name, unentitled)
-        .await;
+    engine.executor.end_cache(pb_name, unentitled).await;
     engine.executor.cleanup_stage().await;
     let (mut rep, shells) = engine.executor.finish(res);
     rep.not_selected = probe.not_selected_roles();
@@ -4491,7 +4440,7 @@ mod watchdog_tests {
         let mut s = t.open("local", &Principal::Root, 1).await;
         assert!(s.limit.is_none(), "{:?}", s.limit);
         let mut sh = s.got.remove(0);
-        init_shell(&mut sh, false).await.unwrap();
+        init_shell(&mut sh, None).await.unwrap();
         sh
     }
 

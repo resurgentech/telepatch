@@ -568,7 +568,12 @@ impl HostExec {
         for extra in s.got {
             extra.close().await;
         }
-        if let Err(e) = init_shell(&mut sh, true).await {
+        if let Err(e) = init_shell(
+            &mut sh,
+            cache_owner(&self.reboot.playbook, self.check.is_some()).as_deref(),
+        )
+        .await
+        {
             sh.close().await;
             return Err(format!("could not set up the root shell: {e}"));
         }

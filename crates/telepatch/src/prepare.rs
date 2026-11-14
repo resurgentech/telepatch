@@ -587,7 +587,7 @@ pub trait ShellSet {
         None
     }
     /// Prepare's fetch output: the cache directories it found items in or put
-    /// them into (`fuse` lines), for the end-of-run usage record (T121).
+    /// them into (`fuse` lines), for the end-of-run cache probe (T135).
     fn note_cache_uses(&mut self, _out: &str) {}
     /// The sums the window's fetch ops name: part of the whole trace's set F
     /// for cache ownership (T122), whether or not a cache served them.

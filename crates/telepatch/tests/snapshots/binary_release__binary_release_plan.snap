@@ -19,9 +19,9 @@ role (none)
       | tp_dec="$tp_run/br-$(printf %s "$tp_name" | sha256sum | cut -c1-32)"
       | tp_tok() { grep -oE '[0-9]+(\.[0-9A-Za-z+~-]+)*' | head -n1; }
       | if [ -f "$tp_dec" ]; then
-      | read -r tp_s tp_want tp_f < "$tp_dec"
+      | { read -r tp_s tp_want tp_f; IFS= read -r tp_u; } < "$tp_dec"
       | rm -f -- "$tp_dec"
-      | if [ ! -f "$tp_f" ]; then echo "telepatch: binary_release $tp_name: $tp_f is missing (prepare did not fetch it)" >&2; rc=1; fi
+      | if [ ! -f "$tp_f" ]; then case $tp_f in "$tp_run"/u-*) echo "telepatch: binary_release $tp_name: $tp_f is missing (prepare did not fetch it)" >&2;; *) echo "telepatch: the cached download ${tp_s:0:12} for $tp_u is gone (a cache purge during the run?); run again to download it" >&2;; esac; rc=1; fi
       | tp_p='/usr/local/go'
       | if [ "$rc" -eq 0 ]; then mkdir -p -- "$(dirname -- "$tp_p")" || rc=$?; fi
       | tp_magic() {

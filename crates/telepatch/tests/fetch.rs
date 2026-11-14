@@ -375,12 +375,9 @@ if [ -f "$D/www/$n" ]; then cp "$D/www/$n" "$out"; else echo "wget: server retur
             "the staging dir is cleaned"
         );
     }
-    /// The cache entries; the usage record and its lock (T121) are not entries.
+    /// The cache entries (T135: nothing else is in a cache directory).
     fn cache(&self) -> Vec<String> {
         ls(&self.p("cache"))
-            .into_iter()
-            .filter(|n| !n.starts_with(".telepatch-usage"))
-            .collect()
     }
 }
 
@@ -1818,6 +1815,9 @@ struct W {
     login: bool,
     /// Write the stage and `<d>/fsB/.telepatch` listings after the ops.
     mid: bool,
+    /// A raw op run after prepare and before the fetch ops (T135's test
+    /// hook: it removes a cached file under the run).
+    pre: Option<String>,
 }
 
 impl Tgt {
@@ -1851,6 +1851,9 @@ fn pb_w(h: Host<W>) -> PlaybookFuture {
         let w = h.vars.clone();
         for d in &w.dirs {
             h.file(d).dir();
+        }
+        if let Some(p) = &w.pre {
+            h.raw(p.clone());
         }
         for t in &w.sets {
             let mut f = h.fetch(&t.url);
@@ -2013,6 +2016,7 @@ impl Env {
             dirs: Vec::new(),
             login: false,
             mid: true,
+            pre: None,
         }
     }
     /// The archive `pkg.tgz` (a `pkg-1.0/` tree), served; its sum.
@@ -2095,17 +2099,22 @@ fn a_from_and_an_unpack_under_another_filesystem_download_and_cache_there_and_th
     // after the run: the cache stays on fsB, the main cache was not used,
     // and the run's tmp is gone
     assert_eq!(e.cache(), Vec::<String>::new());
-    // (the usage record and its lock, T121, are beside the entries)
+    // (T135: only the items; the owner markers are beside `sha256`)
     assert_eq!(ls(&fsb.join(".telepatch/cache/sha256")), {
-        let mut v = vec![
-            sa.clone(),
-            st.clone(),
-            ".telepatch-usage".to_string(),
-            ".telepatch-usage.lock".to_string(),
-        ];
+        let mut v = vec![sa.clone(), st.clone()];
         v.sort();
         v
     });
+    assert_eq!(ls(&fsb.join(".telepatch/cache")), ["owners", "sha256"]);
+    assert_eq!(
+        ls(&fsb.join(".telepatch/cache/owners/fetch")),
+        {
+            let mut v = vec![sa.clone(), st.clone()];
+            v.sort();
+            v
+        },
+        "the playbook marks both"
+    );
     assert_eq!(
         ls(&fsb.join(".telepatch")),
         ["cache"],
@@ -2506,12 +2515,11 @@ fn a_url_shared_by_a_file_op_first_and_a_pkg_file_op_is_staged_on_the_file_s_fil
     assert_eq!(std::fs::read(fsb.join("t.deb")).unwrap(), DEB);
     assert_eq!(out.matches("target now on").count(), 0, "{out}");
     assert_eq!(ls(&fsb.join(".telepatch/tmp")), Vec::<String>::new());
-    // Usage (T121) is recorded in the directory the item is in: fsB's cache.
-    let rec = std::fs::read_to_string(fsb.join(".telepatch/cache/sha256/.telepatch-usage"))
-        .unwrap_or_default();
+    // The owner marker (T135) is beside the cache the item is in: fsB's.
     assert!(
-        rec.lines().any(|l| l.starts_with(&format!("{s}\t"))),
-        "fsB's usage record names the item: {rec:?}"
+        fsb.join(format!(".telepatch/cache/owners/fetch/{s}"))
+            .is_file(),
+        "fsB's owners mark the item"
     );
     e.assert_clean();
 }
@@ -2569,5 +2577,83 @@ fn a_pkg_file_op_first_keeps_the_item_on_the_stage_and_the_file_op_copies_it_acr
     // the copy across says nothing (see the report's assumption).
     assert_eq!(out.matches("target now on").count(), 0, "{out}");
     assert_eq!(ls(&fsb.join(".telepatch/tmp")), Vec::<String>::new());
+    e.assert_clean();
+}
+
+// --- T135: a cached file gone under a running op ---
+//
+// With no locks, `cache purge --yes` can remove a cached file between prepare
+// and the op that reads it. The hook is a raw op between them that removes the
+// main cache's entry (`W::pre`). The op fails with the gone-file message and
+// nothing is half-placed; a rerun downloads it again.
+
+fn gone_message(sum: &str, url: &str) -> String {
+    format!(
+        "telepatch: the cached download {} for {url} is gone (a cache purge during the run?); run again to download it",
+        &sum[..12]
+    )
+}
+
+/// Run `t` (whose item is in the main cache) with the entry removed under
+/// it: the op fails with the message. Then `check` (what must not be
+/// there), and a rerun, which downloads it again and passes.
+fn gone_under(e: &Env, t: Tgt, sum: &str, check: impl Fn()) {
+    let mut w = e.w(vec![t.clone()]);
+    w.mid = false;
+    w.pre = Some(format!("rm -f -- '{}'", e.p("cache").join(sum).display()));
+    let (r, out) = e.go_w(&w, &[]);
+    let text = format!("{out}\n{}", r.render());
+    assert!(
+        matches!(status(&r), HostStatus::Failed { .. }),
+        "{:?}\n{text}",
+        status(&r)
+    );
+    assert!(text.contains(&gone_message(sum, &t.url)), "{text}");
+    check();
+    w.pre = None;
+    let (r, again) = e.go_w(&w, &[]);
+    assert_eq!(status(&r), &HostStatus::Changed, "{again}\n{}", r.render());
+}
+
+#[test]
+fn a_cached_file_gone_before_a_from_op_fails_it_and_places_nothing() {
+    let e = Env::new();
+    e.serve("a.txt", FILE.as_bytes());
+    let sa = sha256(FILE.as_bytes());
+    let dst = e.p("dst");
+    std::fs::create_dir_all(&dst).unwrap();
+    let t = Tgt::from("http://fake/a.txt", Some(&sa), &dst.join("a.txt"));
+    gone_under(&e, t, &sa, || {
+        assert_eq!(ls(&dst), Vec::<String>::new(), "no target, no candidate")
+    });
+    assert_eq!(std::fs::read_to_string(dst.join("a.txt")).unwrap(), FILE);
+    e.assert_clean();
+}
+
+#[test]
+fn a_cached_file_gone_before_an_unpack_op_fails_it_and_unpacks_nothing() {
+    let e = Env::new();
+    let st = e.serve_tgz();
+    let dst = e.p("dst");
+    std::fs::create_dir_all(&dst).unwrap();
+    let t = Tgt::unpack("http://fake/pkg.tgz", &st, &dst.join("tree"));
+    gone_under(&e, t, &st, || {
+        assert_eq!(ls(&dst), Vec::<String>::new(), "no tree, no scratch tree")
+    });
+    assert!(dst.join("tree/.telepatch-fetch").is_file());
+    e.assert_clean();
+}
+
+#[test]
+fn a_cached_file_gone_before_a_pkg_file_op_fails_it_and_installs_nothing() {
+    let e = Env::new();
+    e.serve("t.deb", DEB);
+    e.pm_stub();
+    let s = sha256(DEB);
+    let t = Tgt::pkg("http://fake/t.deb", &s);
+    gone_under(&e, t, &s, || {
+        assert!(!e.p("tpk_installed").exists(), "nothing installed")
+    });
+    assert_eq!(std::fs::read(e.p("pkgbytes")).unwrap(), DEB);
     e.assert_clean();
 }

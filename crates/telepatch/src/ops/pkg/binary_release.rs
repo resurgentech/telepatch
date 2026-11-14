@@ -29,8 +29,10 @@
 //! When a change is wanted the release goes through T81's staging and
 //! cache ([`crate::ops::fetch::prelude`]'s `tp_one`): a cache hit makes no
 //! download; a mismatch or a failed download blocks the host before apply.
-//! Prepare then records `<sum> <wanted version or -> <file>` in
-//! `<stage>/<run>/br-<hash of the name>`, which the op reads and removes.
+//! Prepare then records `<sum> <wanted version or -> <file>` and, on a
+//! second line, the url, in `<stage>/<run>/br-<hash of the name>`, which
+//! the op reads and removes. A cached file gone by then (a `cache purge`
+//! during the run, T135) fails the op before anything is placed.
 //! A tarball with an `unpack_to` lands on that directory's filesystem (T119,
 //! [`crate::ops::fetch::prelude`]): on another one the download and its cache
 //! entry are under `<root>/.telepatch/`, the record names the stage's link
@@ -435,7 +437,7 @@ impl BinaryRelease {
             "case \"${tp_o%%$'\\n'*}\" in\n  'fetch 0 cached'|'fetch 0 fetched'|'fetch 0 staged') ;;\n  *) rmdir -- \"$tp_run\" 2>/dev/null; return 0;;\nesac\n\
              if [ -n \"$tp_sum\" ]; then tp_f=\"$tp_cd/$tp_sum\"; if [ -L \"$tp_run/f-$tp_sum\" ]; then tp_f=\"$tp_run/f-$tp_sum\"; fi; tp_got=$tp_sum\n\
              else tp_f=\"$tp_run/u-$(printf %s \"$tp_url\" | sha256sum | cut -c1-32)\"; tp_got=$(sha256sum \"$tp_f\" | cut -d' ' -f1); fi\n\
-             if ! (umask 077; mkdir -p -- \"$tp_run\" && printf '%s %s %s\\n' \"$tp_got\" \"${tp_want:--}\" \"$tp_f\" > \"$tp_dec\"); then echo \"br block cannot write $tp_dec\"; return 0; fi\n\
+             if ! (umask 077; mkdir -p -- \"$tp_run\" && printf '%s %s %s\\n%s\\n' \"$tp_got\" \"${tp_want:--}\" \"$tp_f\" \"$tp_url\" > \"$tp_dec\"); then echo \"br block cannot write $tp_dec\"; return 0; fi\n\
              echo \"br change\"\n}\ntp_br\n",
         );
         s
@@ -452,8 +454,8 @@ impl BinaryRelease {
         ));
         o.push_str("if [ -f \"$tp_dec\" ]; then\n");
         o.push_str(
-            "read -r tp_s tp_want tp_f < \"$tp_dec\"\nrm -f -- \"$tp_dec\"\n\
-             if [ ! -f \"$tp_f\" ]; then echo \"telepatch: binary_release $tp_name: $tp_f is missing (prepare did not fetch it)\" >&2; rc=1; fi\n",
+            "{ read -r tp_s tp_want tp_f; IFS= read -r tp_u; } < \"$tp_dec\"\nrm -f -- \"$tp_dec\"\n\
+             if [ ! -f \"$tp_f\" ]; then case $tp_f in \"$tp_run\"/u-*) echo \"telepatch: binary_release $tp_name: $tp_f is missing (prepare did not fetch it)\" >&2;; *) echo \"telepatch: the cached download ${tp_s:0:12} for $tp_u is gone (a cache purge during the run?); run again to download it\" >&2;; esac; rc=1; fi\n",
         );
         o.push_str(&format!("tp_p={}\n", path_word(self.target())));
         o.push_str(

@@ -385,12 +385,13 @@ impl<E: Executor> Engine<E> {
             name: host.name().to_string(),
             os: host.os.clone(),
         };
-        // The name is an owner in cache usage records (T122): a trace error
-        // before anything is traced or applied.
+        // The name owns what it caches, `owners/<owner_dir(name)>/` beside
+        // each cache (T135): a trace error before anything is traced or
+        // applied.
         if !crate::ops::fetch::valid_playbook_name(playbook.name) {
             return Err(EngineError::Playbook(crate::host::TraceError {
                 message: format!(
-                    "playbook name {:?} must not be empty or hold a tab, a comma or a newline: it owns what it caches",
+                    "playbook name {:?} must not be empty, hold a NUL, tab, comma or newline, or encode to more than 200 bytes: it owns what it caches",
                     playbook.name
                 ),
                 roles: Vec::new(),

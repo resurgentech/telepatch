@@ -414,12 +414,9 @@ if [ "$out" = - ]; then cat "$D/www/$n"; else cp "$D/www/$n" "$out"; fi"#
             "the staging dir is cleaned"
         );
     }
-    /// The cache entries; the usage record and its lock (T121) are not entries.
+    /// The cache entries (T135: nothing else is in a cache directory).
     fn cache(&self) -> Vec<String> {
         ls(&self.p("cache"))
-            .into_iter()
-            .filter(|n| !n.starts_with(".telepatch-usage"))
-            .collect()
     }
     /// A go-like release `go<v>.linux-<arch>.tar.gz` with a top directory
     /// `go/` holding `bin/go` (prints `go version go<v> linux/amd64`) and a

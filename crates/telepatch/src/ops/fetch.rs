@@ -234,9 +234,16 @@ pub(crate) fn run_id() -> String {
 }
 
 /// The script the executor sends once to each shell it opens (root and
-/// login): `__tp_run`, this process's staging subdirectory name.
-pub(crate) fn shell_init() -> String {
-    format!("__tp_run={}\n", quote(&run_id()))
+/// login): `__tp_run`, this process's staging subdirectory name, and, for a
+/// run's root shell outside `--check`, `__tp_pb`, the owner directory (already
+/// encoded, [`owner_dir`]) prepare marks under (T135). Without `__tp_pb` prepare touches nothing
+/// in a cache.
+pub(crate) fn shell_init(owner: Option<&str>) -> String {
+    let mut s = format!("__tp_run={}\n", quote(&run_id()));
+    if let Some(pb) = owner {
+        s.push_str(&format!("__tp_pb={}\n", quote(pb)));
+    }
+    s
 }
 
 /// The `rm` that ends a host's run: the staging directory `$__tp_run`
@@ -262,42 +269,74 @@ pub(crate) fn parse_uses(out: &str) -> Vec<(String, String)> {
         .collect()
 }
 
-/// What the end-of-run probe knows of ownership (T122).
-#[derive(Debug, Clone, Default)]
-pub struct Ownership {
-    /// The playbook's name, an owner of what the run used; `None` (a name
-    /// [`valid_playbook_name`] refuses) records no owner.
-    pub playbook: Option<String>,
-    /// F: every sum the whole trace fetched on this host.
-    pub fetched: BTreeSet<String>,
-    /// The run may say the playbook no longer fetches what is not in F
-    /// ("Cache ownership" in the note).
-    pub entitled: bool,
+/// A playbook's owner directory name, `owners/<owner_dir(name)>/` beside
+/// each cache (T135): `A-Z a-z 0-9 _ - .` stay, every other byte (`/`, `%`,
+/// space, any byte >= 0x80) becomes `%XX` with upper-case hex, and a leading
+/// `.` becomes `%2E`, so no owner directory is hidden, `.` or `..`. `%` is
+/// always encoded, so two names never share a directory. The one encoder:
+/// no shell script encodes or decodes.
+pub fn owner_dir(name: &str) -> String {
+    let mut s = String::with_capacity(name.len());
+    for (i, b) in name.bytes().enumerate() {
+        if b.is_ascii_alphanumeric() || b == b'_' || b == b'-' || (b == b'.' && i > 0) {
+            s.push(b as char);
+        } else {
+            s.push_str(&format!("%{b:02X}"));
+        }
+    }
+    s
 }
 
-/// A playbook name the owners field of a usage record can hold: not empty,
-/// and no tab, comma or newline.
+/// The inverse of [`owner_dir`]: the playbook name an owner directory
+/// stands for, or `None` for a name `owner_dir` never makes.
+pub fn owner_name(dir: &str) -> Option<String> {
+    let b = dir.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%' {
+            let h = b.get(i + 1..i + 3)?;
+            if !h.iter().all(|c| matches!(c, b'0'..=b'9' | b'A'..=b'F')) {
+                return None;
+            }
+            out.push(u8::from_str_radix(std::str::from_utf8(h).ok()?, 16).ok()?);
+            i += 3;
+        } else {
+            out.push(b[i]);
+            i += 1;
+        }
+    }
+    let name = String::from_utf8(out).ok()?;
+    (!name.is_empty() && owner_dir(&name) == dir).then_some(name)
+}
+
+/// A playbook name owns what it caches (T135): not empty, no NUL, tab,
+/// comma or newline (T122), and its [`owner_dir`] at most 200 bytes.
 pub fn valid_playbook_name(name: &str) -> bool {
-    !name.is_empty() && !name.contains(['\t', ',', '\n'])
+    !name.is_empty() && !name.contains(['\0', '\t', ',', '\n']) && owner_dir(name).len() <= 200
 }
 
-/// The end-of-run cache script (T121), one probe on the root shell, after
-/// the last window and before the stage is removed: for every directory the
-/// registry `<main>/../caches` lists, plus the main cache and every
-/// directory in `uses` (`(sum, dir)`, from [`parse_uses`]), it merges this
-/// run's uses into `<dir>/.telepatch-usage`, adopts files with no line,
-/// drops lines of missing files and removes the files unused for more than
-/// 90 days. See "Cache lifetime" in the note (#d-fetch).
+/// The end-of-run cache script (T135), one probe on the root shell, after
+/// the last window and before the stage is removed, never under `--check`.
+/// For every directory the registry `<main>/../caches` lists, plus the main
+/// cache and every directory in `uses` (`(sum, dir)`, from [`parse_uses`]),
+/// it removes T121's legacy record and lock files (touching the items of a
+/// directory that held a record), then each item whose mtime is more than 90
+/// days before now, with its owner markers. When `owner` is the playbook of
+/// an entitled run it also removes that playbook's markers for sums outside
+/// F (`fetched` and the sums in `uses`) and each item that leaves with no
+/// marker. See "Cache lifetime" and "Cache ownership" in the note (#d-fetch).
 ///
 /// It removes only a regular file (not a link) whose name is 64 lower-case
-/// hex digits directly in a registered directory, and only after the record
-/// that no longer lists it is written; a record that cannot be read is set
-/// aside and nothing is removed from that directory in that run. Every path
-/// goes through its own `tp_sbx` first (a refused registry line is kept and
-/// not touched). Without `flock` nothing is written, and it says so.
-/// Output: `cache <dir>: removed n items (x MB) unused for 90 days`, and
-/// `telepatch: ..` warnings. The clock is `TP_CACHE_NOW` (epoch seconds).
-pub fn usage_script(uses: &[(String, String)], own: &Ownership) -> String {
+/// hex digits directly in a registered directory, and markers under that
+/// directory's `../owners`. Every path goes through `tp_sbx` first. Output:
+/// `cache <dir>: ..` lines and `telepatch: ..` warnings. The clock is
+/// `TP_CACHE_NOW` (epoch seconds).
+pub fn end_script(
+    uses: &[(String, String)],
+    fetched: &BTreeSet<String>,
+    owner: Option<&str>,
+) -> String {
     let mut s = String::from("(\numask 022\n");
     s.push_str(crate::sandbox::SBX);
     s.push_str("tp_u=(");
@@ -306,22 +345,19 @@ pub fn usage_script(uses: &[(String, String)], own: &Ownership) -> String {
         s.push_str(&quote(&format!("{sum} {dir}")));
     }
     s.push_str(" )\ntp_f=(");
-    for sum in &own.fetched {
+    for sum in fetched {
         s.push(' ');
         s.push_str(&quote(sum));
     }
     s.push_str(" )\ntp_pb=");
-    s.push_str(&quote(own.playbook.as_deref().unwrap_or("")));
-    s.push_str(if own.entitled && own.playbook.is_some() {
-        "\ntp_ent=1\n"
-    } else {
-        "\ntp_ent=0\n"
-    });
+    s.push_str(&quote(&owner.map(owner_dir).unwrap_or_default()));
+    s.push_str("\ntp_pn=");
+    s.push_str(&quote(owner.unwrap_or("")));
+    s.push('\n');
     s.push_str(TP_HEX);
     s.push_str(TP_SHAPE);
-    s.push_str(TP_OWN);
-    s.push_str(USAGE);
-    s.push_str("tp_cu\n)\n");
+    s.push_str(END);
+    s.push_str("tp_end\n)\n");
     s
 }
 
@@ -345,139 +381,74 @@ const TP_SHAPE: &str = r#"tp_shape() {
 }
 "#;
 
-/// `tp_oadd LIST NAME` and `tp_odel LIST NAME`: add `NAME` to, or remove it
-/// from, a comma-separated owner list (the third field of a record line),
-/// printing the new list.
-const TP_OWN: &str = r#"tp_oadd() { case ",$1," in *",$2,"*) printf '%s' "$1";; *) printf '%s' "${1:+$1,}$2";; esac; }
-tp_odel() {
-  local x r=
-  local -a a
-  IFS=, read -ra a <<<"$1"
-  for x in "${a[@]}"; do [ "$x" = "$2" ] || r=${r:+$r,}$x; done
-  printf '%s' "$r"
+/// [`end_script`]'s body: `tp_cd1 DIR NOW` for one cache directory, `tp_end`
+/// for all. `tp_rmi FILE` removes a regular non-link file and prints its
+/// size; `tp_unmark OWNERS SUM` removes every `OWNERS/*/SUM`.
+const END: &str = r#"declare -A fset
+tp_rmi() {
+  local sz
+  [ -f "$1" ] && [ ! -L "$1" ] || return 1
+  sz=$(stat -c %s -- "$1" 2>/dev/null || echo 0)
+  rm -f -- "$1" 2>/dev/null && [ ! -e "$1" ] && echo "$sz"
 }
-"#;
-
-const USAGE: &str = r#"tp_cd1() {
-  local d=$1 now=$2 rec lk tmp f s t o n u line body bad=0 cnt=0 bytes=0 sz mb rest
-  local -A last own present fset
-  local -a expired=() disowned=()
-  rec=$d/.telepatch-usage; lk=$d/.telepatch-usage.lock; tmp=$d/.telepatch-usage.tmp.$$
-  tp_sbx "$rec" "$lk" "$tmp" || return 2
-  [ -d "$d" ] || return 1
-  { exec 9>>"$lk"; } 2>/dev/null || { echo "telepatch: cache $d: usage not recorded: cannot open $lk"; return 2; }
-  flock -x -w 30 9 || { exec 9>&-; echo "telepatch: cache $d: usage not recorded: the record is locked"; return 2; }
-  if [ -e "$rec" ] || [ -L "$rec" ]; then
-    if [ -L "$rec" ] || [ ! -f "$rec" ]; then
-      bad=1
-    elif ! body=$(cat -- "$rec" 2>/dev/null); then
-      bad=1
-    else
-      n=0
-      while IFS= read -r line || [ -n "$line" ]; do
-        n=$((n+1))
-        if [ "$n" -eq 1 ]; then [ "$line" = v1 ] || { bad=1; break; }; continue; fi
-        case $line in *$'\t'*$'\t'*) ;; *) bad=1; break;; esac
-        s=${line%%$'\t'*}; rest=${line#*$'\t'}; t=${rest%%$'\t'*}; o=${rest#*$'\t'}
-        tp_hex "$s" || { bad=1; break; }
-        case $t in ''|*[!0123456789]*) bad=1; break;; esac
-        [ ${#t} -le 12 ] || { bad=1; break; }
-        case $o in *$'\t'*) bad=1; break;; esac
-        last[$s]=$t; own[$s]=$o
-      done <<<"$body"
-      [ "$n" -ge 1 ] || bad=1
-    fi
-  fi
-  if [ "$bad" = 1 ]; then
-    mv -n -- "$rec" "$rec.bad-$now" 2>/dev/null
-    if [ -e "$rec" ] || [ -L "$rec" ]; then
-      exec 9>&-; echo "telepatch: cache $d: usage record unreadable and could not be set aside; nothing recorded or removed there"; return 2
-    fi
-    echo "telepatch: cache $d: usage record unreadable, set aside as .telepatch-usage.bad-$now; a new one is started"
-    last=(); own=()
-  fi
-  for u in "${tp_u[@]}"; do
-    [ "${u#* }" = "$d" ] || continue
-    s=${u%% *}
-    tp_hex "$s" || continue
-    if [ -f "$d/$s" ] && [ ! -L "$d/$s" ]; then
-      last[$s]=$now
-      [ -z "$tp_pb" ] || own[$s]=$(tp_oadd "${own[$s]-}" "$tp_pb")
-    fi
+tp_unmark() {
+  local x
+  [ -L "$1" ] && return 0
+  for x in "$1"/*/"$2"; do
+    [ -L "${x%/*}" ] && continue
+    if [ -f "$x" ] || [ -L "$x" ]; then rm -f -- "$x" 2>/dev/null; fi
   done
-  if [ "$tp_ent" = 1 ] && [ "$bad" = 0 ]; then
-    for u in "${tp_f[@]}"; do fset[$u]=1; done
-    for u in "${tp_u[@]}"; do fset[${u%% *}]=1; done
+}
+tp_mb() { echo "$(($1/1048576)).$(( ($1%1048576)*10/1048576 ))"; }
+tp_cd1() {
+  local d=$1 now=$2 od=${1%/*}/owners f s x sz cnt=0 bytes=0 left
+  tp_sbx "$d" "$od" || return 0
+  [ -d "$d" ] && [ ! -L "$d" ] || return 0
+  # Legacy removal: T121's usage record and its files never shipped. A
+  # directory that held a record counts its items as accessed now, once.
+  if [ -e "$d/.telepatch-usage" ] || [ -L "$d/.telepatch-usage" ]; then
+    for f in "$d"/*; do tp_hex "${f##*/}" && [ -f "$f" ] && [ ! -L "$f" ] && touch -c -m -d "@$now" -- "$f" 2>/dev/null; done
   fi
+  rm -f -- "$d/.telepatch-usage" "$d"/.telepatch-usage.* 2>/dev/null
   for f in "$d"/*; do
     s=${f##*/}
-    tp_hex "$s" || continue
-    [ -f "$f" ] && [ ! -L "$f" ] || continue
-    present[$s]=1
-    [ -n "${last[$s]-}" ] || last[$s]=$now
+    tp_hex "$s" && [ -f "$f" ] && [ ! -L "$f" ] || continue
+    x=$(stat -c %Y -- "$f" 2>/dev/null) || continue
+    [ $((now - x)) -gt 7776000 ] || continue
+    if sz=$(tp_rmi "$f"); then cnt=$((cnt+1)); bytes=$((bytes+sz)); tp_unmark "$od" "$s"; fi
   done
-  {
-    printf 'v1\n'
-    for s in $(printf '%s\n' "${!present[@]}" | sort); do
-      t=${last[$s]}
-      if [ $((now - t)) -gt 7776000 ]; then expired+=("$s"); continue; fi
-      if [ "$tp_ent" = 1 ] && [ "$bad" = 0 ] && [ -z "${fset[$s]-}" ]; then
-        case ",${own[$s]-}," in
-          *",$tp_pb,"*)
-            own[$s]=$(tp_odel "${own[$s]}" "$tp_pb")
-            if [ -z "${own[$s]}" ]; then disowned+=("$s"); continue; fi;;
-        esac
-      fi
-      printf '%s\t%s\t%s\n' "$s" "$t" "${own[$s]-}"
-    done
-  } > "$tmp" 2>/dev/null || { rm -f -- "$tmp"; exec 9>&-; echo "telepatch: cache $d: usage not recorded: cannot write $tmp"; return 2; }
-  mv -f -- "$tmp" "$rec" 2>/dev/null || { rm -f -- "$tmp"; exec 9>&-; echo "telepatch: cache $d: usage not recorded: cannot replace $rec"; return 2; }
-  for s in "${expired[@]}"; do
-    f=$d/$s
-    [ -f "$f" ] && [ ! -L "$f" ] || continue
-    sz=$(stat -c %s -- "$f" 2>/dev/null || echo 0)
-    if rm -f -- "$f" 2>/dev/null && [ ! -e "$f" ]; then cnt=$((cnt+1)); bytes=$((bytes+sz)); fi
-  done
-  if [ "$cnt" -gt 0 ]; then
-    mb=$((bytes/1048576)).$(( (bytes%1048576)*10/1048576 ))
-    echo "cache $d: removed $cnt items ($mb MB) unused for 90 days"
-  fi
-  for s in "${disowned[@]}"; do
-    f=$d/$s
-    [ -f "$f" ] && [ ! -L "$f" ] || continue
-    sz=$(stat -c %s -- "$f" 2>/dev/null || echo 0)
-    if rm -f -- "$f" 2>/dev/null && [ ! -e "$f" ]; then
-      mb=$((sz/1048576)).$(( (sz%1048576)*10/1048576 ))
-      echo "cache $d: removed ${s:0:12} ($mb MB): no longer fetched by $tp_pb"
+  if [ "$cnt" -gt 0 ]; then echo "cache $d: removed $cnt items ($(tp_mb "$bytes") MB) unused for 90 days"; fi
+  [ -n "$tp_pb" ] && [ ! -L "$od" ] && [ ! -L "$od/$tp_pb" ] && [ -d "$od/$tp_pb" ] || return 0
+  for x in "$od/$tp_pb"/*; do
+    s=${x##*/}
+    tp_hex "$s" && [ -z "${fset[$s]-}" ] || continue
+    { [ -f "$x" ] || [ -L "$x" ]; } && rm -f -- "$x" 2>/dev/null || continue
+    left=0
+    for f in "$od"/*/"$s"; do if [ -e "$f" ] || [ -L "$f" ]; then left=1; break; fi; done
+    if [ "$left" = 0 ] && sz=$(tp_rmi "$d/$s"); then
+      echo "cache $d: removed ${s:0:12} ($(tp_mb "$sz") MB): no longer fetched by $tp_pn"
     fi
   done
-  exec 9>&-
+  rmdir -- "$od/$tp_pb" 2>/dev/null
   return 0
 }
-tp_cu() {
-  local now cm cp rg lk d u nl=$'\n' seen line rc
-  local -a cand=() dirs=() keep=()
+tp_end() {
+  local now cm cp rg u line seen nl=$'\n'
+  local -a cand=()
   now=${TP_CACHE_NOW-}; case $now in ''|*[!0123456789]*) now=$(date +%s);; esac
-  cm=${TP_FETCH_CACHE:-/var/cache/telepatch/sha256}; cm=${cm%/}; cp=${cm%/*}
-  rg=$cp/caches; lk=$cp/.caches.lock
-  [ "${#tp_u[@]}" -gt 0 ] || [ -f "$rg" ] || [ -d "$cm" ] || return 0
-  if ! command -v flock >/dev/null 2>&1; then echo "telepatch: cache usage not recorded: flock is not on the host"; return 0; fi
-  tp_sbx "$rg" "$lk" "$rg.tmp.$$" || return 0
-  if [ ! -d "$cp" ]; then
-    [ "${#tp_u[@]}" -gt 0 ] || return 0
-    mkdir -p -- "$cp" 2>/dev/null || { echo "telepatch: cache usage not recorded: cannot create $cp"; return 0; }
-  fi
-  { exec 8>>"$lk"; } 2>/dev/null || { echo "telepatch: cache usage not recorded: cannot open $lk"; return 0; }
-  flock -x -w 30 8 || { echo "telepatch: cache usage not recorded: the cache registry is locked"; return 0; }
-  if [ -f "$rg" ]; then
+  cm=${TP_FETCH_CACHE:-/var/cache/telepatch/sha256}; cm=${cm%/}; cp=${cm%/*}; rg=$cp/caches
+  # Legacy removal: T121's registry lock and run lock, never shipped.
+  if tp_sbx "$cp/.caches.lock" "$cp/.lock"; then rm -f -- "$cp/.caches.lock" "$cp/.lock" 2>/dev/null; fi
+  for u in "${tp_f[@]}"; do fset[$u]=1; done
+  for u in "${tp_u[@]}"; do fset[${u%% *}]=1; cand+=("${u#* }"); done
+  if tp_sbx "$rg" && [ -f "$rg" ]; then
     while IFS= read -r line || [ -n "$line" ]; do cand+=("$line"); done < "$rg"
   fi
-  for u in "${tp_u[@]}"; do cand+=("${u#* }"); done
-  if [ -d "$cm" ]; then cand+=("$cm"); fi
+  cand+=("$cm")
   seen=$nl
   for line in "${cand[@]}"; do
     # Only the main cache or a per-filesystem cache is ever a cache
-    # directory; any other line is dropped, never read or expired.
+    # directory; any other line is skipped, never read or expired.
     tp_shape "$line" "$cm"
     case $? in
       0) line=$tp_l;;
@@ -486,19 +457,14 @@ tp_cu() {
     esac
     case $seen in *"$nl$line$nl"*) continue;; esac
     seen+=$line$nl
-    dirs+=("$line")
+    tp_cd1 "$line" "$now"
   done
-  for d in "${dirs[@]}"; do
-    tp_cd1 "$d" "$now"; rc=$?
-    [ "$rc" -eq 1 ] || keep+=("$d")
-  done
-  { for d in "${keep[@]}"; do printf '%s\n' "$d"; done; } > "$rg.tmp.$$" 2>/dev/null && mv -f -- "$rg.tmp.$$" "$rg" 2>/dev/null || { rm -f -- "$rg.tmp.$$"; echo "telepatch: cache registry $rg: not written"; }
   return 0
 }
 "#;
 
-/// What `cache usage` and `cache purge` share (T123), after [`TP_HEX`],
-/// [`TP_SHAPE`] and [`TP_OWN`]: `tp_regdirs MAIN REGISTRY` fills `dirs` with
+/// What `cache usage` and `cache purge` share (T123), after [`TP_HEX`] and
+/// [`TP_SHAPE`]: `tp_regdirs MAIN REGISTRY` fills `dirs` with
 /// the registry's lines and the main cache, each through `tp_shape` and
 /// without repeats (a `W` line for a line that is no cache directory);
 /// `tp_recload RECORD` reads a usage record into `tp_rl` (last used), `tp_ro`
@@ -610,13 +576,19 @@ pub fn cache_purge_script(owner: Option<&str>) -> String {
     s.push_str(crate::sandbox::SBX);
     s.push_str(TP_HEX);
     s.push_str(TP_SHAPE);
-    s.push_str(TP_OWN);
     s.push_str(CACHE_CMD);
     s.push_str("tp_o=");
     s.push_str(&quote(owner.unwrap_or("")));
     s.push('\n');
     s.push_str(
         r#"rk=$cp/.caches.lock; ru=$cp/.lock
+tp_odel() {
+  local x r=
+  local -a a
+  IFS=, read -ra a <<<"$1"
+  for x in "${a[@]}"; do [ "$x" = "$2" ] || r=${r:+$r,}$x; done
+  printf '%s' "$r"
+}
 tp_rm() {
   local f=$1 sz
   [ -f "$f" ] && [ ! -L "$f" ] || return 0
@@ -952,7 +924,11 @@ pub fn prepare_script(items: &[Item]) -> String {
 /// `tp_one <i> <url> <sum> <unpack 0|1>`, which prints one `fetch <i> ..`
 /// line: from the cache, or downloaded into the staging directory, verified
 /// and moved into the cache (with no sum: staged under `u-<hash of the
-/// url>`, and `tp_keep=1`).
+/// url>`, and `tp_keep=1`). A cache hit or a download into a cache is an
+/// access (T135, `tp_acc`): a `fuse <sum> <dir>` line and, when the shell has
+/// `__tp_pb` (not under `--check`), the item's mtime set to now, the marker
+/// `<dir>/../owners/<owner_dir(playbook)>/<sum>` created and `<dir>` appended to the
+/// registry, all without a lock.
 pub(crate) fn prelude() -> String {
     let mut s = crate::ops::undo::guard_line();
     s.push_str(LOCATE);
@@ -994,16 +970,24 @@ tp_stg() {
   e=$(tp_idx "$r" "$tp_run/fsroots" 2>&1) || { echo "fetch $i nostage $r: ${e##*: }"; return 1; }
   tp_keep=1
 }
-tp_use() { printf 'fuse %s %s\n' "$1" "${2%/}"; }
 tp_reg() {
   local d=${1%/} rg=${tp_cd%/*}/caches
   tp_sbx "$rg" "$d" || return 0
-  (umask 022; mkdir -p -- "${rg%/*}") 2>/dev/null || return 0
-  (
-    if command -v flock >/dev/null 2>&1; then exec 8>>"${rg%/*}/.caches.lock" && flock -x -w 30 8 || exit 0; fi
-    grep -qxF -- "$d" "$rg" 2>/dev/null || printf '%s\n' "$d" >> "$rg"
-  ) 2>/dev/null
+  grep -qxF -- "$d" "$rg" 2>/dev/null || (umask 022; mkdir -p -- "${rg%/*}" && printf '%s\n' "$d" >> "$rg") 2>/dev/null
   return 0
+}
+tp_acc() {
+  local s=$1 d=${2%/} o
+  printf 'fuse %s %s\n' "$s" "$d"
+  [ -n "${__tp_pb-}" ] || return 0
+  o=${d%/*}/owners/$__tp_pb
+  tp_sbx "$d/$s" "$o/$s" || return 0
+  case ${TP_CACHE_NOW-} in
+    ''|*[!0123456789]*) touch -c -m -- "$d/$s";;
+    *) touch -c -m -d "@$TP_CACHE_NOW" -- "$d/$s";;
+  esac 2>/dev/null
+  [ -e "$o/$s" ] || (umask 022; mkdir -p -- "$o" && : > "$o/$s") 2>/dev/null
+  tp_reg "$d"
 }
 tp_one() {
   local i=$1 u=$2 s=$3 up=$4 t=${5-} f p rc err got r= h
@@ -1017,13 +1001,13 @@ tp_one() {
       if [ -f "$f" ] && [ "$(sha256sum "$f" 2>/dev/null | cut -d' ' -f1)" = "$s" ]; then
         tp_check "$i" "$f" "$up" || return 0
         tp_link "$f" "f-$s" || { echo "fetch $i fail ${tp_dl:-sh} 1 cannot create $tp_run"; return 0; }
-        echo "fetch $i cached"; tp_use "$s" "$r/.telepatch/cache/sha256"; return 0
+        echo "fetch $i cached"; tp_acc "$s" "$r/.telepatch/cache/sha256"; return 0
       fi
     fi
     f="$tp_cd/$s"
     if [ -f "$f" ] && [ "$(sha256sum "$f" 2>/dev/null | cut -d' ' -f1)" = "$s" ]; then
       tp_check "$i" "$f" "$up" || return 0
-      echo "fetch $i cached"; tp_use "$s" "$tp_cd"; return 0
+      echo "fetch $i cached"; tp_acc "$s" "$tp_cd"; return 0
     fi
   fi
   if [ -z "$tp_dl" ]; then echo "fetch $i notool"; return 0; fi
@@ -1050,13 +1034,13 @@ tp_one() {
     tp_check "$i" "$p" "$up" || { rm -f -- "$p"; return 0; }
     if [ -n "$r" ]; then
       if (umask 022; mkdir -p -- "$tp_c") && chmod 644 "$p" && mv -f -- "$p" "$tp_c/$s" && tp_link "$tp_c/$s" "f-$s"; then
-        echo "fetch $i fetched"; tp_reg "$tp_c"; tp_use "$s" "$tp_c"
+        echo "fetch $i fetched"; tp_acc "$s" "$tp_c"
       else
         rm -f -- "$p"
         echo "fetch $i fail $tp_dl 1 cannot write the cache $tp_c"
       fi
     elif (umask 022; mkdir -p -- "$tp_cd") && mv -f -- "$p" "$tp_cd/.$s.part" && chmod 644 "$tp_cd/.$s.part" && mv -f -- "$tp_cd/.$s.part" "$tp_cd/$s"; then
-      echo "fetch $i fetched"; tp_reg "$tp_cd"; tp_use "$s" "$tp_cd"
+      echo "fetch $i fetched"; tp_acc "$s" "$tp_cd"
     else
       rm -f -- "$p" "$tp_cd/.$s.part"
       echo "fetch $i fail $tp_dl 1 cannot write the cache $tp_cd"
@@ -1178,6 +1162,30 @@ pub(crate) fn lookup(url: &str) -> String {
 /// it on another filesystem, else the main cache entry. One line.
 pub(crate) const LOOKUP_PKG: &str = "tp_f=\"$tp_cd/$tp_s\"; if [ -L \"$tp_sd/$__tp_run/f-$tp_s\" ]; then tp_f=\"$tp_sd/$__tp_run/f-$tp_s\"; fi\n";
 
+/// The line an op that reads `tp_f`, the file of fetch `f`, runs before it
+/// creates anything (T135). With no locks, a `cache purge` may have removed
+/// a cached file since prepare: the op fails, rc 1, saying so. An
+/// unverified file is the run's own staged file, never purged. `after_rc`:
+/// only when `rc` is still 0 (a package op, which may have failed before).
+pub(crate) fn missing(f: &Fetched, after_rc: bool) -> String {
+    let say = match &f.sha256 {
+        Some(s) => quote(&format!(
+            "telepatch: the cached download {} for {} is gone (a cache purge during the run?); run again to download it",
+            s.get(..12).unwrap_or(s),
+            f.url
+        )),
+        None => {
+            "\"telepatch: fetched file $tp_f is missing (prepare did not fetch it)\"".to_string()
+        }
+    };
+    let rc = if after_rc {
+        "[ \"$rc\" -eq 0 ] && "
+    } else {
+        ""
+    };
+    format!("if {rc}[ ! -f \"$tp_f\" ]; then echo {say} >&2; rc=1; fi\n")
+}
+
 /// The file op's body for a fetched source: appended after `tp_p=<path>`
 /// ([`FileSpec::render`]); the mode and owner the spec names are on the
 /// candidate before it replaces the target, and the usual mode and owner
@@ -1191,9 +1199,7 @@ pub fn render(f: &FileSpec, src: &FileSrc, o: &mut String) {
             quote(&src.fetched.url)
         )),
     }
-    o.push_str(
-        "if [ ! -f \"$tp_f\" ]; then echo \"telepatch: fetched file $tp_f is missing (prepare did not fetch it)\" >&2; rc=1; fi\n",
-    );
+    o.push_str(&missing(&src.fetched, false));
     if src.fetched.sha256.is_none() {
         o.push_str("if [ \"$rc\" -eq 0 ]; then tp_s=$(sha256sum \"$tp_f\" | cut -d' ' -f1); fi\n");
     }

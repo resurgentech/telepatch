@@ -4,9 +4,8 @@
 //! output read into a [`CacheReport`]. Declared inside [`crate::executor`]
 //! (`#[path]`) for its transports, shell handshake and refusal texts.
 //!
-//! The shell is the run's own root shell minus the run lock (`init_shell`
-//! with `run_lock: false`): `cache purge` takes that lock itself, exclusively
-//! and without waiting. `--serial n` limits the hosts in flight; the events
+//! The shell is a run's root shell with no playbook (`init_shell` with no
+//! owner). `--serial n` limits the hosts in flight; the events
 //! of `--log` are `host_open` and `host_status` as a run's are.
 
 use super::*;
@@ -101,7 +100,7 @@ async fn cache_read(name: &str, target: &Target, script: &str) -> CacheHost {
     for extra in shells.got {
         extra.close().await;
     }
-    let res = match init_shell(&mut shell, false).await {
+    let res = match init_shell(&mut shell, None).await {
         Ok(()) => prepare::probe(&mut shell, 1, script).await,
         Err(e) => Err(format!("opening the shell: {e}")),
     };

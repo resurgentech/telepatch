@@ -534,9 +534,6 @@ impl PkgSpec {
         o.push_str(&format!("tp_name={}\n", quote(name)));
         locate_file(o, f);
         o.push_str(
-            "if [ \"$rc\" -eq 0 ] && [ ! -f \"$tp_f\" ]; then echo \"telepatch: fetched file $tp_f is missing (prepare did not fetch it)\" >&2; rc=1; fi\n",
-        );
-        o.push_str(
             "tp_st=$(dpkg-query -W -f='${db:Status-Status}:${Version}' \"$tp_name\" 2>/dev/null || true)\n",
         );
         o.push_str("if [ \"$rc\" -eq 0 ] && [ \"$tp_st\" != \"installed:$tp_pin\" ]; then\n");
@@ -658,6 +655,7 @@ fn rpm_like(o: &mut String, mgr: &str, group_list: &str) {
 /// path when the fetch has no sum. Reading across filesystems is fine: a
 /// package file is staged on its first consumer's filesystem, and a
 /// package op as first consumer counts as the stage's own.
+/// Then the check that it is still there ([`crate::ops::fetch::missing`]).
 fn locate_file(o: &mut String, f: &crate::ops::fetch::Fetched) {
     o.push_str(crate::ops::fetch::LOCATE);
     match &f.sha256 {
@@ -671,6 +669,7 @@ fn locate_file(o: &mut String, f: &crate::ops::fetch::Fetched) {
             quote(&f.url)
         )),
     }
+    o.push_str(&crate::ops::fetch::missing(f, true));
 }
 
 /// Install one pinned package from a fetched `.rpm` (`dnf install -y ./x.rpm`).
@@ -681,9 +680,6 @@ impl PkgSpec {
         let name = self.names.first().map(String::as_str).unwrap_or("");
         o.push_str(&format!("tp_name={}\n", quote(name)));
         locate_file(o, f);
-        o.push_str(
-            "if [ \"$rc\" -eq 0 ] && [ ! -f \"$tp_f\" ]; then echo \"telepatch: fetched file $tp_f is missing (prepare did not fetch it)\" >&2; rc=1; fi\n",
-        );
         o.push_str(&format!(
             "tp_have() {{ rpm -q --qf '{RPM_FORMS}' \"$1\" 2>/dev/null | grep -qxF -- \"$tp_pin\"; }}\n"
         ));
