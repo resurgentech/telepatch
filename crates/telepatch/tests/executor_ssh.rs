@@ -617,37 +617,74 @@ fn user_created_by_the_run_is_checked_and_opened_in_window_two() {
 
 // ---- .timeout: the second shell ----
 
-fn timed(h: Host<Vars>) -> PlaybookFuture {
+/// The op's sleep: far longer than any load can stretch a test, so only a
+/// kill (or, in the one-shell test, the dropped connection) ends the run
+/// early. The fraction is unique to this process and test (`which`), so a
+/// [`Reaper`] stops exactly this test's sleep and never another test's or
+/// another copy's. Patterns end in `$` so pid 1234's fraction never
+/// matches pid 12341's.
+fn long_sleep(which: u32) -> String {
+    format!("300.{}{}", std::process::id(), which)
+}
+
+fn timed_with(h: Host<Vars>, which: u32) -> PlaybookFuture {
     Box::pin(async move {
         let later = f(&h, "later");
-        sh!(h, "echo MARK_TIMED; sleep 4.31").timeout(std::time::Duration::from_secs(1));
+        let nap = long_sleep(which);
+        sh!(h, "echo MARK_TIMED; sleep {nap}").timeout(std::time::Duration::from_secs(1));
         sh!(h, "touch {later}");
         Ok(())
     })
 }
 
+fn timed(h: Host<Vars>) -> PlaybookFuture {
+    timed_with(h, 1)
+}
+
+fn timed_one_shell(h: Host<Vars>) -> PlaybookFuture {
+    timed_with(h, 2)
+}
+
 /// Stops what a test left running, by a marker in its command line.
-struct Reaper(&'static str);
+struct Reaper(String);
 impl Drop for Reaper {
     fn drop(&mut self) {
         let _ = std::process::Command::new("pkill")
-            .args(["-KILL", "-f", self.0])
+            .args(["-KILL", "-f", &self.0])
             .status();
     }
 }
 
+/// Whether a `sleep <arg>` process is still running, polled for 5 s.
+fn sleep_alive(arg: &str) -> bool {
+    for _ in 0..100 {
+        let found = std::process::Command::new("pgrep")
+            .args(["-f", &format!("sleep {arg}$")])
+            .output()
+            .map(|o| !o.stdout.is_empty())
+            .unwrap_or(false);
+        if !found {
+            return false;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    true
+}
+
+/// No wall-clock bound proves a kill: the op sleeps 300 s, so the proof is
+/// that the `later` marker is absent, no process survives and the report
+/// says `timed out after 1s`. This bound only guards against a hang, far
+/// below the sleep and out of reach of any load.
+const HANG_GUARD: std::time::Duration = std::time::Duration::from_secs(60);
+
 #[test]
 fn a_timed_out_op_is_killed_through_a_second_channel() {
-    let _r = Reaper("sleep 4.31");
+    let _r = Reaper(format!("sleep {}$", long_sleep(1)));
     let stub = Stub::new();
     let pb = Playbook::new("timed", timed);
     let t = std::time::Instant::now();
     let (r, out) = go(&pb, &stub, stub.transport());
-    assert!(
-        t.elapsed() < std::time::Duration::from_millis(3800),
-        "{:?}",
-        t.elapsed()
-    );
+    assert!(t.elapsed() < HANG_GUARD, "{:?}", t.elapsed());
     let HostStatus::Failed { op, .. } = &r.hosts[0].status else {
         panic!("{:?}\n{out}", r.hosts[0].status)
     };
@@ -658,20 +695,22 @@ fn a_timed_out_op_is_killed_through_a_second_channel() {
     let remotes: Vec<String> = stub.channels().into_iter().map(|(r, _)| r).collect();
     assert_eq!(remotes, [ROOT, ROOT], "{remotes:?}");
     assert_eq!(survivors(&stub.pids()), Vec::<u32>::new());
+    // The op's own sleep died with its group.
+    assert!(
+        !sleep_alive(&long_sleep(1)),
+        "the op's sleep outlived the kill"
+    );
 }
 
 #[test]
 fn a_host_that_gives_one_shell_fails_as_a_timeout_and_drops_the_connection() {
-    let _r = Reaper("sleep 4.31");
+    let _r = Reaper(format!("sleep {}$", long_sleep(2)));
     let stub = Stub::new();
-    let pb = Playbook::new("one", timed);
+    let pb = Playbook::new("one", timed_one_shell);
     let t = std::time::Instant::now();
     let (r, out) = go(&pb, &stub, stub.transport().env("TP_STUB_MAX_CHAN", "1"));
-    assert!(
-        t.elapsed() < std::time::Duration::from_millis(3800),
-        "{:?}",
-        t.elapsed()
-    );
+    // The run did not wait for the 300 s sleep: the connection was dropped.
+    assert!(t.elapsed() < HANG_GUARD, "{:?}", t.elapsed());
     let HostStatus::Failed { op, .. } = &r.hosts[0].status else {
         panic!("{:?}\n{out}", r.hosts[0].status)
     };
@@ -1178,8 +1217,8 @@ fn timeouts(h: Host<Vars>) -> PlaybookFuture {
 
 #[test]
 fn a_timeout_after_the_barrier_is_still_killed_through_a_second_shell_of_the_new_boot() {
-    let _r1 = Reaper("sleep 4.32");
-    let _r2 = Reaper("sleep 4.31");
+    let _r1 = Reaper("sleep 4.32".into());
+    let _r2 = Reaper("sleep 4.31".into());
     let stub = Stub::new();
     let pb = Playbook::new("timeouts", timeouts);
     let t0 = std::time::Instant::now();
