@@ -1963,3 +1963,21 @@ are appended, never edited in; a hook refuses rewrites.
 - src: 8 files +247 −289. Snapshots: telepatch 1 (2 lines), tp_basic
   39 (65 lines), each the gone-file check. Gate E and check-sandbox green.
 - Commits: telepatch faa3985; tp_basic 9ef74a5
+
+## 2026-11-13 — T136 `cache usage` is a disk-space report; `cache purge` without locks
+
+- `cache usage`: per host, each cache directory's `du -sb` (owner
+  markers included), one `working` line (stage plus every filesystem's
+  `.telepatch/tmp`, dead runs' roots from `<stage>/*/fsroots`), host
+  total, inventory total. `--json` in bytes only. No items, owners or
+  last-used times.
+- `cache purge --yes`: no lock, no record; removes items, `owners/`,
+  legacy record and lock files; rmdirs an emptied per-filesystem tree;
+  registry and working directories untouched. `--owner P` removes
+  `owners/<owner_dir(P)>/` and only items no other owner marks.
+- Deleted: `tp_recload`, `tp_pown`, `tp_odel`, every `flock` line, the
+  "in use" outcome, `utc_minute`, per-item reporting. src 4 files
+  +232 −413. `flock|telepatch-usage|RUN_LOCK` in src: 3 hits, all
+  remove-on-sight of the legacy record.
+- Gate E and check-sandbox green. tp_basic unchanged.
+- Commits: telepatch 7800867
