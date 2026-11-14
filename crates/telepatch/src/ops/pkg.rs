@@ -653,12 +653,19 @@ fn rpm_like(o: &mut String, mgr: &str, group_list: &str) {
     ));
 }
 
-/// Where the fetched package file is, as `tp_f`: the checksum cache, or
-/// the unverified staging path when the fetch has no sum.
+/// Where the fetched package file is, as `tp_f`: the stage's link to where
+/// prepare staged it, else the checksum cache; or the unverified staging
+/// path when the fetch has no sum. Reading across filesystems is fine: a
+/// package file is staged on its first consumer's filesystem, and a
+/// package op as first consumer counts as the stage's own.
 fn locate_file(o: &mut String, f: &crate::ops::fetch::Fetched) {
     o.push_str(crate::ops::fetch::LOCATE);
     match &f.sha256 {
-        Some(s) => o.push_str(&format!("tp_s={}\ntp_f=\"$tp_cd/$tp_s\"\n", quote(s))),
+        Some(s) => o.push_str(&format!(
+            "tp_s={}\n{}",
+            quote(s),
+            crate::ops::fetch::LOOKUP_PKG
+        )),
         None => o.push_str(&format!(
             "tp_f=\"$tp_sd\"/\"$__tp_run\"/\"u-$(printf %s {} | sha256sum | cut -c1-32)\"\n",
             quote(&f.url)

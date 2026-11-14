@@ -737,20 +737,14 @@ pub struct Item {
     /// ([`crate::ops::undo::capture_word`]); `None` for a consumer with no
     /// path the prepare shell can name (a relative one).
     pub targets: Vec<Option<String>>,
-    /// A package op installs it from the file. It reads the main cache or
-    /// the stage's own `u-` file only, never a link to another filesystem,
-    /// so it keeps the item on the stage's filesystem.
-    pub pkg_file: bool,
 }
 
 impl Item {
     /// The word of the path whose filesystem the download lands on: the
     /// first consumer's target, in window order. `None`: the stage's own
-    /// filesystem (no consumer with a path, or a package op reads it).
+    /// filesystem (the first consumer has no path: a package op, which
+    /// installs across `/`, or a relative target).
     pub fn first_target(&self) -> Option<&str> {
-        if self.pkg_file {
-            return None;
-        }
         self.targets.first().and_then(|t| t.as_deref())
     }
 
@@ -788,7 +782,6 @@ pub fn items(window: &Window) -> Vec<Item> {
         let Some((url, sum, unpack, retry, timeout)) = op_fetch(&op.node.spec) else {
             continue;
         };
-        let pkg = matches!(op.node.spec, OpSpec::Pkg(_));
         let user = match &op.node.run_as.principal {
             crate::trace::Principal::User(u) => u.as_str(),
             crate::trace::Principal::Root => "root",
@@ -803,7 +796,6 @@ pub fn items(window: &Window) -> Vec<Item> {
                 i.retry = i.retry.max(retry);
                 i.timeout = i.timeout.max(timeout);
                 i.targets.push(target);
-                i.pkg_file |= pkg;
             }
             None => out.push(Item {
                 url: url.to_string(),
@@ -812,7 +804,6 @@ pub fn items(window: &Window) -> Vec<Item> {
                 retry,
                 timeout,
                 targets: vec![target],
-                pkg_file: pkg,
             }),
         }
     }
@@ -1181,6 +1172,12 @@ pub(crate) fn lookup(url: &str) -> String {
     )
 }
 
+/// A package op's `tp_f` for a checksummed fetch: [`lookup`] without the
+/// target comparison (a package file has no one target path; the manager
+/// installs it across `/`). The stage's link `f-<sum>` when prepare staged
+/// it on another filesystem, else the main cache entry. One line.
+pub(crate) const LOOKUP_PKG: &str = "tp_f=\"$tp_cd/$tp_s\"; if [ -L \"$tp_sd/$__tp_run/f-$tp_s\" ]; then tp_f=\"$tp_sd/$__tp_run/f-$tp_s\"; fi\n";
+
 /// The file op's body for a fetched source: appended after `tp_p=<path>`
 /// ([`FileSpec::render`]); the mode and owner the spec names are on the
 /// candidate before it replaces the target, and the usual mode and owner
@@ -1350,7 +1347,6 @@ mod tests {
             retry,
             timeout,
             targets: Vec::new(),
-            pkg_file: false,
         }
     }
 
@@ -1447,7 +1443,6 @@ mod tests {
             retry: 0,
             timeout: None,
             targets: Vec::new(),
-            pkg_file: false,
         };
         let items = [
             it(Some("w")),

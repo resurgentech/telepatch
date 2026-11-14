@@ -1745,6 +1745,9 @@ struct Tgt {
     target: String,
     unpack: bool,
     allow: bool,
+    /// A package op installs it from the file (`h.pkg(..).from(f)`), not a
+    /// file op at `target`.
+    pkg: bool,
 }
 
 #[derive(Clone)]
@@ -1767,6 +1770,14 @@ impl Tgt {
             target: target.display().to_string(),
             unpack: false,
             allow: sum.is_none(),
+            pkg: false,
+        }
+    }
+    /// A package op installs `url` from the file (the target is unused).
+    fn pkg(url: &str, sum: &str) -> Tgt {
+        Tgt {
+            pkg: true,
+            ..Tgt::from(url, Some(sum), Path::new("/unused"))
         }
     }
     fn unpack(url: &str, sum: &str, target: &Path) -> Tgt {
@@ -1787,6 +1798,10 @@ fn pb_w(h: Host<W>) -> PlaybookFuture {
             let mut f = h.fetch(&t.url);
             if let Some(s) = &t.sum {
                 f = f.sha256(s);
+            }
+            if t.pkg {
+                h.pkg(["tpk"]).from(&f).pin("1.0");
+                continue;
             }
             let o = if w.login {
                 h.as_user("root").file(&t.target)
@@ -1874,7 +1889,8 @@ impl Env {
         }
         let wrap = self.wrappers();
         let mut path = format!(
-            "{}:{}:{}",
+            "{}:{}:{}:{}",
+            self.p("pmstub").display(),
             wrap.display(),
             self.p("bin").display(),
             std::env::var("PATH").unwrap()
@@ -2344,4 +2360,156 @@ fn the_stale_sweep_removes_an_old_run_s_tmp_on_the_other_filesystem_and_nothing_
     );
     // this run's own tmp is gone
     assert_eq!(ls(&e.p("stage")), ["young"]);
+}
+
+// --- a package file follows the same staging rule (T131) ---
+
+impl Env {
+    /// Fake `dpkg-query` and `apt-get` in `<d>/pmstub`. `apt-get install
+    /// ./x.deb` records `readlink x.deb` (the path the manager was given)
+    /// to `<d>/pkgpath` and marks `tpk` installed; `dpkg-query` then says
+    /// `installed:1.0`. The `.deb` itself is the served file.
+    fn pm_stub(&self) {
+        let pm = self.p("pmstub");
+        std::fs::create_dir_all(&pm).unwrap();
+        let dd = self.d.path().display();
+        let body = format!(
+            r#"#!/bin/bash
+D={dd}
+case "${{0##*/}}" in
+  dpkg-query) if [ -e "$D/tpk_installed" ]; then echo installed:1.0; else exit 1; fi;;
+  apt-get) case " $* " in *" install "*)
+      for a; do case "$a" in ./x.deb) readlink "$a" >> "$D/pkgpath"; cat "$a" > "$D/pkgbytes" || exit 1; touch "$D/tpk_installed";; esac; done;;
+    esac;;
+esac
+exit 0
+"#
+        );
+        for t in ["dpkg-query", "apt-get"] {
+            let p = pm.join(t);
+            std::fs::write(&p, &body).unwrap();
+            std::fs::set_permissions(&p, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+                .unwrap();
+        }
+        // the host reads its os with `cat /etc/os-release`: make it Debian
+        {
+            let p = pm.join("cat");
+            std::fs::write(
+                &p,
+                "#!/bin/bash\nif [ \"$1\" = /etc/os-release ]; then printf 'ID=debian\\nVERSION_ID=12\\n'; exit 0; fi\nexec /usr/bin/cat \"$@\"\n",
+            )
+            .unwrap();
+            std::fs::set_permissions(&p, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+                .unwrap();
+        }
+    }
+    fn pkgpath(&self) -> Vec<String> {
+        std::fs::read_to_string(self.p("pkgpath"))
+            .unwrap_or_default()
+            .lines()
+            .map(str::to_string)
+            .collect()
+    }
+}
+
+const DEB: &[u8] = b"pretend this is a .deb\n";
+
+#[test]
+fn a_url_shared_by_a_file_op_first_and_a_pkg_file_op_is_staged_on_the_file_s_filesystem() {
+    let e = Env::new();
+    let fsb = e.fsb();
+    std::fs::create_dir_all(&fsb).unwrap();
+    e.serve("t.deb", DEB);
+    e.pm_stub();
+    let s = sha256(DEB);
+    let w = e.w(vec![
+        Tgt::from("http://fake/t.deb", Some(&s), &fsb.join("t.deb")),
+        Tgt::pkg("http://fake/t.deb", &s),
+    ]);
+    let (r, out) = e.go_w(&w, std::slice::from_ref(&fsb));
+    assert_eq!(status(&r), &HostStatus::Changed, "{out}\n{}", r.render());
+    assert_eq!(e.log().lines().count(), 1, "one download: {}", e.log());
+    let down = e.outlog();
+    assert!(
+        down.len() == 1 && down[0].starts_with(&format!("{}/.telepatch/tmp/", fsb.display())),
+        "downloaded on fsB: {down:?}"
+    );
+    assert_eq!(e.cache(), Vec::<String>::new(), "the main cache is unused");
+    assert!(fsb.join(format!(".telepatch/cache/sha256/{s}")).is_file());
+    // the pkg op installed it, through the stage link
+    let given = e.pkgpath();
+    assert_eq!(given.len(), 1, "{given:?}");
+    assert!(
+        given[0].starts_with(&format!("{}/", e.p("stage").display()))
+            && given[0].ends_with(&format!("/f-{s}")),
+        "{given:?}"
+    );
+    assert_eq!(std::fs::read(e.p("pkgbytes")).unwrap(), DEB);
+    assert_eq!(std::fs::read(fsb.join("t.deb")).unwrap(), DEB);
+    assert_eq!(out.matches("target now on").count(), 0, "{out}");
+    assert_eq!(ls(&fsb.join(".telepatch/tmp")), Vec::<String>::new());
+    // Usage (T121) is recorded in the directory the item is in: fsB's cache.
+    let rec = std::fs::read_to_string(fsb.join(".telepatch/cache/sha256/.telepatch-usage"))
+        .unwrap_or_default();
+    assert!(
+        rec.lines().any(|l| l.starts_with(&format!("{s}\t"))),
+        "fsB's usage record names the item: {rec:?}"
+    );
+    e.assert_clean();
+}
+
+#[test]
+fn a_pkg_file_op_alone_stays_on_the_stage_and_the_main_cache() {
+    let e = Env::new();
+    let fsb = e.fsb();
+    std::fs::create_dir_all(&fsb).unwrap();
+    e.serve("t.deb", DEB);
+    e.pm_stub();
+    let s = sha256(DEB);
+    let w = e.w(vec![Tgt::pkg("http://fake/t.deb", &s)]);
+    let (r, out) = e.go_w(&w, std::slice::from_ref(&fsb));
+    assert_eq!(status(&r), &HostStatus::Changed, "{out}\n{}", r.render());
+    let down = e.outlog();
+    assert!(
+        down.len() == 1 && down[0].starts_with(&format!("{}/", e.p("stage").display())),
+        "downloaded on the stage: {down:?}"
+    );
+    assert_eq!(e.cache(), std::slice::from_ref(&s));
+    assert!(!fsb.join(".telepatch").exists(), "nothing staged on fsB");
+    let given = e.pkgpath();
+    assert_eq!(given, [e.p("cache").join(&s).display().to_string()]);
+    assert_eq!(std::fs::read(e.p("pkgbytes")).unwrap(), DEB);
+    e.assert_clean();
+}
+
+#[test]
+fn a_pkg_file_op_first_keeps_the_item_on_the_stage_and_the_file_op_copies_it_across() {
+    let e = Env::new();
+    let fsb = e.fsb();
+    std::fs::create_dir_all(&fsb).unwrap();
+    e.serve("t.deb", DEB);
+    e.pm_stub();
+    let s = sha256(DEB);
+    let w = e.w(vec![
+        Tgt::pkg("http://fake/t.deb", &s),
+        Tgt::from("http://fake/t.deb", Some(&s), &fsb.join("t.deb")),
+    ]);
+    let (r, out) = e.go_w(&w, std::slice::from_ref(&fsb));
+    assert_eq!(status(&r), &HostStatus::Changed, "{out}\n{}", r.render());
+    assert_eq!(e.log().lines().count(), 1, "one download: {}", e.log());
+    let down = e.outlog();
+    assert!(
+        down.len() == 1 && down[0].starts_with(&format!("{}/", e.p("stage").display())),
+        "downloaded on the stage: {down:?}"
+    );
+    assert_eq!(e.cache(), std::slice::from_ref(&s));
+    assert!(!fsb.join(".telepatch").exists(), "nothing staged on fsB");
+    assert_eq!(std::fs::read(e.p("pkgbytes")).unwrap(), DEB);
+    assert_eq!(std::fs::read(fsb.join("t.deb")).unwrap(), DEB);
+    // T119's note is printed only when the stage holds a link to a file
+    // staged elsewhere; this item is in the main cache, read in place, so
+    // the copy across says nothing (see the report's assumption).
+    assert_eq!(out.matches("target now on").count(), 0, "{out}");
+    assert_eq!(ls(&fsb.join(".telepatch/tmp")), Vec::<String>::new());
+    e.assert_clean();
 }

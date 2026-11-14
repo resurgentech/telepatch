@@ -593,7 +593,6 @@ pub fn prepared(
         retry: 0,
         timeout: None,
         targets: Vec::new(),
-        pkg_file: false,
     };
     let state = match fetch::parse(std::slice::from_ref(&item), out).remove(0) {
         Found::Blocked(why) => return Err(blocked(&why)),
