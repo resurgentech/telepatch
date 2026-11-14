@@ -121,6 +121,10 @@ pub struct Shell {
     stdin: Option<ChildStdin>,
     rx: UnboundedReceiver<Raw>,
     child: Child,
+    /// The program the local child runs, for the close warning.
+    argv0: String,
+    /// How long [`Shell::close`] waits for the child before killing it.
+    close_bound: std::time::Duration,
     nonce: String,
     user: String,
     inflight: VecDeque<usize>,
@@ -131,6 +135,11 @@ pub struct Shell {
     done: HashMap<usize, Result<OpOutput, ShellError>>,
     dead: Option<String>,
 }
+
+/// How long [`Shell::close`] waits for the local child after `exit`.
+pub const CLOSE_BOUND: std::time::Duration = std::time::Duration::from_secs(10);
+/// How long it waits once more after killing the child.
+const KILL_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
 
 fn new_nonce() -> String {
     use std::hash::{BuildHasher, Hasher};
@@ -203,6 +212,8 @@ impl Shell {
             stdin,
             rx,
             child,
+            argv0: argv[0].clone(),
+            close_bound: CLOSE_BOUND,
             nonce,
             user: user.to_string(),
             inflight: VecDeque::new(),
@@ -412,9 +423,38 @@ impl Shell {
         }
     }
 
-    /// Close stdin and wait for the process to end.
-    pub async fn close(mut self) {
-        drop(self.stdin.take());
-        let _ = self.child.wait().await;
+    /// The program the local child runs (`bash`, `ssh`, `docker`, ...).
+    pub fn argv0(&self) -> &str {
+        &self.argv0
+    }
+
+    /// Change how long [`Shell::close`] waits before it kills the local
+    /// child. Tests only; the default is [`CLOSE_BOUND`].
+    pub fn set_close_bound(&mut self, bound: std::time::Duration) {
+        self.close_bound = bound;
+    }
+
+    /// End the shell as a person at a keyboard would: type `exit`, close
+    /// stdin, wait. `exit` ends the shell (and the remote bash behind `ssh`
+    /// or `docker exec`) even when the EOF is lost on the way. The wait is
+    /// bounded: past the close bound the local child is killed, and a
+    /// further [`KILL_GRACE`] is all it gets. Returns `true` when the bound
+    /// was hit. Call it with no op in flight.
+    pub async fn close(mut self) -> bool {
+        let mut stdin = self.stdin.take();
+        let polite = async {
+            if let Some(w) = stdin.as_mut() {
+                let _ = w.write_all(b"exit\n").await;
+                let _ = w.flush().await;
+            }
+            drop(stdin.take());
+            let _ = self.child.wait().await;
+        };
+        if tokio::time::timeout(self.close_bound, polite).await.is_ok() {
+            return false;
+        }
+        let _ = self.child.start_kill();
+        let _ = tokio::time::timeout(KILL_GRACE, self.child.wait()).await;
+        true
     }
 }

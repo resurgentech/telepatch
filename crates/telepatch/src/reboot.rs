@@ -537,7 +537,7 @@ impl HostExec {
                 }
                 Ok(Ok((sh, _))) => {
                     last = "boot id unchanged".to_string();
-                    sh.close().await;
+                    close_shell(&self.sink, &self.name, "root", sh).await;
                 }
                 Ok(Err(why)) => last = why,
                 // The deadline cut an attempt short: keep what the

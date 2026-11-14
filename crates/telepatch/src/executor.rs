@@ -379,6 +379,21 @@ impl Sink {
     }
 }
 
+/// Close `sh` (see [`Shell::close`]). When its bound was hit and the local
+/// child had to be killed, say so: one line and one `shell_close_killed`
+/// event. Only a warning: the host's work and report are already done.
+/// `which` is `root`, `login <user>`, `killer` or `cache`.
+async fn close_shell(sink: &Sink, host: &str, which: &str, sh: Shell) {
+    let argv0 = sh.argv0().to_string();
+    if sh.close().await {
+        sink.line(&format!(
+            "telepatch: {host}: the {which} shell did not end within {} s of exit; its local {argv0} was killed",
+            crate::pool::CLOSE_BOUND.as_secs()
+        ));
+        sink.event(json!({"ev":"shell_close_killed","host":host,"shell":which,"argv0":argv0}));
+    }
+}
+
 const TAIL_LINES: usize = 40;
 const TAIL_BYTES: usize = 256 * 1024;
 /// Trace ids are small; probes use ids far above them.
@@ -421,12 +436,13 @@ impl HostShells {
     /// Close the login shells, then the root shell, then the second shell,
     /// then the transport's connections (SSH).
     async fn close(self) {
-        for (_, sh) in self.logins {
-            sh.close().await;
+        let (sink, host) = (self.sink, self.host);
+        for (user, sh) in self.logins {
+            close_shell(&sink, &host, &format!("login {user}"), sh).await;
         }
-        self.root.close().await;
+        close_shell(&sink, &host, "root", self.root).await;
         if let Some(k) = self.killer.shell {
-            k.close().await;
+            close_shell(&sink, &host, "killer", k).await;
         }
         close_target(&self.target).await;
     }
@@ -2970,7 +2986,7 @@ impl HostExec {
         }
         self.seq += 1;
         let r = prepare::probe(&mut sh, self.seq, script).await;
-        sh.close().await;
+        close_shell(&self.shells.sink, &self.shells.host, "root", sh).await;
         r.map(|(_, out)| out)
     }
 
@@ -4446,6 +4462,47 @@ mod watchdog_tests {
 
     fn op(sh: &Shell, id: usize, body: &str) -> String {
         wrap(OpKind::Sh, &raw_body(body), id, sh.nonce())
+    }
+
+    /// T138: a shell that has to be killed at close is reported by one line
+    /// and one `shell_close_killed` event; one that ends on `exit` is not.
+    #[tokio::test]
+    async fn close_shell_reports_a_kill_and_only_a_kill() {
+        let nap = format!("600.{}77", std::process::id());
+        let _r = Reaper(vec![format!("^sleep {nap}$")]);
+        let d = tempfile::tempdir().unwrap();
+        let logp = d.path().join("log");
+        let out = Rc::new(RefCell::new(String::new()));
+        let sink = Sink {
+            stdout: Stdout::Capture(out.clone()),
+            log: Some(RefCell::new(std::io::BufWriter::new(
+                std::fs::File::create(&logp).unwrap(),
+            ))),
+        };
+        let argv = |script: String| vec!["sh".to_string(), "-c".to_string(), script];
+        let mut stuck = Shell::spawn(
+            &argv(format!(
+                "trap '' TERM HUP; {{ cat; exec sleep {nap}; }} | bash & wait"
+            )),
+            &[],
+            "root",
+        )
+        .await
+        .unwrap();
+        stuck.set_close_bound(Duration::from_millis(300));
+        close_shell(&sink, "h1", "login bob", stuck).await;
+        let (t, _sb) = local_target();
+        let fine = shell(&t).await;
+        close_shell(&sink, "h1", "root", fine).await;
+        assert_eq!(
+            out.borrow().as_str(),
+            "telepatch: h1: the login bob shell did not end within 10 s of exit; its local sh was killed\n"
+        );
+        let log = std::fs::read_to_string(&logp).unwrap();
+        assert_eq!(
+            log.trim(),
+            r#"{"argv0":"sh","ev":"shell_close_killed","host":"h1","shell":"login bob"}"#
+        );
     }
 
     /// Kills what a test started, by a marker in its command line.

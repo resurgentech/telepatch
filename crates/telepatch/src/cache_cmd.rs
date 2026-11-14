@@ -84,7 +84,7 @@ pub fn run_cache(
 
 async fn cache_one(name: String, target: Target, script: &str, sink: &Sink) -> CacheHost {
     sink.event(json!({"ev":"host_open","host":name}));
-    let host = cache_read(&name, &target, script).await;
+    let host = cache_read(&name, &target, script, sink).await;
     close_target(&target).await;
     let (status, detail) = match &host.status {
         crate::report::CacheStatus::Ok => ("ok", String::new()),
@@ -94,7 +94,7 @@ async fn cache_one(name: String, target: Target, script: &str, sink: &Sink) -> C
     host
 }
 
-async fn cache_read(name: &str, target: &Target, script: &str) -> CacheHost {
+async fn cache_read(name: &str, target: &Target, script: &str, sink: &Sink) -> CacheHost {
     let mut shells = target.open(name, &Principal::Root, 1).await;
     if shells.got.is_empty() {
         return CacheHost::failed(name, refusal(target, name, &Principal::Root, shells.limit));
@@ -107,7 +107,7 @@ async fn cache_read(name: &str, target: &Target, script: &str) -> CacheHost {
         Ok(()) => prepare::probe(&mut shell, 1, script).await,
         Err(e) => Err(format!("opening the shell: {e}")),
     };
-    shell.close().await;
+    close_shell(sink, name, "cache", shell).await;
     match res {
         Ok((_, out)) => CacheHost::parse(name, &out),
         Err(e) => CacheHost::failed(name, e),

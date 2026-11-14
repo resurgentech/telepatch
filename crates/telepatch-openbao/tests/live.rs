@@ -20,6 +20,17 @@ const NAME: &str = "tp-t91-openbao";
 const V2: &str = "t91-v2-marker";
 const V1: &str = "t91-v1-marker";
 
+/// A child's exit status, stderr and stdout, for an assert message: the
+/// next `docker create exited exit status: 1` names its cause.
+fn why(out: &std::process::Output) -> String {
+    format!(
+        "{}\nstderr: {}\nstdout: {}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr).trim_end(),
+        String::from_utf8_lossy(&out.stdout).trim_end()
+    )
+}
+
 struct Remove;
 
 impl Drop for Remove {
@@ -63,14 +74,14 @@ fn live_openbao_v1_and_v2_from_a_dev_server() {
         assert!(
             create.status.success(),
             "docker create exited {}",
-            create.status
+            why(&create)
         );
 
         let cp = Command::new("docker")
             .args(["cp", "/usr/bin/bao", &format!("{NAME}:/bao")])
             .output()
             .expect("docker cp");
-        assert!(cp.status.success(), "docker cp exited {}", cp.status);
+        assert!(cp.status.success(), "docker cp exited {}", why(&cp));
 
         let start = Command::new("docker")
             .args(["start", NAME])
@@ -83,8 +94,8 @@ fn live_openbao_v1_and_v2_from_a_dev_server() {
         let err = String::from_utf8_lossy(&start.stderr);
         assert!(
             err.contains("port is already allocated") || err.contains("address already in use"),
-            "docker start exited {} (no capability added): {err}",
-            start.status
+            "docker start exited {} (no capability added)",
+            why(&start)
         );
     }
     let port = port.unwrap_or_else(|| {
@@ -221,7 +232,7 @@ fn bao(args: &[&str]) {
             return;
         }
         if Instant::now() >= deadline {
-            panic!("bao exited {}", out.status);
+            panic!("bao exited {}", why(&out));
         }
         std::thread::sleep(Duration::from_millis(300));
     }
