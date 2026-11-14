@@ -1932,3 +1932,14 @@ are appended, never edited in; a hook refuses rewrites.
 - Live: rockylinux9 PASS (149 s), almalinux9 PASS (237 s), each its own
   1 GiB VM, second run CHANGED 0, slices identical; VMs deleted.
 - Commits: telepatch 6b8770b; tp_basic bac7591
+
+## 2026-11-13 — T137 The last shared `sleep 4.31`/`4.32` patterns in `executor_ssh`
+
+- `a_timeout_after_the_barrier_is_still_killed_through_a_second_shell_of_the_new_boot`
+  and its playbook use T134's `long_sleep` (`300.<pid>3`, `300.<pid>4`,
+  anchored `Reaper`s); the 8 s bound is `HANG_GUARD`; both sleeps are
+  checked gone. `grep 'sleep 4\.3[12]' tests/` finds nothing.
+- Loop (executor_ssh binary filtered to the three timeout tests, 200 runs,
+  8 at a time): old 183/200 failed, new 0/200.
+- Gate E and check-sandbox green.
+- Commits: telepatch 368a177
