@@ -1816,3 +1816,18 @@ are appended, never edited in; a hook refuses rewrites.
   changes in binary_release.rs/fetch.rs (an older tarball is removed).
   Gate E and check-sandbox green; no snapshot moved.
 - Commits: telepatch 7a24837
+
+## 2026-11-13 — T123 `cache usage` and `cache purge` over an inventory
+
+- `tp-basic cache usage|purge` with run's targets; one root shell and
+  one inline script per host (`src/cache_cmd.rs`, scripts in
+  `ops/fetch.rs`, table/JSON in `report.rs`).
+- usage: items, bytes, owners, oldest/newest per directory, totals,
+  `--json`; read-only. purge: `--yes` required (else a dry listing),
+  exclusive run lock without waiting (`in use by a running run`),
+  removes 64-hex items, records, locks, empty per-fs `.telepatch`;
+  never `.telepatch/tmp`; `--owner P`. Exit 0/1/2.
+- Tests: 14 in cli.rs (red 12/13, green). tp_basic test-vm.sh VM case
+  written (runs in T104), self-test green. Gate E and check-sandbox
+  green; no snapshot moved.
+- Commits: telepatch fbc8725; tp_basic bd1cefd
