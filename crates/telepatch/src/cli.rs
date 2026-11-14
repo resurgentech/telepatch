@@ -19,11 +19,16 @@
 //! order given). `--max-fail n` stops starting hosts once more than `n` have
 //! failed (failed, blocked or error): hosts already started finish, each one
 //! never started is reported `skipped` with `max-fail n reached`, and the run
-//! exits 1. It holds back only hosts `--serial` has queued. `--only a,b` runs
-//! the named roles' bodies and skips the rest (see
+//! exits 1. `--max-fail` without `--serial` is a usage error (every host would
+//! start at once, so nothing is held back); `--max-fail 0` with it is valid.
+//! `--only a,b` runs the named roles' bodies and skips the rest (see
 //! [`crate::host::Host::with_only`]): a role called inside a named role runs
-//! with it, and a name the playbook did not trace is an error on that host
-//! listing the roles it traced. All three also apply under `--check`.
+//! with it. Each name is checked against [`crate::roles`] (the `#[role]`
+//! functions compiled into the binary) before any host is resolved or opened:
+//! an unknown one exits 2 listing the roles, the closest first. A real role a
+//! host's trace never reaches is one report line on that host, and a closing
+//! warning when no host reached it, with the exit unchanged. All three also
+//! apply under `--check`.
 //!
 //! `--reboot auto|never` is about ops marked `.needs_reboot()` (see
 //! [`crate::executor`], "Reboot"): without it a pending
@@ -141,13 +146,14 @@ enum Cmd {
         #[arg(long, value_name = "N", value_parser = parse_serial)]
         serial: Option<usize>,
         /// Stop starting hosts once more than this many have failed (failed,
-        /// blocked or error); hosts already started finish. Holds back only
-        /// hosts `--serial` has queued.
+        /// blocked or error); hosts already started finish. Needs `--serial`
+        /// (without it every host starts at once; `0` is valid with it).
         #[arg(long, value_name = "N")]
         max_fail: Option<usize>,
         /// Run only these roles (comma-separated or repeated); the rest are
         /// skipped. A role called inside a named role runs with it. A name
-        /// the playbook did not trace is an error listing those it did.
+        /// that is no role of this binary is a usage error listing the roles;
+        /// a real role the host's trace never reaches is a report line.
         #[arg(long, value_delimiter = ',')]
         only: Vec<String>,
         /// What to do about a pending reboot (ops marked `.needs_reboot()`):
@@ -434,6 +440,18 @@ fn dispatch<V: DeserializeOwned + Default + 'static>(
                 Ok(p) => p,
                 Err(m) => return err(m),
             };
+            if max_fail.is_some() && serial.is_none() {
+                return err(
+                    "--max-fail needs --serial: without it every host starts at once, \
+                     so there is nothing to hold back"
+                        .into(),
+                );
+            }
+            // Before inventory hosts are resolved or any transport opens: the
+            // roles this binary has are the only exact list before a trace.
+            if let Err(m) = crate::role::check_only_names(&only) {
+                return err(m);
+            }
             if inventory.is_none() && !limit.is_empty() {
                 return err("--limit needs --inventory".into());
             }

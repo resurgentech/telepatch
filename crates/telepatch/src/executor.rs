@@ -4126,6 +4126,7 @@ async fn run_one<V: 'static>(
     engine.executor.cleanup_stage().await;
     let (mut rep, shells) = engine.executor.finish(res);
     rep.not_selected = probe.not_selected_roles();
+    rep.only_untraced = probe.untraced_only_roles();
     shells.close().await;
     sink.event(json!({"ev":"host_status","host":name,"status":rep.status.label(),"detail":rep.status_detail()}));
     rep

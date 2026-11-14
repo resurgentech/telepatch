@@ -1581,3 +1581,66 @@ fn cache_usage_with_an_unreadable_record_warns_and_owner_purge_leaves_it_alone()
     assert!(out.contains("nothing changed there"), "{out}");
     assert_eq!(before, tree(&sb.cache));
 }
+
+#[test]
+fn an_unknown_only_role_exits_2_and_never_contacts_the_host() {
+    let d = tempfile::tempdir().unwrap();
+    let v = host_vars(d.path());
+    let stub = Stub::new();
+    let (out, code) = go_ssh(
+        &stub,
+        &[
+            "run", "greet", "--host", "bot@one", "--vars", &v, "--only", "nosuch",
+        ],
+    );
+    assert_eq!(code, 2, "{out}");
+    assert!(
+        out.contains("--only: no role named nosuch in this binary; roles: "),
+        "{out}"
+    );
+    assert!(out.contains("greet"), "{out}");
+    assert!(
+        stub.argv().is_empty(),
+        "the stub ssh was run: {:?}",
+        stub.argv()
+    );
+}
+
+#[test]
+fn max_fail_alone_is_a_usage_error_before_anything_opens() {
+    let d = tempfile::tempdir().unwrap();
+    let v = host_vars(d.path());
+    let stub = Stub::new();
+    let (out, code) = go_ssh(
+        &stub,
+        &[
+            "run",
+            "greet",
+            "--host",
+            "bot@one",
+            "--vars",
+            &v,
+            "--max-fail",
+            "1",
+        ],
+    );
+    assert_eq!(code, 2, "{out}");
+    assert!(out.contains("--max-fail needs --serial"), "{out}");
+    assert!(stub.argv().is_empty(), "{:?}", stub.argv());
+    let (out, code) = go_ssh(
+        &stub,
+        &[
+            "run",
+            "greet",
+            "--host",
+            "bot@one",
+            "--vars",
+            &v,
+            "--serial",
+            "1",
+            "--max-fail",
+            "1",
+        ],
+    );
+    assert_eq!(code, 0, "{out}");
+}

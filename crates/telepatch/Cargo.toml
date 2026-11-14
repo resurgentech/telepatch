@@ -19,6 +19,7 @@ tempfile = "3"
 toml = "1"
 tokio = { version = "1.54.1", features = ["process", "io-util", "rt", "macros", "sync", "time"] }
 zeroize = "1"
+linkme = "0.3.38"
 
 [dev-dependencies]
 insta = "1"

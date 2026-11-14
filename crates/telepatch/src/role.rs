@@ -8,6 +8,66 @@ use std::rc::Rc;
 use crate::host::{Host, TraceError};
 use crate::trace::{Node, Trace};
 
+/// Every `#[role]` function linked into this binary, by name: `#[role]`
+/// adds one entry at link time. Read it through [`roles`].
+#[linkme::distributed_slice]
+pub static ROLES: [&'static str] = [..];
+
+/// The names of the `#[role]` functions compiled into this binary, sorted,
+/// each once. The one exact source for what `--only` may name before any
+/// host is contacted: which roles a playbook *calls* is only known by tracing
+/// it, and a trace awaits facts from a host.
+pub fn roles() -> Vec<&'static str> {
+    let mut v: Vec<&'static str> = ROLES.iter().copied().collect();
+    v.sort_unstable();
+    v.dedup();
+    v
+}
+
+/// Levenshtein distance between two names, by chars.
+fn edit_distance(a: &str, b: &str) -> usize {
+    let b: Vec<char> = b.chars().collect();
+    let mut prev: Vec<usize> = (0..=b.len()).collect();
+    for (i, ca) in a.chars().enumerate() {
+        let mut cur = vec![i + 1];
+        for (j, cb) in b.iter().enumerate() {
+            let sub = prev[j] + usize::from(ca != *cb);
+            cur.push(sub.min(prev[j + 1] + 1).min(cur[j] + 1));
+        }
+        prev = cur;
+    }
+    prev[b.len()]
+}
+
+/// `--only`'s check: every name must be a role compiled into this binary.
+/// The error is the usage message; the single closest role (edit distance
+/// at most 2, ties to the first in sorted order) is listed first.
+pub fn check_only_names<S: AsRef<str>>(names: &[S]) -> Result<(), String> {
+    let known = roles();
+    for n in names {
+        let n = n.as_ref();
+        if known.contains(&n) {
+            continue;
+        }
+        let mut list = known.clone();
+        let best = list
+            .iter()
+            .enumerate()
+            .map(|(i, r)| (edit_distance(n, r), i))
+            .min()
+            .filter(|(d, _)| *d <= 2);
+        if let Some((_, i)) = best {
+            let r = list.remove(i);
+            list.insert(0, r);
+        }
+        return Err(format!(
+            "--only: no role named {n} in this binary; roles: {}",
+            list.join(", ")
+        ));
+    }
+    Ok(())
+}
+
 /// The future a playbook returns: `'static` and `!Send`, polled on one thread.
 pub type PlaybookFuture = Pin<Box<dyn Future<Output = Result<(), TraceError>>>>;
 

@@ -348,9 +348,15 @@ fn expand_role(f: &mut ItemFn) -> syn::Result<TokenStream2> {
     };
     *f.block = new_block;
     let konst = format_ident!("__tp_role_name_{}", f.sig.ident);
+    let listed = format_ident!("__TP_ROLE_LISTED_{}", f.sig.ident);
     let vis = &f.vis;
     Ok(quote! {
         #f
+        #[doc(hidden)]
+        #[allow(non_upper_case_globals, dead_code)]
+        #[::telepatch::__private::linkme::distributed_slice(::telepatch::__private::ROLES)]
+        #[linkme(crate = ::telepatch::__private::linkme)]
+        static #listed: &str = #name;
         #[doc(hidden)]
         #[allow(non_upper_case_globals, dead_code)]
         #vis const #konst: &str = #name;

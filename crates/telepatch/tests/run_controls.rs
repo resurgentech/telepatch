@@ -364,20 +364,51 @@ fn a_nested_role_runs_whole_inside_a_selected_role() {
 }
 
 #[test]
-fn a_role_only_reached_through_a_skipped_one_is_unknown() {
+fn a_registered_role_the_trace_never_reaches_is_a_report_line_not_an_error() {
+    // `inner` is a real role but only called inside the skipped `outer`, so
+    // this host's trace never reaches it (T116: one line, exit unchanged).
     let d = tempfile::tempdir().unwrap();
     let log = d.path().join("log");
     let (r, text) = go(&roles_pb(), hosts(1, &log, &[]), false, only(&["inner"]));
-    assert_eq!(r.exit_code(), 1, "{text}");
+    assert_eq!(r.exit_code(), 0, "{text}");
     assert!(
-        text.contains("--only: unknown role `inner`; the playbook traced: alpha, beta, outer"),
+        text.contains("h1: --only inner: not traced on this host"),
+        "{text}"
+    );
+    assert!(
+        text.contains("warning: --only inner: no host traced this role"),
         "{text}"
     );
     assert!(lines(&log).is_empty());
 }
 
 #[test]
-fn only_with_an_unknown_name_lists_the_traced_roles() {
+fn an_untraced_role_is_one_line_per_host_and_one_warning() {
+    let d = tempfile::tempdir().unwrap();
+    let log = d.path().join("log");
+    let (r, text) = go(
+        &roles_pb(),
+        hosts(2, &log, &[]),
+        false,
+        only(&["alpha", "work"]),
+    );
+    assert_eq!(r.exit_code(), 0, "{text}");
+    for h in ["h1", "h2"] {
+        assert!(
+            text.contains(&format!("{h}: --only work: not traced on this host")),
+            "{text}"
+        );
+    }
+    assert_eq!(text.matches("warning: --only").count(), 1, "{text}");
+    assert!(
+        text.contains("warning: --only work: no host traced this role"),
+        "{text}"
+    );
+    assert!(!text.contains("--only alpha"), "{text}");
+}
+
+#[test]
+fn only_with_a_name_no_role_has_lists_the_roles() {
     let d = tempfile::tempdir().unwrap();
     let log = d.path().join("log");
     let (r, text) = go(
@@ -389,11 +420,21 @@ fn only_with_an_unknown_name_lists_the_traced_roles() {
     assert!(matches!(status(&r, "h1"), HostStatus::Error(_)), "{text}");
     assert_eq!(r.exit_code(), 1);
     assert!(
-        text.contains(
-            "--only: unknown roles `nada`, `nope`; the playbook traced: alpha, beta, outer"
-        ),
+        text.contains("--only: no role named nada in this binary; roles: "),
         "{text}"
     );
+}
+
+#[test]
+fn roles_lists_this_crates_roles_sorted() {
+    let got = telepatch::roles();
+    for r in ["alpha", "beta", "inner", "outer", "picky", "work"] {
+        assert!(got.contains(&r), "{r} in {got:?}");
+    }
+    let mut sorted = got.clone();
+    sorted.sort();
+    sorted.dedup();
+    assert_eq!(got, sorted);
 }
 
 #[test]
@@ -478,15 +519,76 @@ fn cli_only_runs_the_roles_named_and_serial_max_fail_parse() {
 }
 
 #[test]
-fn cli_only_is_repeatable_and_unknown_is_listed() {
+fn cli_only_is_repeatable_and_unknown_is_a_usage_error() {
     let d = tempfile::tempdir().unwrap();
     let v = vars_file(d.path());
     let (out, code) = cli(&[
         "run", "roles", "--local", "--vars", &v, "--only", "alpha", "--only", "zzz",
     ]);
-    assert_ne!(code, 0, "{out}");
-    assert!(out.contains("unknown role `zzz`"), "{out}");
-    assert!(out.contains("alpha, beta, outer"), "{out}");
+    assert_eq!(code, 2, "{out}");
+    assert!(
+        out.contains("--only: no role named zzz in this binary; roles: "),
+        "{out}"
+    );
+    assert!(out.contains("alpha, beta"), "{out}");
+    assert!(lines(&d.path().join("log")).is_empty(), "nothing ran");
+}
+
+#[test]
+fn cli_only_unknown_gives_the_closest_name_first() {
+    let (out, code) = cli(&["run", "roles", "--local", "--only", "inne"]);
+    assert_eq!(code, 2, "{out}");
+    assert!(
+        out.contains("--only: no role named inne in this binary; roles: inner, alpha, beta, "),
+        "{out}"
+    );
+    // nothing within 2: plain sorted order
+    let (out, code) = cli(&["run", "roles", "--local", "--only", "zzzzzz"]);
+    assert_eq!(code, 2, "{out}");
+    assert!(out.contains("roles: alpha, beta, inner, "), "{out}");
+}
+
+#[test]
+fn cli_only_names_a_real_role_the_trace_skips_exit_0() {
+    let d = tempfile::tempdir().unwrap();
+    let v = vars_file(d.path());
+    let (out, code) = cli(&["run", "roles", "--local", "--vars", &v, "--only", "work"]);
+    assert_eq!(code, 0, "{out}");
+    assert!(
+        out.contains("local: --only work: not traced on this host"),
+        "{out}"
+    );
+    assert!(
+        out.contains("warning: --only work: no host traced this role"),
+        "{out}"
+    );
+}
+
+#[test]
+fn cli_max_fail_needs_serial() {
+    let d = tempfile::tempdir().unwrap();
+    let v = vars_file(d.path());
+    let (out, code) = cli(&["run", "roles", "--local", "--vars", &v, "--max-fail", "1"]);
+    assert_eq!(code, 2, "{out}");
+    assert!(
+        out.contains(
+            "--max-fail needs --serial: without it every host starts at once, so there is nothing to hold back"
+        ),
+        "{out}"
+    );
+    assert!(lines(&d.path().join("log")).is_empty(), "nothing ran");
+    let (out, code) = cli(&[
+        "run",
+        "roles",
+        "--local",
+        "--vars",
+        &v,
+        "--serial",
+        "1",
+        "--max-fail",
+        "1",
+    ]);
+    assert_eq!(code, 0, "{out}");
 }
 
 #[test]

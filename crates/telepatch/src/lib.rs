@@ -41,7 +41,14 @@ pub use local::{local, local_dir, local_file};
 pub use ops::wait::{MIN, Port, SEC, Wait};
 pub use policy::{Allowance, Policy};
 pub use resource::{Change, Probe, Probed, Resource, Script, Terminfo, plan_against};
-pub use role::{Playbook, PlaybookFuture, RoleGuard};
+pub use role::{Playbook, PlaybookFuture, RoleGuard, roles};
+
+/// What the `#[role]` expansion names; not an API.
+#[doc(hidden)]
+pub mod __private {
+    pub use crate::role::ROLES;
+    pub use linkme;
+}
 pub use secret::{Secret, SecretBackend, SecretError, SecretRef, SecretValue};
 pub use telepatch_macros::*;
 pub use trace::{Guard, Node, NodeId, OpNode, OpSpec, Principal, RunAs, Site, Source, Trace};

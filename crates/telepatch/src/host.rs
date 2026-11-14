@@ -279,35 +279,33 @@ impl<V> Host<V> {
         self.trace.borrow().not_selected.clone()
     }
 
-    /// `--only` names a role the finished trace lacks: an error listing the
-    /// roles it traced (checked when the playbook ends).
+    /// `--only`, checked when the playbook ends. A name that is no role of
+    /// this binary is an error (the CLI refuses it before any host is
+    /// opened; this is for a library caller that did not). A real role the
+    /// trace never reached is recorded for the report
+    /// ([`Host::untraced_only_roles`]), not an error: a role can be called
+    /// on one distro and not another.
     pub(crate) fn check_only(&self) -> Result<(), TraceError> {
-        let t = self.trace.borrow();
+        let mut t = self.trace.borrow_mut();
         let Some(only) = &t.only else { return Ok(()) };
-        let traced = t.traced_roles();
-        let unknown: Vec<String> = only
-            .iter()
-            .filter(|n| !traced.contains(n))
-            .map(|n| format!("`{n}`"))
-            .collect();
-        if unknown.is_empty() {
-            return Ok(());
+        let names: Vec<String> = only.iter().cloned().collect();
+        if let Err(message) = crate::role::check_only_names(&names) {
+            return Err(TraceError {
+                message,
+                roles: Vec::new(),
+                site: None,
+                policy: None,
+            });
         }
-        let list = if traced.is_empty() {
-            "no roles".to_string()
-        } else {
-            traced.join(", ")
-        };
-        Err(TraceError {
-            message: format!(
-                "--only: unknown role{} {}; the playbook traced: {list}",
-                if unknown.len() > 1 { "s" } else { "" },
-                unknown.join(", ")
-            ),
-            roles: Vec::new(),
-            site: None,
-            policy: None,
-        })
+        let traced = t.traced_roles();
+        t.only_untraced = Some(names.into_iter().filter(|n| !traced.contains(n)).collect());
+        Ok(())
+    }
+
+    /// The `--only` roles this host's finished trace never reached; `None`
+    /// when the trace did not finish (or there is no `--only`).
+    pub fn untraced_only_roles(&self) -> Option<Vec<String>> {
+        self.trace.borrow().only_untraced.clone()
     }
 
     /// Ops issued through the returned scope run in `user`'s persistent

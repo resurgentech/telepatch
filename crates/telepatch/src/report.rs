@@ -429,6 +429,9 @@ pub struct HostReport {
     pub skipped_roles: Vec<String>,
     /// Roles `--only` skipped, in trace order (empty without `--only`).
     pub not_selected: Vec<String>,
+    /// `--only` roles of this binary this host's trace never reached
+    /// (`None` when the trace did not finish, or without `--only`).
+    pub only_untraced: Option<Vec<String>>,
     pub will_install: Vec<WillInstall>,
     pub will_remove: Vec<WillRemove>,
     /// Names absent pkg ops removed, in the order the ops finished.
@@ -469,6 +472,7 @@ impl HostReport {
             ops: Vec::new(),
             skipped_roles: Vec::new(),
             not_selected: Vec::new(),
+            only_untraced: None,
             will_install: Vec::new(),
             will_remove: Vec::new(),
             removed: Vec::new(),
@@ -511,6 +515,37 @@ impl Report {
         }
     }
 
+    /// The one closing warning for `--only` roles no host traced: names
+    /// every finished trace left untraced, at least one trace finished.
+    /// Empty when there is nothing to warn about.
+    fn only_warning(&self) -> String {
+        let finished: Vec<&Vec<String>> = self
+            .hosts
+            .iter()
+            .filter_map(|h| h.only_untraced.as_ref())
+            .collect();
+        let Some(first) = finished.first() else {
+            return String::new();
+        };
+        let names: Vec<&str> = first
+            .iter()
+            .filter(|n| finished.iter().all(|u| u.contains(n)))
+            .map(String::as_str)
+            .collect();
+        if names.is_empty() {
+            return String::new();
+        }
+        format!(
+            "\nwarning: --only {}: no host traced {}\n",
+            names.join(", "),
+            if names.len() == 1 {
+                "this role"
+            } else {
+                "these roles"
+            }
+        )
+    }
+
     /// Is this the report of a `--check`?
     pub fn is_check(&self) -> bool {
         self.hosts.iter().any(|h| h.check.is_some())
@@ -547,7 +582,11 @@ impl Report {
                     h.not_selected.join(", ")
                 );
             }
+            for r in h.only_untraced.iter().flatten() {
+                let _ = writeln!(out, "{}: --only {r}: not traced on this host", h.name);
+            }
         }
+        out.push_str(&self.only_warning());
         out
     }
 
@@ -725,7 +764,11 @@ impl Report {
                     h.not_selected.join(", ")
                 );
             }
+            for r in h.only_untraced.iter().flatten() {
+                let _ = writeln!(out, "{}: --only {r}: not traced on this host", h.name);
+            }
         }
+        out.push_str(&self.only_warning());
         out
     }
 }

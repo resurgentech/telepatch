@@ -765,6 +765,9 @@ pub struct Trace {
     pub only: Option<std::rc::Rc<std::collections::BTreeSet<String>>>,
     /// The roles `--only` skipped, in trace order, each once.
     pub not_selected: Vec<String>,
+    /// `--only` roles of this binary the finished trace never reached; set
+    /// when the trace finishes, `None` before.
+    pub only_untraced: Option<Vec<String>>,
 }
 
 fn role_stack(nodes: &[Node]) -> Vec<String> {
