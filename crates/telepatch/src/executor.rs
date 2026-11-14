@@ -207,6 +207,9 @@ use crate::transport::local::LocalTransport;
 use crate::transport::ssh::SshTransport;
 use crate::transport::{Limit, Shells, Transport, read_os};
 
+#[path = "cache_cmd.rs"]
+mod cache_cmd;
+pub use cache_cmd::{CacheAction, run_cache};
 #[path = "reboot.rs"]
 mod reboot;
 pub use reboot::{RebootPolicy, RebootRecord, RebootWait};

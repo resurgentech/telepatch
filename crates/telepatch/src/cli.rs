@@ -38,6 +38,15 @@
 //! exit code is then 0 nothing to change, 2 changes pending, 1 a host
 //! blocked. A usage error also exits 2: it prints usage, not a check.
 //!
+//! `cache usage` and `cache purge` take the same targets as `run` (`--local`,
+//! `--host`, `--inventory [--limit]`, `--ssh-key`/`-i`, `--ssh-option`,
+//! `--serial`) and no playbook or vars: they read or empty the fetch caches
+//! of every host ([`crate::executor::run_cache`], "Cache lifetime" in the
+//! note). `usage` is read-only (`--json` prints one document in bytes,
+//! `--log` JSONL events); `purge` without `--yes` only prints what it would
+//! remove. Exit 0 every host done, 1 a host unreachable, refused or in use
+//! by a running run, 2 a usage error.
+//!
 //! Vars are TOML layered into the playbook repo's `V` per role section
 //! (see [`crate::vars`]); without `--vars` and the playbook's defaults, `V::default()`.
 
@@ -46,11 +55,12 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::rc::Rc;
 
-use clap::{ArgGroup, Parser, Subcommand};
+use clap::{ArgGroup, Args, Parser, Subcommand};
 use serde::de::DeserializeOwned;
 
 use crate::executor::{
-    CheckOpts, HostSpec, RebootPolicy, RunControls, RunOpts, Stdout, Target, run_with,
+    CacheAction, CheckOpts, HostSpec, RebootPolicy, RunControls, RunOpts, Stdout, Target,
+    run_cache, run_with,
 };
 use crate::facts::os::Os;
 use crate::inventory::{InvHost, Inventory};
@@ -149,6 +159,75 @@ enum Cmd {
         #[arg(long, value_enum, conflicts_with = "check")]
         reboot: Option<RebootArg>,
     },
+    /// Report or empty the fetch caches of every host (this machine,
+    /// `--host`s or an inventory); no playbook is named.
+    Cache {
+        #[command(subcommand)]
+        cmd: CacheCmd,
+    },
+}
+
+#[derive(Subcommand)]
+enum CacheCmd {
+    /// Per host and directory: items, size, owners, last-used times.
+    /// Read-only, takes no lock.
+    Usage {
+        #[command(flatten)]
+        targets: CacheTargets,
+        /// One JSON document, sizes in bytes, instead of the table.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Remove every cached item, the usage records and the empty
+    /// `.telepatch` directories of a host. Refused while a run is in
+    /// progress there. Without `--yes` it prints what it would remove.
+    Purge {
+        #[command(flatten)]
+        targets: CacheTargets,
+        /// Remove for real.
+        #[arg(long)]
+        yes: bool,
+        /// Only this playbook's share: take it from the items' owners, and
+        /// delete an item only when no owner is left (an item with no
+        /// recorded owner is left alone).
+        #[arg(long, value_name = "PLAYBOOK")]
+        owner: Option<String>,
+    },
+}
+
+/// The targets of `run`, for `cache`.
+#[derive(Args)]
+#[command(group(
+    ArgGroup::new("target").required(true).args(["local", "host", "inventory"])
+))]
+struct CacheTargets {
+    /// This machine (uid 0, else `sudo -n -H bash`).
+    #[arg(long)]
+    local: bool,
+    /// An SSH destination (`user@host`, or `ssh://user@host:port`), used as
+    /// the host's name in the report. Repeatable.
+    #[arg(long)]
+    host: Vec<String>,
+    /// The hosts of this `inventory.toml`. Not with `--local` or `--host`.
+    #[arg(long)]
+    inventory: Option<PathBuf>,
+    /// With `--inventory`: only these groups and hosts (comma-separated or
+    /// repeated). An unknown name is an error.
+    #[arg(long, value_delimiter = ',')]
+    limit: Vec<String>,
+    /// Private key for every ssh host: `-i <path> -o IdentitiesOnly=yes`.
+    #[arg(short = 'i', long = "ssh-key", conflicts_with = "local")]
+    ssh_key: Option<PathBuf>,
+    /// Extra `-o K=V` for ssh on every host. Repeatable.
+    #[arg(long = "ssh-option", value_name = "K=V", conflicts_with = "local",
+          value_parser = parse_ssh_option)]
+    ssh_option: Vec<String>,
+    /// At most this many hosts at a time (at least 1).
+    #[arg(long, value_name = "N", value_parser = parse_serial)]
+    serial: Option<usize>,
+    /// Write JSONL events here.
+    #[arg(long)]
+    log: Option<PathBuf>,
 }
 
 /// The values of `--reboot`.
@@ -294,6 +373,46 @@ fn dispatch<V: DeserializeOwned + Default + 'static>(
                 Err(_) => err(format!("planning `{name}` failed (see the panic above)")),
             }
         }
+        Cmd::Cache { cmd } => {
+            let (t, owner, yes, json, purge) = match cmd {
+                CacheCmd::Usage { targets, json } => (targets, None, true, json, false),
+                CacheCmd::Purge {
+                    targets,
+                    yes,
+                    owner,
+                } => {
+                    if let Some(o) = &owner
+                        && !crate::ops::fetch::valid_playbook_name(o)
+                    {
+                        return err(format!("--owner `{o}` is not a playbook name"));
+                    }
+                    (targets, owner, yes, false, true)
+                }
+            };
+            let hosts = match cache_hosts(&t, &local, &ssh) {
+                Ok(h) => h,
+                Err(m) => return err(m),
+            };
+            // Without `--yes` a purge only reads, then says what `--yes` removes.
+            let action = if purge && yes {
+                CacheAction::Purge {
+                    owner: owner.clone(),
+                }
+            } else {
+                CacheAction::Usage
+            };
+            let report = run_cache(hosts, action, t.log.clone(), t.serial);
+            let text = if json {
+                format!("{}\n", report.usage_json())
+            } else if !purge {
+                report.render_usage()
+            } else if yes {
+                report.render_purge(owner.as_deref())
+            } else {
+                report.render_would_purge(owner.as_deref())
+            };
+            (text, report.exit_code())
+        }
         Cmd::Run {
             name,
             vars,
@@ -402,6 +521,50 @@ fn dispatch<V: DeserializeOwned + Default + 'static>(
             (format!("\n{}", report.render()), report.exit_code())
         }
     }
+}
+
+/// The hosts `cache` acts on, as `run` names them (`--local`, `--host`s or
+/// the inventory's hosts after `--limit`), each with its transport. No vars
+/// are read.
+fn cache_hosts(
+    t: &CacheTargets,
+    local: &impl Fn() -> LocalTransport,
+    ssh: &impl Fn() -> SshTransport,
+) -> Result<Vec<(String, Target)>, String> {
+    if t.inventory.is_none() && !t.limit.is_empty() {
+        return Err("--limit needs --inventory".into());
+    }
+    let dests: Vec<String> = match &t.inventory {
+        Some(path) => {
+            let inv = Inventory::load(path)?;
+            let picked: Vec<&InvHost> = if t.limit.is_empty() {
+                inv.hosts().iter().collect()
+            } else {
+                inv.limit(&t.limit)?
+            };
+            if picked.is_empty() {
+                return Err(format!("inventory {} names no hosts", path.display()));
+            }
+            picked.into_iter().map(|h| h.name.clone()).collect()
+        }
+        None => t.host.clone(),
+    };
+    if t.inventory.is_none() && dests.is_empty() {
+        return Ok(vec![("local".into(), Target::Local(local()))]);
+    }
+    Ok(dests
+        .into_iter()
+        .map(|dest| {
+            let mut s = ssh();
+            if let Some(k) = &t.ssh_key {
+                s = s.identity(k);
+            }
+            for o in &t.ssh_option {
+                s = s.option(o);
+            }
+            (dest, Target::Ssh(s))
+        })
+        .collect())
 }
 
 /// The hosts of the inventory at `path` that `limit` leaves in (all with no

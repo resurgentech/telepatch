@@ -813,3 +813,461 @@ mod tests {
         assert_eq!(r.exit_code(), 0);
     }
 }
+
+// ---- cache usage and purge over an inventory (T123) ----
+
+/// A byte count as `MB` (below a GB) or `GB`, one decimal, 1024-based and
+/// truncated, as the end-of-run cache line prints it.
+pub fn human_bytes(bytes: u64) -> String {
+    const MB: u128 = 1 << 20;
+    const GB: u128 = 1 << 30;
+    let b = bytes as u128;
+    let (unit, name) = if b >= GB { (GB, "GB") } else { (MB, "MB") };
+    let tenths = b * 10 / unit;
+    format!("{}.{} {name}", tenths / 10, tenths % 10)
+}
+
+/// Epoch seconds as `YYYY-MM-DD HH:MM` (UTC).
+pub fn utc_minute(epoch: u64) -> String {
+    let days = (epoch / 86_400) as i64;
+    let secs = epoch % 86_400;
+    // Days since 1970-01-01 to a civil date (H. Hinnant's algorithm).
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + i64::from(month <= 2);
+    format!(
+        "{year:04}-{month:02}-{day:02} {:02}:{:02}",
+        secs / 3600,
+        secs % 3600 / 60
+    )
+}
+
+fn items_of(n: usize) -> String {
+    format!("{n} {}", if n == 1 { "item" } else { "items" })
+}
+
+/// One cached file, as `cache usage` reads it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CacheItem {
+    pub sum: String,
+    pub bytes: u64,
+    /// The record's last-used time; `None` when it has no line for the item.
+    pub last: Option<u64>,
+    pub owners: Vec<String>,
+}
+
+/// One registered cache directory on a host: what `cache usage` read in it
+/// (`items`), or what `cache purge` did there.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CacheDir {
+    pub path: String,
+    pub items: Vec<CacheItem>,
+    /// Purge: the items removed, `(sum, bytes)`.
+    pub removed: Vec<(String, u64)>,
+    /// Purge `--owner`: items that lost the owner and stay.
+    pub disowned: usize,
+}
+
+impl CacheDir {
+    pub fn bytes(&self) -> u64 {
+        self.items.iter().map(|i| i.bytes).sum()
+    }
+    fn removed_bytes(&self) -> u64 {
+        self.removed.iter().map(|r| r.1).sum()
+    }
+    /// The oldest and newest recorded last-used time.
+    fn span(&self) -> Option<(u64, u64)> {
+        let t: Vec<u64> = self.items.iter().filter_map(|i| i.last).collect();
+        Some((*t.iter().min()?, *t.iter().max()?))
+    }
+    /// `(owner, items, bytes)` per owner, sorted by owner name; an item with
+    /// two owners counts under each.
+    fn owners(&self) -> Vec<(String, usize, u64)> {
+        let mut m: std::collections::BTreeMap<&str, (usize, u64)> = Default::default();
+        for i in &self.items {
+            for o in &i.owners {
+                let e = m.entry(o).or_default();
+                e.0 += 1;
+                e.1 += i.bytes;
+            }
+        }
+        m.into_iter()
+            .map(|(o, (n, b))| (o.to_string(), n, b))
+            .collect()
+    }
+    fn unowned(&self) -> (usize, u64) {
+        let u = self.items.iter().filter(|i| i.owners.is_empty());
+        (u.clone().count(), u.map(|i| i.bytes).sum())
+    }
+}
+
+/// How `cache usage` or `cache purge` ended on one host.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CacheStatus {
+    Ok,
+    /// Unreachable, refused sudo, in use by a running run, or a refusal
+    /// the script gave; the reason.
+    Failed(String),
+}
+
+/// One host of a `cache usage` or `cache purge`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CacheHost {
+    pub name: String,
+    pub status: CacheStatus,
+    pub dirs: Vec<CacheDir>,
+    pub warnings: Vec<String>,
+    /// Directories a purge removed.
+    pub removed_dirs: Vec<String>,
+}
+
+impl CacheHost {
+    pub fn failed(name: &str, why: impl Into<String>) -> CacheHost {
+        CacheHost {
+            name: name.to_string(),
+            status: CacheStatus::Failed(why.into()),
+            dirs: Vec::new(),
+            warnings: Vec::new(),
+            removed_dirs: Vec::new(),
+        }
+    }
+
+    /// Read what `cache_usage_script` / `cache_purge_script` printed. A line
+    /// that is not one of theirs is kept as a warning, not dropped.
+    pub fn parse(name: &str, out: &str) -> CacheHost {
+        let mut h = CacheHost::failed(name, "");
+        h.status = CacheStatus::Ok;
+        for line in out.lines() {
+            let f: Vec<&str> = line.split('\t').collect();
+            match (f[0], f.len()) {
+                ("D", 2) => h.dirs.push(CacheDir {
+                    path: f[1].to_string(),
+                    ..Default::default()
+                }),
+                ("I", 5) if !h.dirs.is_empty() => {
+                    let item = CacheItem {
+                        sum: f[1].to_string(),
+                        bytes: f[2].parse().unwrap_or(0),
+                        last: f[3].parse().ok(),
+                        owners: f[4]
+                            .split(',')
+                            .filter(|o| !o.is_empty())
+                            .map(String::from)
+                            .collect(),
+                    };
+                    h.dirs.last_mut().unwrap().items.push(item);
+                }
+                ("X", 3) if !h.dirs.is_empty() => h
+                    .dirs
+                    .last_mut()
+                    .unwrap()
+                    .removed
+                    .push((f[1].to_string(), f[2].parse().unwrap_or(0))),
+                ("U", 2) if !h.dirs.is_empty() => h.dirs.last_mut().unwrap().disowned += 1,
+                ("R", 2) => h.removed_dirs.push(f[1].to_string()),
+                ("W", 2) => h.warnings.push(f[1].to_string()),
+                ("E", 2) => {
+                    h.status = CacheStatus::Failed(f[1].to_string());
+                    return h;
+                }
+                ("L", 1) => {
+                    h.status = CacheStatus::Failed("in use by a running run".to_string());
+                    return h;
+                }
+                _ if line.trim().is_empty() => {}
+                _ => h.warnings.push(line.to_string()),
+            }
+        }
+        h
+    }
+
+    pub fn is_ok(&self) -> bool {
+        self.status == CacheStatus::Ok
+    }
+    pub fn items(&self) -> usize {
+        self.dirs.iter().map(|d| d.items.len()).sum()
+    }
+    pub fn bytes(&self) -> u64 {
+        self.dirs.iter().map(CacheDir::bytes).sum()
+    }
+    pub fn removed_items(&self) -> usize {
+        self.dirs.iter().map(|d| d.removed.len()).sum()
+    }
+    pub fn removed_bytes(&self) -> u64 {
+        self.dirs.iter().map(CacheDir::removed_bytes).sum()
+    }
+}
+
+/// The hosts of a `cache usage` or `cache purge`, in the order given.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CacheReport {
+    pub hosts: Vec<CacheHost>,
+}
+
+impl CacheReport {
+    /// 0 when every host was read or purged, 1 when any failed.
+    pub fn exit_code(&self) -> i32 {
+        i32::from(self.hosts.iter().any(|h| !h.is_ok()))
+    }
+
+    fn ok_hosts(&self) -> impl Iterator<Item = &CacheHost> {
+        self.hosts.iter().filter(|h| h.is_ok())
+    }
+
+    fn failures(&self, o: &mut String) {
+        let bad: Vec<&CacheHost> = self.hosts.iter().filter(|h| !h.is_ok()).collect();
+        if bad.is_empty() {
+            return;
+        }
+        let _ = writeln!(o, "\nfailed hosts:");
+        for h in bad {
+            if let CacheStatus::Failed(w) = &h.status {
+                let _ = writeln!(o, "  {}: {w}", h.name);
+            }
+        }
+    }
+
+    fn head(h: &CacheHost, o: &mut String) -> bool {
+        if let CacheStatus::Failed(w) = &h.status {
+            let _ = writeln!(o, "host {}: failed: {w}", h.name);
+            return false;
+        }
+        let _ = writeln!(o, "host {}", h.name);
+        true
+    }
+
+    /// The `cache usage` table.
+    pub fn render_usage(&self) -> String {
+        let mut o = String::new();
+        for h in &self.hosts {
+            if !Self::head(h, &mut o) {
+                continue;
+            }
+            for d in &h.dirs {
+                let mut line = format!(
+                    "  {}: {}, {}",
+                    d.path,
+                    items_of(d.items.len()),
+                    human_bytes(d.bytes())
+                );
+                if let Some((a, b)) = d.span() {
+                    let _ = write!(line, ", last used {} .. {}", utc_minute(a), utc_minute(b));
+                }
+                let _ = writeln!(o, "{line}");
+                for (name, n, b) in d.owners() {
+                    let _ = writeln!(o, "    owner {name}: {}, {}", items_of(n), human_bytes(b));
+                }
+                let (n, b) = d.unowned();
+                if n > 0 {
+                    let _ = writeln!(o, "    unowned: {}, {}", items_of(n), human_bytes(b));
+                }
+            }
+            for w in &h.warnings {
+                let _ = writeln!(o, "  warning: {w}");
+            }
+            let _ = writeln!(
+                o,
+                "  host total: {}, {}",
+                items_of(h.items()),
+                human_bytes(h.bytes())
+            );
+        }
+        let (items, bytes) = self
+            .ok_hosts()
+            .fold((0, 0), |a, h| (a.0 + h.items(), a.1 + h.bytes()));
+        let _ = writeln!(
+            o,
+            "\nrun total: {}, {}, {}",
+            if self.ok_hosts().count() == 1 {
+                "1 host".to_string()
+            } else {
+                format!("{} hosts", self.ok_hosts().count())
+            },
+            items_of(items),
+            human_bytes(bytes)
+        );
+        self.failures(&mut o);
+        o
+    }
+
+    /// `cache usage --json`: one document, sizes in bytes, times in epoch
+    /// seconds (`null` when the record has none).
+    pub fn usage_json(&self) -> serde_json::Value {
+        use serde_json::json;
+        let hosts: Vec<_> = self
+            .hosts
+            .iter()
+            .map(|h| match &h.status {
+                CacheStatus::Failed(w) => json!({"host": h.name, "status": "failed", "reason": w}),
+                CacheStatus::Ok => {
+                    let dirs: Vec<_> = h
+                        .dirs
+                        .iter()
+                        .map(|d| {
+                            let (un, ub) = d.unowned();
+                            json!({
+                                "dir": d.path,
+                                "items": d.items.len(),
+                                "bytes": d.bytes(),
+                                "oldest": d.span().map(|s| s.0),
+                                "newest": d.span().map(|s| s.1),
+                                "owners": d.owners().into_iter()
+                                    .map(|(o, n, b)| json!({"owner": o, "items": n, "bytes": b}))
+                                    .collect::<Vec<_>>(),
+                                "unowned": {"items": un, "bytes": ub},
+                            })
+                        })
+                        .collect();
+                    json!({
+                        "host": h.name, "status": "ok", "items": h.items(),
+                        "bytes": h.bytes(), "dirs": dirs, "warnings": h.warnings,
+                    })
+                }
+            })
+            .collect();
+        let (items, bytes) = self
+            .ok_hosts()
+            .fold((0, 0), |a, h| (a.0 + h.items(), a.1 + h.bytes()));
+        json!({
+            "hosts": hosts,
+            "total": {
+                "hosts": self.ok_hosts().count(),
+                "failed": self.hosts.iter().filter(|h| !h.is_ok()).count(),
+                "items": items,
+                "bytes": bytes,
+            },
+        })
+    }
+
+    /// `cache purge` without `--yes`: what `--yes` would remove, from a
+    /// usage read. With an owner, only the items that name it count: those
+    /// it alone owns are deleted, the rest lose it.
+    pub fn render_would_purge(&self, owner: Option<&str>) -> String {
+        let mut o = String::from("cache purge: nothing changed; add --yes to remove\n\n");
+        let (mut items, mut bytes) = (0, 0);
+        for h in &self.hosts {
+            if !Self::head(h, &mut o) {
+                continue;
+            }
+            let (mut hi, mut hb) = (0, 0);
+            for d in &h.dirs {
+                match owner {
+                    None => {
+                        let _ = writeln!(
+                            o,
+                            "  {}: would remove {}, {}",
+                            d.path,
+                            items_of(d.items.len()),
+                            human_bytes(d.bytes())
+                        );
+                        hi += d.items.len();
+                        hb += d.bytes();
+                    }
+                    Some(p) => {
+                        let named: Vec<&CacheItem> = d
+                            .items
+                            .iter()
+                            .filter(|i| i.owners.iter().any(|x| x == p))
+                            .collect();
+                        let gone: Vec<&&CacheItem> =
+                            named.iter().filter(|i| i.owners.len() == 1).collect();
+                        let gb: u64 = gone.iter().map(|i| i.bytes).sum();
+                        let _ = writeln!(
+                            o,
+                            "  {}: would remove owner {p} from {}, delete {}, {}",
+                            d.path,
+                            items_of(named.len()),
+                            items_of(gone.len()),
+                            human_bytes(gb)
+                        );
+                        hi += gone.len();
+                        hb += gb;
+                    }
+                }
+            }
+            for w in &h.warnings {
+                let _ = writeln!(o, "  warning: {w}");
+            }
+            let _ = writeln!(
+                o,
+                "  host total: would remove {}, {}",
+                items_of(hi),
+                human_bytes(hb)
+            );
+            items += hi;
+            bytes += hb;
+        }
+        let _ = writeln!(
+            o,
+            "\nwould remove {}, {} on {} ok host(s)",
+            items_of(items),
+            human_bytes(bytes),
+            self.ok_hosts().count()
+        );
+        self.failures(&mut o);
+        o
+    }
+
+    /// What `cache purge --yes` did.
+    pub fn render_purge(&self, owner: Option<&str>) -> String {
+        let mut o = String::new();
+        for h in &self.hosts {
+            if !Self::head(h, &mut o) {
+                continue;
+            }
+            for d in &h.dirs {
+                match owner {
+                    None => {
+                        let _ = writeln!(
+                            o,
+                            "  {}: removed {}, {}",
+                            d.path,
+                            items_of(d.removed.len()),
+                            human_bytes(d.removed_bytes())
+                        );
+                    }
+                    Some(p) => {
+                        let _ = writeln!(
+                            o,
+                            "  {}: removed owner {p} from {}, deleted {}, {}",
+                            d.path,
+                            items_of(d.disowned + d.removed.len()),
+                            items_of(d.removed.len()),
+                            human_bytes(d.removed_bytes())
+                        );
+                    }
+                }
+            }
+            for r in &h.removed_dirs {
+                let _ = writeln!(o, "  removed directory {r}");
+            }
+            for w in &h.warnings {
+                let _ = writeln!(o, "  warning: {w}");
+            }
+            let _ = writeln!(
+                o,
+                "  host total: removed {}, {}",
+                items_of(h.removed_items()),
+                human_bytes(h.removed_bytes())
+            );
+        }
+        let (items, bytes) = self.ok_hosts().fold((0, 0), |a, h| {
+            (a.0 + h.removed_items(), a.1 + h.removed_bytes())
+        });
+        let _ = writeln!(
+            o,
+            "\nremoved {}, {} on {} host(s)",
+            items_of(items),
+            human_bytes(bytes),
+            self.ok_hosts().count()
+        );
+        self.failures(&mut o);
+        o
+    }
+}
