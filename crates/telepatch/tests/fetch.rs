@@ -1382,6 +1382,64 @@ fn the_plan_shows_where_a_window_would_split_and_why() {
     assert!(!telepatch::testing::plan(&pb, &fh(early)).contains("split"));
 }
 
+type Run = fn(Host<C>) -> PlaybookFuture;
+
+/// `pkg <name>` (a downloader asked for by its file provide), then a `.from`.
+macro_rules! pb_curl_by {
+    ($f:ident, $name:literal) => {
+        fn $f(h: Host<C>) -> PlaybookFuture {
+            Box::pin(async move {
+                let v = h.vars.clone();
+                let f = h.fetch(&v.url).sha256(&v.sum);
+                h.pkg([$name]);
+                h.file(&v.target).from(&f);
+                Ok(())
+            })
+        }
+    };
+}
+pb_curl_by!(pb_usr_bin_curl, "/usr/bin/curl");
+pb_curl_by!(pb_bin_curl, "/bin/curl");
+pb_curl_by!(pb_usr_bin_wget, "/usr/bin/wget");
+pb_curl_by!(pb_curl_config, "/usr/bin/curl-config");
+pb_curl_by!(pb_rel_curl, "curl/x");
+pb_curl_by!(pb_xcurl, "/usr/bin/xcurl");
+
+/// T133: on EL9 the edge list asks for `/usr/bin/curl`, which the image's
+/// `curl-minimal` provides. A pkg op naming a downloader by its absolute
+/// path installs that downloader as much as one naming it does, so the
+/// window still splits after it. A path whose file name is not `curl` or
+/// `wget` does not.
+#[test]
+fn a_pkg_op_naming_the_downloader_by_its_path_still_splits_the_window() {
+    let e = Env::new();
+    let el9 = Os::parse("ID=rocky\nID_LIKE=\"rhel centos fedora\"\nVERSION_ID=9.8\n").unwrap();
+    let fh = |v: C| telepatch::testing::FixtureHost::new("h1", el9.clone(), Rc::new(v));
+    let yes: [(&str, Run, &str); 3] = [
+        ("/usr/bin/curl", pb_usr_bin_curl, "curl"),
+        ("/bin/curl", pb_bin_curl, "curl"),
+        ("/usr/bin/wget", pb_usr_bin_wget, "wget"),
+    ];
+    for (name, run, tool) in yes {
+        let pb = Playbook::new("by_path", run);
+        let plan = telepatch::testing::plan(&pb, &fh(e.c(false)));
+        let line = format!(
+            "  -- split after #0 (pkg {tool}) when the host has neither curl nor wget: #1 needs a download --"
+        );
+        assert!(plan.contains(&format!("\n{line}\n")), "{name}:\n{plan}");
+    }
+    let no: [(&str, Run); 3] = [
+        ("/usr/bin/curl-config", pb_curl_config),
+        ("curl/x", pb_rel_curl),
+        ("/usr/bin/xcurl", pb_xcurl),
+    ];
+    for (name, run) in no {
+        let pb = Playbook::new("by_path", run);
+        let plan = telepatch::testing::plan(&pb, &fh(e.c(false)));
+        assert!(!plan.contains("split"), "{name}:\n{plan}");
+    }
+}
+
 /// `pkg curl`, a `.from`, then an `sh!` (it writes `*`: the apt cache is
 /// stale after it).
 fn pb_stale(h: Host<C>) -> PlaybookFuture {

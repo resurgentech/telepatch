@@ -161,7 +161,9 @@ pub fn needs_download(op: &OpNode) -> bool {
 }
 
 /// The downloader `op` installs: a distro `pkg` op (not build-dep) naming
-/// `curl` or `wget`.
+/// `curl` or `wget`, by name or by an absolute file provide whose file name
+/// is the tool (`/usr/bin/curl`: dnf installs whatever provides it, EL9's
+/// `curl-minimal` included).
 fn installs_downloader(op: &OpNode) -> Option<&'static str> {
     let OpSpec::Pkg(p) = &op.spec else {
         return None;
@@ -171,9 +173,12 @@ fn installs_downloader(op: &OpNode) -> Option<&'static str> {
     {
         return None;
     }
-    ["curl", "wget"]
-        .into_iter()
-        .find(|t| p.names.iter().any(|n| n == t))
+    let names = |t: &str| {
+        p.names.iter().any(|n| {
+            n == t || (n.starts_with('/') && n.rsplit_once('/').is_some_and(|(_, f)| f == t))
+        })
+    };
+    ["curl", "wget"].into_iter().find(|t| names(t))
 }
 
 /// The split candidate of a scheduled window: the first op that installs
