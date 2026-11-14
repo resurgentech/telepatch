@@ -1891,3 +1891,15 @@ are appended, never edited in; a hook refuses rewrites.
   `test-vm.sh` case (written; runs in T104), self-test green.
 - Gate E and check-sandbox green; no snapshot moved.
 - Commits: telepatch 8f55549; tp_basic 81799b1
+
+## 2026-11-13 — T134 The timing bound in two `executor_ssh` timeout tests
+
+- No engine fault: phase trace under T125's load (8 copies, 16 burners)
+  worst 1.84 s end to end; only TERM→gone grows (host-side kill script,
+  median 372 ms loaded); controller re-polls at once. Table in the report.
+- The load failures were cross-kills: `Reaper("sleep 4.31")` killed other
+  tests' live sleeps. Now `sleep 300.<pid><n>` with anchored patterns, a
+  60 s hang guard in place of `< 3800 ms`, and the op's sleep checked gone.
+- Red (old, loaded) 20/40 failed; green 0/40; loop 2000 runs, 0 failures;
+  E 5/5 green; check-sandbox unchanged.
+- Commits: telepatch aba83ca
