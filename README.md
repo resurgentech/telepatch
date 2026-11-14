@@ -194,7 +194,7 @@ The full design, including the parts not built yet, is in
 | `pkg` from the distro (apt, dnf, yum, pacman, apt build-dep) | Built; merged across roles; apt cache refreshed once when stale |
 | `pkg` from pip, cargo, rustup, mise and vendor installer scripts | Built, one `pkg` with the source chained; present, pinned or latest; latest resolved on the host by the source's own command |
 | One `pkg` with the source chained (`.pip()`, `.cargo()`, `.rustup()`, `.mise()`, `.yum()`, `.installer_script(..)`) | Built |
-| `pkg` chained `.cargo().locked()` and `.binary_release(..)`; pin and latest on the distro manager; absent and a package from a fetched file | Built: `.cargo().locked()`, `.binary_release(..)`, pin and latest on the distro manager. Designed: absent, and a package from a fetched file |
+| `pkg` chained `.cargo().locked()` and `.binary_release(..)`; pin and latest on the distro manager; absent and a package from a fetched file | Built: `.cargo().locked()`, `.binary_release(..)`, pin and latest on the distro manager, `.absent()` (and `.purge()` on apt), and a pinned package from a fetched file (apt or dnf) |
 | `file` (content, line, line_re, dir, absent, mode, owner, validate) | Built |
 | `repo` (apt deb822, dnf), `user`, `group` | Built |
 | `sh!` with `unless`, `creates`, `changed_if`; `raw`; `barrier` | Built, including the warning for `sh!` in a role body |
@@ -206,11 +206,12 @@ The full design, including the parts not built yet, is in
 | `svc` (`.enabled()`, `.started()`) | Built; without a running systemd the enable is applied offline and the start is skipped; no `systemctl` skips the op |
 | `svc` `.disabled()`, `.masked()`, `.stopped()`, guarded `.restart()` and `.reload()`; `h.unit` | Built |
 | Policy errors (`.allow(Policy, reason)`), trace errors with a location | Built |
-| `fetch`, `git`, `local_file`/`local_dir`/`local`, author-defined resources, `wait_for` | `fetch` built (checksum cache, `Unverified`; `.via_controller()` designed). The rest designed |
-| `Secret` vars and the `telepatch-openbao` crate, askama templates, vars per role | Vars per role built (inventory host and group vars designed). Secrets and templates designed |
-| Typed facts (`user_info`, `stat`, `pkg_installed`, `check`) and `h.assert` | Designed, not built |
-| `--check`/`--diff`, inventory and `--limit`, `--serial`/`--max-fail`/`--only`, `.retry`/`.timeout`, reboot marks and the barrier | Designed, not built |
-| Role rollback (the undo log), reconnect, PTY | Designed, not built |
+| `fetch`, `git`, `local_file`/`local_dir`/`local`, author-defined resources, `wait_for` | Built: `fetch` (checksum cache, `Unverified`, `.via_controller()`, `cache usage` and `cache purge`), `git`, the controller-side files and commands, `h.resource` with `cmd!`, `wait_for` |
+| `Secret` vars and the `telepatch-openbao` crate, askama templates, vars per role | Built: vars per role, inventory host and group vars, `Secret` with `env`, `file`, `prompt` and `bao` references, the `telepatch-openbao` crate (proved against a live dev server), askama templates |
+| Typed facts (`user_info`, `stat`, `pkg_installed`, `check`) and `h.assert` | Built |
+| `--check`/`--diff` (exit 0, 2 or 1, and a coverage line), inventory and `--limit`, `--serial`/`--max-fail`/`--only`, `.retry`/`.timeout`, reboot marks and the barrier | Built |
+| Inverse capture for `file`, `unit`, `repo`, `user` and `git`, and `sh` `.undo(..)`; reconnect after a reboot barrier | Built |
+| Role rollback (running the undo log), reconnect after a lost connection, PTY | Designed, not built |
 
 ## Porting from Ansible
 
