@@ -2002,3 +2002,17 @@ are appended, never edited in; a hook refuses rewrites.
   batch VM (`docker create` exit 1, stderr not captured), passed fresh.
   The step stays queued. veritech04 vt-* set unchanged; no tp-* left.
 - Commits: telepatch 293866f; tp_basic 2dd7ccd
+
+## 2026-11-14 — T138 A shell close that cannot wait forever; the openbao test shows its stderr
+
+- `Shell::close` types `exit`, drops stdin, waits at most 10 s for the local
+  child, then `start_kill()` with a 5 s grace; returns whether the bound was
+  hit. `set_close_bound` (tests only), `argv0()`.
+- `close_shell` in executor.rs: one warning line and one `shell_close_killed`
+  event for root, login <u>, killer, the probe shell, the reboot discard and
+  the cache shell; host status unchanged. Other closes are bounded silently.
+- openbao live test: status, stderr and stdout in every failing assert.
+- Tests: tests/shell_close.rs (3), executor unit test. Red: HEAD's close
+  hung on the EOF-lost stub until the test's 8 s bound. Gate E and
+  check-sandbox green.
+- Commits: telepatch 3827fbd
