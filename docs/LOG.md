@@ -1943,3 +1943,23 @@ are appended, never edited in; a hook refuses rewrites.
   8 at a time): old 183/200 failed, new 0/200.
 - Gate E and check-sandbox green.
 - Commits: telepatch 368a177
+
+## 2026-11-13 — T135 The cache without locks or records: mtime is the last access, owner directories say who uses an item
+
+- Resumed from the parked branch `t135-wip` (7c416c6), folded into one
+  commit with the amendment; branch deleted, tp_basic stash dropped.
+- No locks and no record: prepare's hit or download touches the item's
+  mtime and creates `owners/<owner_dir(playbook)>/<sum>`; the registry
+  is appended without `flock` and never rewritten by a run. `RUN_LOCK`,
+  `USAGE`, `TP_OWN` and the record tests are deleted.
+- End-of-run probe: legacy record and lock files removed on sight,
+  90-day expiry by mtime with the markers, ownership cleanup by marker
+  on entitled runs.
+- Owner directories are the playbook name percent-encoded on the
+  controller (`owner_dir`/`owner_name`); `/` stays legal, so tp_basic's
+  `container/*` names are unchanged. Encoded name at most 200 bytes.
+- An op whose cached download vanished (`.from`, `.unpack`, pkg file,
+  binary_release) fails with the gone-file message.
+- src: 8 files +247 −289. Snapshots: telepatch 1 (2 lines), tp_basic
+  39 (65 lines), each the gone-file check. Gate E and check-sandbox green.
+- Commits: telepatch faa3985; tp_basic 9ef74a5
