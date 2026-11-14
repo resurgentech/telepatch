@@ -534,16 +534,22 @@ fn local_target_blocks_a_user_window_with_the_transport_limit() {
         ("read", read_),
     ] {
         let d = tempfile::tempdir().unwrap();
+        let sudo = d.path().join("sudo");
+        write_exe(&sudo, "echo 'sudo: a password is required' >&2; exit 1");
         let pb = Playbook::new(name, run_);
         let r = run(
             &pb,
             vec![HostSpec {
                 groups: Vec::new(),
                 name: "local".into(),
+                // The caller is another user, root, and sudo refuses (T120:
+                // as_user is supported over --local, so the limit is sudo's).
                 target: Target::Local(
                     telepatch::transport::local::LocalTransport::new()
                         .uid(0)
-                        .sandboxed_at(d.path()),
+                        .user("somebody-else")
+                        .sandboxed_at(d.path())
+                        .sudo(&sudo.display().to_string()),
                 ),
                 vars: Vars {
                     dir: d.path().to_path_buf(),
@@ -560,9 +566,9 @@ fn local_target_blocks_a_user_window_with_the_transport_limit() {
         };
         assert!(
             why.contains(&format!(
-                "principal user {}: not supported by this transport yet",
+                "sudo -n -iu {} bash refused on this machine",
                 me()
-            )),
+            )) && why.contains("sudo: a password is required"),
             "{name}: {why}"
         );
         assert!(!why.contains("switching users"), "{name}: {why}");

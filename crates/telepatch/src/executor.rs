@@ -1046,6 +1046,10 @@ fn refusal(target: &Target, host: &str, who: &Principal, limit: Option<Limit>) -
         (Principal::User(u), Target::Ssh(_), Some(Limit::SudoRefused)) => {
             with(format!("sudo -n -iu {u} refused"))
         }
+        // The local transport's text is complete (T120).
+        (Principal::User(u), Target::Local(t), Some(Limit::SudoRefused)) => t
+            .message()
+            .unwrap_or_else(|| format!("sudo -n -iu {u} bash refused on this machine")),
         (Principal::User(_), _, Some(Limit::Other(m))) => m,
         (Principal::User(u), _, l) => with(format!("could not open a shell for user {u}: {l:?}")),
         (Principal::Root, Target::Ssh(_), Some(Limit::ConnectRefused)) => {
@@ -1072,62 +1076,78 @@ fn refusal(target: &Target, host: &str, who: &Principal, limit: Option<Limit>) -
     }
 }
 
-/// The path the login shell of `as_user("root")` starts with, under
-/// `env -i`: a profile may add to it, as at a terminal.
+/// The path a login shell started under `env -i` begins with: a profile
+/// may add to it, as at a terminal.
 const LOGIN_PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
 
 /// The login name `as_user("root")` is.
 const ROOT: &str = "root";
 
-/// Open root's login shell: one more root shell of the transport, then
-/// `exec env -i HOME=.. USER=.. LOGNAME=.. SHELL=.. PATH=.. <carried> bash -l`
-/// typed into it, the values read from `getent passwd` in that same shell.
-/// `<carried>` is [`crate::sandbox::carry_words`]: the test switch and the
-/// path seams that shell has set, none in production (T128). The
-/// arguments are short and no script is on a command line. `Err` says why
-/// (a missing passwd entry is a refusal, said so).
+/// Turn `sh`, a fresh shell of the caller that has run nothing yet, into
+/// `name`'s login shell with no `sudo`: read `getent passwd name` in it,
+/// then `exec env -i HOME=.. USER=.. LOGNAME=.. SHELL=.. PATH=.. <carried>
+/// bash -l` typed into it. `<carried>` is [`crate::sandbox::carry_words`]:
+/// the test switch and the path seams that shell has set, none in
+/// production (T128). The arguments are short and no script is on a command
+/// line. `Ok` is the shell and the home directory; `Err` says why, and `sh` is closed (a
+/// missing passwd entry is a refusal, said so). Root's login shell
+/// ([`open_root_login`]) and the local transport's shell for the calling
+/// user (T120) are both this.
+pub(crate) async fn start_login(mut sh: Shell, name: &str) -> Result<(Shell, String), String> {
+    // One id, on a shell that has run nothing yet.
+    let got = prepare::probe(
+        &mut sh,
+        1,
+        &format!("getent passwd {}", crate::sh::quote(name)),
+    )
+    .await;
+    let fields = match got {
+        Ok((0, out)) => out
+            .lines()
+            .map(|l| l.split(':').collect::<Vec<_>>())
+            .find(|f| f.len() >= 7 && f[0] == name)
+            .map(|f| (f[5].to_string(), f[6].to_string())),
+        Ok(_) => None,
+        Err(e) => {
+            sh.close().await;
+            return Err(format!("could not open the login shell for {name}: {e}"));
+        }
+    };
+    let Some((home, login_shell)) = fields.filter(|(h, _)| !h.is_empty()) else {
+        sh.close().await;
+        return Err(format!(
+            "no passwd entry for {name}: cannot open its login shell (as_user(\"{name}\"))"
+        ));
+    };
+    let q = crate::sh::quote;
+    let command = format!(
+        "env -i HOME={} USER={} LOGNAME={} SHELL={} PATH={LOGIN_PATH} {} bash -l",
+        q(&home),
+        q(name),
+        q(name),
+        q(&login_shell),
+        crate::sandbox::carry_words(),
+    );
+    if let Err(e) = sh.exec(&command, name).await {
+        sh.close().await;
+        return Err(format!("could not start the login shell for {name}: {e}"));
+    }
+    Ok((sh, home))
+}
+
+/// Open root's login shell: one more root shell of the transport, turned
+/// into root's login shell by [`start_login`]. `Err` says why.
 async fn open_root_login(target: &Target, host: &str) -> Result<(Shell, String), String> {
     let who = Principal::Root;
     let mut s = target.open(host, &who, 1).await;
     if s.got.is_empty() {
         return Err(refusal(target, host, &who, s.limit));
     }
-    let mut sh = s.got.remove(0);
+    let sh = s.got.remove(0);
     for extra in s.got {
         extra.close().await;
     }
-    // One id, on a shell that has run nothing yet.
-    let got = prepare::probe(&mut sh, 1, &format!("getent passwd {ROOT}")).await;
-    let fields = match got {
-        Ok((0, out)) => out
-            .lines()
-            .map(|l| l.split(':').collect::<Vec<_>>())
-            .find(|f| f.len() >= 7 && f[0] == ROOT)
-            .map(|f| (f[5].to_string(), f[6].to_string())),
-        Ok(_) => None,
-        Err(e) => {
-            sh.close().await;
-            return Err(format!("could not open the login shell for {ROOT}: {e}"));
-        }
-    };
-    let Some((home, login_shell)) = fields.filter(|(h, _)| !h.is_empty()) else {
-        sh.close().await;
-        return Err(format!(
-            "no passwd entry for {ROOT}: cannot open its login shell (as_user(\"{ROOT}\"))"
-        ));
-    };
-    let q = crate::sh::quote;
-    let command = format!(
-        "env -i HOME={} USER={ROOT} LOGNAME={ROOT} SHELL={} PATH={LOGIN_PATH} {} bash -l",
-        q(&home),
-        q(&login_shell),
-        crate::sandbox::carry_words(),
-    );
-    if let Err(e) = sh.exec(&command, ROOT).await {
-        sh.close().await;
-        return Err(format!("could not start the login shell for {ROOT}: {e}"));
-    }
-    Ok((sh, home))
+    start_login(sh, ROOT).await
 }
 
 impl prepare::ShellSet for HostShells {

@@ -319,16 +319,54 @@ async fn root_uid_does_not_call_sudo() {
     assert_eq!(s.got.len(), 1);
 }
 
+/// Real sudo is called as `sudo -n -iu <u> bash` for a user other than the
+/// caller (T120), as over ssh: the stub refuses anything else, sets HOME the
+/// way `-i` does and execs the `bash` it is given. The caller is the `.user`
+/// seam's `alice`, so no real account is named.
 #[tokio::test]
-async fn non_root_user_principal_is_not_supported_yet() {
-    let sb = telepatch::testing::sandbox();
-    let t = LocalTransport::new().uid(0).sandboxed(&sb);
+async fn another_user_principal_is_sudo_n_iu_u_bash() {
+    let d = tempfile::tempdir().unwrap();
+    let sudo = script(
+        d.path(),
+        "sudo",
+        "[ \"$1 $2 $3 $4\" = '-n -iu deploy bash' ] || exit 2\nshift 3\nHOME=/home/deploy; export HOME\nexec \"$@\"",
+    );
+    let t = LocalTransport::new()
+        .uid(1000)
+        .user("alice")
+        .sandboxed_at(d.path())
+        .sudo(&sudo);
+    let mut s = t.open("local", &Principal::User("deploy".into()), 1).await;
+    assert!(s.limit.is_none(), "{:?}", s.limit);
+    assert_eq!(s.got[0].user(), "deploy");
+    let sh = &mut s.got[0];
+    let h = host();
+    h.raw("echo \"$HOME\"");
+    let ids = send_all(sh, &h).await;
+    assert_eq!(sh.wait(ids[0]).await.unwrap().output, b"/home/deploy\n");
+}
+
+/// A refusal of that call is the same limit the root path has, with its
+/// words kept for the report.
+#[tokio::test]
+async fn a_refused_user_principal_is_sudo_refused_with_its_words() {
+    let d = tempfile::tempdir().unwrap();
+    let sudo = script(
+        d.path(),
+        "sudo",
+        "echo 'sudo: a password is required' >&2; exit 1",
+    );
+    let t = LocalTransport::new()
+        .uid(1000)
+        .user("alice")
+        .sandboxed_at(d.path())
+        .sudo(&sudo);
     let s = t.open("local", &Principal::User("deploy".into()), 1).await;
     assert!(s.got.is_empty());
-    match s.limit {
-        Some(Limit::Other(m)) => assert!(m.contains("not supported by this transport yet"), "{m}"),
-        l => panic!("{l:?}"),
-    }
+    assert_eq!(s.limit, Some(Limit::SudoRefused));
+    let m = t.message().unwrap();
+    assert!(m.starts_with("sudo -n -iu deploy bash refused"), "{m}");
+    assert!(m.ends_with("sudo: a password is required"), "{m}");
 }
 
 /// An `as_user(me)` op sent to a shell that is `me`'s is a plain op there:
