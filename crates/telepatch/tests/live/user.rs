@@ -96,9 +96,15 @@ fn twice(image: &str) {
     assert_eq!(r1.exit_code(), 0, "run 1:\n{}", r1.render());
     assert_eq!(r1.hosts[0].status, HostStatus::Changed);
     let text = r1.render();
-    assert!(text.contains("user tpdev: will create"), "{text}");
-    assert!(text.contains("user tpbot: groups +tpgroup"), "{text}");
-    assert!(text.contains("user tpbot: shell -> /bin/bash"), "{text}");
+    assert!(text.contains("user tpdev <secret>: will create"), "{text}");
+    assert!(
+        text.contains("user tpbot <secret>: groups +tpgroup"),
+        "{text}"
+    );
+    assert!(
+        text.contains("user tpbot <secret>: shell -> /bin/bash"),
+        "{text}"
+    );
     assert!(!text.contains(&hash), "hash leaked into the report");
     assert_eq!(
         field(&ctr, "passwd", "tpdev", 7).as_deref(),
