@@ -3081,6 +3081,19 @@ impl HostExec {
             None if rep.ops.iter().any(|o| o.changed) => HostStatus::Changed,
             None => HostStatus::Ok,
         });
+        // A stop at a barrier says how many ops it left, and says it all at
+        // once, after the ops it did not run.
+        let not_run = rep
+            .ops
+            .iter()
+            .filter(|o| o.outcome == Outcome::NotRun)
+            .count();
+        if let HostStatus::RebootPending(stop) = &mut rep.status {
+            stop.not_run = not_run;
+            for l in stop.lines(&self.name) {
+                self.sink.line(&l);
+            }
+        }
         if let Some(info) = check {
             let name = self.name.clone();
             self.say(info.summary(!rep.status.is_success()));
@@ -3660,7 +3673,7 @@ impl Executor for HostExec {
         let mut failed_seen = false;
         let mut send_err = None;
         // What the run's ops marked, written after the run is collected.
-        let mut marks: Vec<(usize, String)> = Vec::new();
+        let mut marks: Vec<(usize, crate::report::RebootItem)> = Vec::new();
 
         // Each run is pipelined into its shell and collected in full
         // before the next run is sent (Assumption A3); after a failure

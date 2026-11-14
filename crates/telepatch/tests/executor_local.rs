@@ -2625,11 +2625,10 @@ fn a_pending_barrier_under_local_stops_with_reboot_pending_at_barrier() {
     let pb = Playbook::new("rebootable", reboot_local_pb);
     let (r, out) = go(&pb, vec![reboot_local_host(d.path())]);
     let before = d.path().join("before").display().to_string();
-    assert_eq!(
-        r.hosts[0].status,
-        HostStatus::RebootPending(vec![format!("file {before}")]),
-        "{out}"
-    );
+    let HostStatus::RebootPending(stop) = &r.hosts[0].status else {
+        panic!("{:?}\n{out}", r.hosts[0].status)
+    };
+    assert_eq!(stop.items[0].subject, format!("file {before}"), "{out}");
     assert_eq!(r.exit_code(), 1);
     // Before the barrier applied, after it not run.
     assert_eq!(
@@ -2638,20 +2637,16 @@ fn a_pending_barrier_under_local_stops_with_reboot_pending_at_barrier() {
     );
     assert!(!d.path().join("after").exists());
     assert!(
-        out.contains("== local [rebootable] reboot: pending (file")
-            || out.contains("== local [kernel_update] reboot: pending (file"),
+        out.contains("reboot pending at barrier: stopped, not rebooted =="),
         "{out}"
     );
-    assert!(out.contains("reboot pending at barrier =="), "{out}");
     assert!(
         r.render().contains("reboot pending at barrier"),
         "{}",
         r.render()
     );
-    assert_eq!(
-        std::fs::read_to_string(d.path().join("run/reboot-pending")).unwrap(),
-        format!("file {before}\n")
-    );
+    let mark = std::fs::read_to_string(d.path().join("run/reboot-pending")).unwrap();
+    assert!(mark.starts_with(&format!("file {before}\t")), "{mark}");
     assert_eq!(
         r.hosts[0].skipped_roles,
         ["cuda_workloads".to_string()],
@@ -2662,4 +2657,277 @@ fn a_pending_barrier_under_local_stops_with_reboot_pending_at_barrier() {
     let (r2, out2) = go(&pb, vec![reboot_local_host(d.path())]);
     assert_eq!(r2.hosts[0].status, HostStatus::Changed, "{out2}");
     assert!(d.path().join("after").exists());
+}
+
+// ---- the reboot stop says why, where and who marked it (T118) ----
+
+/// The 1-based line of the first line containing `needle` after the line
+/// containing `after` in this file.
+fn line_in_self(after: &str, needle: &str) -> usize {
+    let src = include_str!("executor_local.rs");
+    let start = src
+        .lines()
+        .position(|l| l.contains(after) && l.contains("fn "))
+        .unwrap();
+    src.lines()
+        .enumerate()
+        .skip(start)
+        .find(|(_, l)| l.contains(needle))
+        .map(|(i, _)| i + 1)
+        .unwrap()
+}
+
+fn events(log: &std::path::Path) -> Vec<serde_json::Value> {
+    std::fs::read_to_string(log)
+        .unwrap()
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect()
+}
+
+fn run_logged(
+    pb: &Playbook<PathBuf>,
+    hosts: Vec<HostSpec<PathBuf>>,
+    log: &std::path::Path,
+) -> (Report, String) {
+    let out = Rc::new(RefCell::new(String::new()));
+    let r = run(
+        pb,
+        hosts,
+        RunOpts {
+            log: Some(log.to_path_buf()),
+            stdout: Stdout::Capture(out.clone()),
+        },
+    );
+    let text = out.borrow().clone();
+    (r, text)
+}
+
+#[test]
+fn a_local_stop_says_why_where_who_marked_and_how_to_finish() {
+    let d = tempfile::tempdir().unwrap();
+    let log = d.path().join("run.jsonl");
+    let pb = Playbook::new("rebootable", reboot_local_pb);
+    let (r, out) = run_logged(&pb, vec![reboot_local_host(d.path())], &log);
+    let before = d.path().join("before").display().to_string();
+    let barrier = line_in_self("fn reboot_local_pb", "h.reboot().if_pending()");
+    let op = line_in_self("fn reboot_local_pb", ".needs_reboot()");
+    assert_eq!(r.exit_code(), 1);
+    let block = "== local [rebootable] reboot pending at barrier: stopped, not rebooted ==\n   why:       the --local transport cannot reboot this machine\n".to_string();
+    assert!(out.contains(&block), "{out}");
+    for want in [
+        "   barrier:   h.reboot().if_pending() at ".to_string(),
+        format!("executor_local.rs:{barrier} (playbook rebootable)\n"),
+        format!("   marked by: file {before}   role kernel_update, "),
+        format!("executor_local.rs:{op}\n"),
+        "   not run:   1 op after the barrier\n".to_string(),
+        "   to finish: reboot this machine yourself, then run again\n".to_string(),
+    ] {
+        assert!(out.contains(&want), "missing {want:?} in\n{out}");
+    }
+    // The report gives the same block.
+    let text = r.render();
+    assert!(text.contains(&block), "{text}");
+    assert!(text.contains("   to finish: reboot this machine yourself"));
+    // The events.
+    let evs = events(&log);
+    for ev in ["reboot_pending", "reboot_stopped"] {
+        let e = evs.iter().find(|e| e["ev"] == ev).unwrap();
+        assert_eq!(e["cause"], "local", "{e}");
+        assert!(
+            e["barrier_site"]
+                .as_str()
+                .unwrap()
+                .ends_with(&format!("executor_local.rs:{barrier}")),
+            "{e}"
+        );
+        let item = &e["items"][0];
+        assert_eq!(item["subject"], format!("file {before}"), "{e}");
+        assert_eq!(item["role"], "kernel_update", "{e}");
+        assert!(
+            item["site"]
+                .as_str()
+                .unwrap()
+                .ends_with(&format!("executor_local.rs:{op}")),
+            "{e}"
+        );
+    }
+}
+
+#[test]
+fn an_old_format_mark_is_shown_as_an_earlier_runs_and_its_json_fields_are_null() {
+    let d = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(d.path().join("run")).unwrap();
+    // An old mark (no tabs), through the sandbox's run directory.
+    std::fs::write(
+        d.path().join("run/reboot-pending"),
+        "file /etc/default/grub\n",
+    )
+    .unwrap();
+    let log = d.path().join("run.jsonl");
+    let pb = Playbook::new("rebootable", reboot_local_pb);
+    let (r, out) = run_logged(&pb, vec![reboot_local_host(d.path())], &log);
+    let before = d.path().join("before").display().to_string();
+    assert_eq!(r.exit_code(), 1, "{out}");
+    assert!(
+        out.contains("   marked by: file /etc/default/grub  ")
+            && out.contains("  marked by an earlier run; role and site not recorded\n"),
+        "{out}"
+    );
+    // The new mark of this run is listed after it, with its role.
+    assert!(
+        out.contains(&format!("              file {before}  "))
+            && out.contains("  role kernel_update, "),
+        "{out}"
+    );
+    let e = events(&log)
+        .into_iter()
+        .find(|e| e["ev"] == "reboot_stopped")
+        .unwrap();
+    assert_eq!(e["items"][0]["subject"], "file /etc/default/grub");
+    assert!(e["items"][0]["role"].is_null() && e["items"][0]["site"].is_null());
+    assert!(e["items"][1]["role"].is_string());
+}
+
+#[derive(askama::Template, Clone)]
+#[template(source = "token={{ token }}\n", ext = "txt")]
+struct SecretConf {
+    token: telepatch::Secret,
+}
+
+fn secret_pb(h: Host<PathBuf>) -> PlaybookFuture {
+    Box::pin(async move {
+        {
+            let _r = h.role_enter("telegraf");
+            h.file(&p(&h, "secret.conf"))
+                .content(SecretConf {
+                    token: telepatch::Secret::literal("t118-not-in-the-stream"),
+                })
+                .needs_reboot();
+        }
+        h.reboot().if_pending();
+        Ok(())
+    })
+}
+
+#[test]
+fn a_secret_files_mark_says_secret_and_never_the_body() {
+    let d = tempfile::tempdir().unwrap();
+    let pb = Playbook::new("sec", secret_pb);
+    let (r, out) = go(&pb, vec![reboot_local_host(d.path())]);
+    let f = d.path().join("secret.conf").display().to_string();
+    assert_eq!(r.exit_code(), 1, "{out}");
+    assert!(
+        out.contains(&format!(
+            "   marked by: file {f} (secret)   role telegraf, "
+        )),
+        "{out}"
+    );
+    let mark = std::fs::read_to_string(d.path().join("run/reboot-pending")).unwrap();
+    assert!(mark.starts_with(&format!("file {f} (secret)\t")), "{mark}");
+    assert!(!out.contains("t118-not-in-the-stream") && !mark.contains("t118-not-in-the-stream"));
+}
+
+/// A `docker` that records its arguments and runs a local bash with the
+/// test's sandbox in its environment (no daemon, no container). The
+/// transport is given its absolute path, so a real `docker` cannot be
+/// reached instead.
+fn fake_docker(d: &std::path::Path) -> std::path::PathBuf {
+    let sb = telepatch::testing::Sandbox::at(d);
+    let exports: String = sb
+        .env()
+        .iter()
+        .map(|(k, v)| format!("export {k}='{v}'\n"))
+        .collect();
+    let stub = d.join("docker");
+    std::fs::write(
+        &stub,
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}/docker.calls'\n{exports}exec bash\n",
+            d.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&stub, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    stub
+}
+
+#[test]
+fn a_docker_stop_says_a_container_cannot_be_rebooted() {
+    let d = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(d.path().join("run")).unwrap();
+    let stub = fake_docker(d.path());
+    let log = d.path().join("run.jsonl");
+    let host = HostSpec {
+        groups: Vec::new(),
+        name: "ctr".into(),
+        target: Target::Docker(
+            telepatch::transport::docker::DockerTransport::new()
+                .docker(stub.to_str().unwrap())
+                .container("ctr", "c1"),
+        ),
+        vars: d.path().to_path_buf(),
+    };
+    let pb = Playbook::new("rebootable", reboot_local_pb);
+    let (r, out) = run_logged(&pb, vec![host], &log);
+    // The fake was the docker that ran.
+    let calls = std::fs::read_to_string(d.path().join("docker.calls")).unwrap_or_default();
+    assert!(
+        calls.contains("exec -i c1 bash"),
+        "fake docker unused: {out}"
+    );
+    assert_eq!(r.exit_code(), 1, "{out}");
+    for want in [
+        "== ctr [rebootable] reboot pending at barrier: stopped, not rebooted ==\n",
+        "   why:       the docker transport cannot reboot a container\n",
+        "   marked by: file ",
+        "   not run:   1 op after the barrier\n",
+        "   to finish: restart the container yourself, then run again\n",
+    ] {
+        assert!(out.contains(want), "missing {want:?} in\n{out}");
+    }
+    let e = events(&log)
+        .into_iter()
+        .find(|e| e["ev"] == "reboot_stopped")
+        .unwrap();
+    assert_eq!(e["cause"], "docker");
+}
+
+fn marked_end_pb(h: Host<PathBuf>) -> PlaybookFuture {
+    Box::pin(async move {
+        {
+            let _r = h.role_enter("kernel_update");
+            h.file(&p(&h, "k")).content("k\n").needs_reboot();
+        }
+        sh!(h, "true");
+        Ok(())
+    })
+}
+
+#[test]
+fn the_end_list_names_who_marked_and_how_to_finish() {
+    let d = tempfile::tempdir().unwrap();
+    let pb = Playbook::new("end", marked_end_pb);
+    let (r, out) = go(&pb, vec![reboot_local_host(d.path())]);
+    let k = d.path().join("k").display().to_string();
+    assert_eq!(r.exit_code(), 0, "{out}");
+    assert_eq!(r.hosts[0].status, HostStatus::Changed);
+    assert!(
+        out.contains("== local [reboot] reboot pending at the end of the run: ==\n"),
+        "{out}"
+    );
+    assert!(
+        out.contains(&format!("   marked by: file {k}   role kernel_update, ")),
+        "{out}"
+    );
+    assert!(
+        out.contains("   to finish: reboot this machine yourself, then run again\n"),
+        "{out}"
+    );
+    let text = r.render();
+    assert!(
+        text.contains("reboot pending at the end of the run: ==")
+            && text.contains("   to finish: reboot this machine yourself"),
+        "{text}"
+    );
 }

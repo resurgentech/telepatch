@@ -5,8 +5,11 @@
 //! # The mark
 //!
 //! A marked op that changed something leaves one line describing it in
-//! `${TP_RUN_DIR:-/run/telepatch}/reboot-pending` on the host (the line is
-//! the member's subject: `pkg linux-generic`, `file /etc/x`). The executor
+//! `${TP_RUN_DIR:-/run/telepatch}/reboot-pending` on the host:
+//! `<subject>\t<role>\t<file:line>` (the member's subject, `pkg
+//! linux-generic`, `file /etc/x`; the op's role, or the playbook's name
+//! outside any; its site). A line with no tab is an old mark: the subject
+//! alone. Reading and de-duplication go by subject. The executor
 //! writes it, not the op's shell: after each run of ops is collected (a
 //! pipelined run owns its shell until then) it sends one script to the
 //! plain root shell, which can write `/run` whichever shell the op ran in.
@@ -26,11 +29,14 @@
 //!
 //! - `--reboot never`, or a local or docker target, stop the host at the
 //!   barrier ([`HostStatus::RebootPending`]): later ops are reported not
-//!   run, the run ends with `reboot pending at barrier`;
+//!   run, the run ends with `reboot pending at barrier`, and the stream and
+//!   the report say why, where, who marked and how to finish
+//!   ([`RebootStop`]);
 //! - otherwise the boot id is read, `systemctl reboot` goes over the root
 //!   shell, every connection is dropped, and a fresh root shell is opened
 //!   every `poll` until its boot id differs or `deadline` passes (the host
-//!   then fails). The new root shell replaces the old; login shells are
+//!   then fails: [`HostStatus::Failed`], the barrier is the op, rc -1, as
+//!   for a failed `systemctl reboot`). The new root shell replaces the old; login shells are
 //!   dropped and reopen lazily on next use; the second ("killer") shell is
 //!   dropped and reopens on the next timeout; the staleness marks are
 //!   cleared. The watchdog needs nothing: it lives inside one run of ops,
@@ -42,7 +48,7 @@
 //! # The end
 //!
 //! After the last window the mark is read again: anything pending is listed
-//! in the report (`reboot pending (..)`; the host stays a success). With
+//! in the report (`reboot pending at the end of the run:`; the host stays a success). With
 //! `--reboot auto` on SSH the host reboots once more by the same routine.
 
 use super::*;
@@ -110,6 +116,7 @@ const RUN_DIR: &str = "${TP_RUN_DIR:-/run/telepatch}";
 /// The mark file's name inside it.
 const MARK_FILE: &str = "reboot-pending";
 
+use crate::report::{RebootCause, RebootItem, RebootStop, reboot_end_lines};
 use crate::sandbox::SBX;
 
 /// The script that appends `lines` to the mark (shell builtins and one
@@ -140,26 +147,73 @@ fn boot_id_script() -> String {
         .to_string()
 }
 
-/// The marks in `out`: non-empty lines, each once, in order.
-fn parse_marks(out: &str) -> Vec<String> {
-    let mut v: Vec<String> = Vec::new();
-    for l in out.lines().map(str::trim).filter(|l| !l.is_empty()) {
-        if !v.iter().any(|x| x == l) {
-            v.push(l.to_string());
+/// The mark line of `item`: tabs and newlines inside a field are spaces.
+fn mark_line(item: &RebootItem) -> String {
+    let f = |s: &str| s.replace(['\t', '\n', '\r'], " ");
+    format!(
+        "{}\t{}\t{}",
+        f(&item.subject),
+        f(item.role.as_deref().unwrap_or("")),
+        f(item.site.as_deref().unwrap_or(""))
+    )
+}
+
+/// The marks in `out`: non-empty lines, one item per subject, in the order
+/// the subjects first appear. A line with no tab is an old mark (the
+/// subject alone); a later line for the same subject that records role or
+/// site fills in what an old one lacks.
+fn parse_marks(out: &str) -> Vec<RebootItem> {
+    let mut v: Vec<RebootItem> = Vec::new();
+    for l in out.lines() {
+        let l = l.trim_end_matches('\r');
+        if l.trim().is_empty() {
+            continue;
+        }
+        let item = if l.contains('\t') {
+            let mut f = l.split('\t').map(str::trim);
+            let subject = f.next().unwrap_or("").to_string();
+            let some = |s: Option<&str>| s.filter(|s| !s.is_empty()).map(str::to_string);
+            RebootItem {
+                subject,
+                role: some(f.next()),
+                site: some(f.next()),
+            }
+        } else {
+            RebootItem::bare(l.trim())
+        };
+        if item.subject.is_empty() {
+            continue;
+        }
+        match v.iter_mut().find(|x| x.subject == item.subject) {
+            Some(x) => {
+                if x.role.is_none() && x.site.is_none() {
+                    *x = item;
+                }
+            }
+            None => v.push(item),
         }
     }
     v
 }
 
-/// The subjects of the members of `w` that mark the host: marked
-/// themselves, and reported changed (`known` is what `HostExec::remember`
-/// stored: for a merged `pkg` op a member changed only when one of its own
-/// names was installed).
-fn marked_subjects(w: &WindowOp, known: &HashMap<NodeId, Known>) -> Vec<String> {
+/// The members of `w` that mark the host: marked themselves, and reported
+/// changed (`known` is what `HostExec::remember` stored: for a merged `pkg`
+/// op a member changed only when one of its own names was installed). Each
+/// is the subject, its role (`playbook` outside any role) and the op's
+/// site (a merged op has its first member's).
+fn marked_items(w: &WindowOp, known: &HashMap<NodeId, Known>, playbook: &str) -> Vec<RebootItem> {
     w.members
         .iter()
         .filter(|m| m.needs_reboot && known.get(&m.id).is_some_and(|k| k.changed))
-        .map(|m| subject(w, m))
+        .map(|m| RebootItem {
+            subject: subject(w, m),
+            role: Some(if m.role.is_empty() {
+                playbook.to_string()
+            } else {
+                m.role.clone()
+            }),
+            site: w.node.site.map(|s| s.to_string()),
+        })
         .collect()
 }
 
@@ -185,7 +239,7 @@ impl HostExec {
     }
 
     /// What the host's mark lists now.
-    async fn pending_marks(&mut self) -> Result<Vec<String>, String> {
+    async fn pending_marks(&mut self) -> Result<Vec<RebootItem>, String> {
         let (rc, out) = self.root_probe(&pending_script()).await?;
         if rc != 0 {
             return Err(format!("rc {rc}: {}", out.trim()));
@@ -206,13 +260,20 @@ impl HostExec {
     /// The members of `w` that mark the host: marked, and changed by the
     /// outcome just recorded for them. Their subjects, with the index of
     /// `w`'s position in its window.
-    pub(super) fn marks_of(&self, w: &WindowOp, at: usize, into: &mut Vec<(usize, String)>) {
-        into.extend(marked_subjects(w, &self.known).into_iter().map(|s| (at, s)));
+    pub(super) fn marks_of(&self, w: &WindowOp, at: usize, into: &mut Vec<(usize, RebootItem)>) {
+        into.extend(
+            marked_items(w, &self.known, &self.reboot.playbook)
+                .into_iter()
+                .map(|s| (at, s)),
+        );
     }
 
     /// Append `marks` to the host's mark file. `Err` names why not.
-    pub(super) async fn write_marks(&mut self, marks: &[(usize, String)]) -> Result<(), String> {
-        let lines: Vec<String> = marks.iter().map(|(_, s)| s.clone()).collect();
+    pub(super) async fn write_marks(
+        &mut self,
+        marks: &[(usize, RebootItem)],
+    ) -> Result<(), String> {
+        let lines: Vec<String> = marks.iter().map(|(_, s)| mark_line(s)).collect();
         let (rc, out) = self
             .root_probe(&mark_script(&lines))
             .await
@@ -280,22 +341,72 @@ impl HostExec {
         if pending.is_empty() {
             return Ok(Crossed::Continue);
         }
-        self.rsay(&role, &format!("reboot: pending ({})", pending.join(", ")));
+        let barrier_site = at.site.map(|s| s.to_string());
+        let cause = self.cannot_reboot();
+        let items: Vec<serde_json::Value> = pending.iter().map(RebootItem::json).collect();
+        let cause_ev = cause.map(RebootCause::label);
+        if cause.is_none() {
+            let subjects: Vec<&str> = pending.iter().map(|i| i.subject.as_str()).collect();
+            self.rsay(&role, &format!("reboot: pending ({})", subjects.join(", ")));
+        }
         self.sink
             .event(json!({"ev":"reboot_pending","host":self.name,
-            "at":"barrier","role":role,"items":pending}));
-        if self.reboot.policy == RebootPolicy::Never || !self.over_ssh() {
-            self.rsay(&role, "reboot pending at barrier");
+            "at":"barrier","role":role,"barrier_site":barrier_site,"cause":cause_ev,
+            "items":items}));
+        if let Some(cause) = cause {
+            // The block of lines is written when the host finishes, once
+            // the ops after the barrier are reported not run.
             self.sink
                 .event(json!({"ev":"reboot_stopped","host":self.name,
-                "role":role,"items":pending}));
+                "role":role,"barrier_site":barrier_site,"cause":cause.label(),
+                "items":items}));
             self.halted = true;
             if self.verdict.is_none() {
-                self.verdict = Some(HostStatus::RebootPending(pending));
+                self.verdict = Some(HostStatus::RebootPending(RebootStop {
+                    cause,
+                    role,
+                    playbook: self.reboot.playbook.clone(),
+                    barrier_site,
+                    items: pending,
+                    not_run: 0,
+                }));
             }
             return Ok(Crossed::Continue);
         }
-        self.do_reboot(window, &role, pending).await
+        let op = match &barrier_site {
+            Some(s) => format!("h.reboot().if_pending() at {s}"),
+            None => "h.reboot().if_pending()".to_string(),
+        };
+        self.do_reboot(window, &role, &op, pending).await
+    }
+
+    /// Why this host cannot reboot itself at a barrier, if it cannot.
+    fn cannot_reboot(&self) -> Option<RebootCause> {
+        if self.reboot.policy == RebootPolicy::Never {
+            return Some(RebootCause::Never);
+        }
+        match *self.shells.target {
+            Target::Ssh(_) => None,
+            Target::Docker(_) => Some(RebootCause::Docker),
+            Target::Local(_) => Some(RebootCause::Local),
+        }
+    }
+
+    /// The host failed because the reboot did not happen: the barrier is
+    /// the op, at its site, with rc -1 (`--max-fail` counts it).
+    fn reboot_failed(&mut self, role: &str, op: &str, why: String) {
+        self.rsay(role, &why);
+        self.halted = true;
+        if self.verdict.is_none() {
+            self.verdict = Some(HostStatus::Failed {
+                role: role.to_string(),
+                // Not a node of any window.
+                op_id: usize::MAX,
+                op: op.to_string(),
+                rc: -1,
+                tail: why,
+            });
+        }
     }
 
     /// The end of the run: report what is still pending; with `--reboot
@@ -311,18 +422,26 @@ impl HostExec {
             // failed already, or its shell is gone): nothing to report.
             _ => return Ok(()),
         };
-        self.rsay(
-            "reboot",
-            &format!("pending at the end of the run ({})", pending.join(", ")),
-        );
+        let cause = match *self.shells.target {
+            Target::Ssh(_) => None,
+            Target::Docker(_) => Some(RebootCause::Docker),
+            Target::Local(_) => Some(RebootCause::Local),
+        };
+        let reboots = self.reboot.policy == RebootPolicy::Auto && self.over_ssh() && !self.halted;
+        for l in reboot_end_lines(&self.name, &pending, cause, !reboots) {
+            self.sink.line(&l);
+        }
         self.sink
             .event(json!({"ev":"reboot_pending","host":self.name,
-            "at":"end","items":pending}));
+            "at":"end","barrier_site":null,"cause":cause.map(RebootCause::label),
+            "items":pending.iter().map(RebootItem::json).collect::<Vec<_>>()}));
         self.report.reboot_pending = pending.clone();
-        if self.reboot.policy == RebootPolicy::Auto
-            && self.over_ssh()
-            && !self.halted
-            && self.do_reboot(window, "reboot", pending).await? == Crossed::Rebooted
+        self.report.reboot_cause = cause;
+        if reboots
+            && self
+                .do_reboot(window, "reboot", "reboot at the end of the run", pending)
+                .await?
+                == Crossed::Rebooted
         {
             self.report.reboot_pending.clear();
         }
@@ -330,13 +449,14 @@ impl HostExec {
     }
 
     /// Reboot the host over SSH and wait for it ([`RebootWait`]). The host
-    /// is halted with a [`HostStatus::Blocked`] reason when it does not
-    /// come back; the result is then `Continue`.
+    /// fails ([`HostStatus::Failed`], `op` the op, rc -1) when the command
+    /// fails or it does not come back; the result is then `Continue`.
     async fn do_reboot(
         &mut self,
         window: usize,
         role: &str,
-        pending: Vec<String>,
+        op: &str,
+        pending: Vec<RebootItem>,
     ) -> Result<Crossed, String> {
         let wait = self.reboot.wait;
         let old = match self.boot_id().await {
@@ -359,8 +479,7 @@ impl HostExec {
             Ok(Ok((0, _))) => true,
             Ok(Ok((rc, out))) => {
                 let why = format!("reboot: systemctl reboot failed (rc {rc}): {}", out.trim());
-                self.rsay(role, &why);
-                self.block(why);
+                self.reboot_failed(role, op, why);
                 return Ok(Crossed::Continue);
             }
             // The shell went with the host.
@@ -393,8 +512,7 @@ impl HostExec {
                     "reboot: host did not come back within {} ({last})",
                     crate::trace::fmt_duration(wait.deadline)
                 );
-                self.rsay(role, &why);
-                self.block(why);
+                self.reboot_failed(role, op, why);
                 return Ok(Crossed::Continue);
             }
             match tokio::time::timeout(limit - now, self.reopen_root()).await {
@@ -405,14 +523,15 @@ impl HostExec {
                         "reboot",
                         &format!("down {down}s, boot id changed, shells reopened"),
                     );
+                    let subjects: Vec<String> = pending.iter().map(|i| i.subject.clone()).collect();
                     self.sink.event(json!({"ev":"reboot","host":self.name,
-                        "down_s":down,"old_boot_id":old,"new_boot_id":id,"items":pending}));
+                        "down_s":down,"old_boot_id":old,"new_boot_id":id,"items":subjects}));
                     self.report.reboots.push(RebootRecord {
                         window,
                         down_secs: down,
                         old_boot_id: old,
                         new_boot_id: id,
-                        pending,
+                        pending: subjects,
                     });
                     return Ok(Crossed::Rebooted);
                 }
@@ -527,22 +646,44 @@ mod tests {
         k
     }
 
+    fn subjects(v: Vec<RebootItem>) -> Vec<String> {
+        v.into_iter().map(|i| i.subject).collect()
+    }
+
     #[test]
     fn a_merged_op_marks_only_the_marked_members_that_changed() {
         let w = merged([("nvidia-driver-570", true, 3), ("cuda-toolkit", false, 7)]);
         // Both changed: only the marked member marks.
         assert_eq!(
-            marked_subjects(&w, &known(&[3, 7], &[])),
+            subjects(marked_items(&w, &known(&[3, 7], &[]), "pb")),
             ["pkg nvidia-driver-570"]
         );
         // The marked member's own name was not installed: no mark, even
         // though the merged op as a whole changed.
-        assert!(marked_subjects(&w, &known(&[7], &[3])).is_empty());
+        assert!(marked_items(&w, &known(&[7], &[3]), "pb").is_empty());
         // Never reported: no mark.
-        assert!(marked_subjects(&w, &known(&[], &[])).is_empty());
+        assert!(marked_items(&w, &known(&[], &[]), "pb").is_empty());
         // Both marked, one changed.
         let w = merged([("a", true, 3), ("b", true, 7)]);
-        assert_eq!(marked_subjects(&w, &known(&[7], &[3])), ["pkg b"]);
+        assert_eq!(
+            subjects(marked_items(&w, &known(&[7], &[3]), "pb")),
+            ["pkg b"]
+        );
+    }
+
+    #[test]
+    fn a_mark_names_the_role_or_the_playbook_and_the_site() {
+        let mut w = merged([("a", true, 3), ("b", true, 7)]);
+        w.members[1].role = String::new();
+        w.node.site = Some(crate::trace::Site {
+            file: "src/roles/k.rs",
+            line: 31,
+        });
+        let got = marked_items(&w, &known(&[3, 7], &[]), "gpu");
+        assert_eq!(got[0].role.as_deref(), Some("r"));
+        assert_eq!(got[1].role.as_deref(), Some("gpu"), "outside any role");
+        assert_eq!(got[0].site.as_deref(), Some("src/roles/k.rs:31"));
+        assert_eq!(mark_line(&got[0]), "pkg a\tr\tsrc/roles/k.rs:31");
     }
 
     #[test]
@@ -559,6 +700,24 @@ mod tests {
         assert!(s.ends_with(">> \"$d/reboot-pending\"\n"), "{s}");
         // One line each: a newline in a subject is a space.
         assert_eq!(s.matches('\n').count(), 3, "{s}");
-        assert_eq!(parse_marks("pkg a\n\npkg a\n pkg b \n"), ["pkg a", "pkg b"]);
+    }
+
+    #[test]
+    fn old_and_new_mark_lines_read_and_dedup_by_subject() {
+        let got = parse_marks(
+            "pkg a\n\npkg a\n pkg b \nfile /x\trole x\tsrc/a.rs:1\npkg b\tkernel\tsrc/b.rs:9\nfile /y\t\t\n",
+        );
+        assert_eq!(
+            subjects(got.clone()),
+            ["pkg a", "pkg b", "file /x", "file /y"]
+        );
+        // An old line is bare; a later new line for its subject fills it in.
+        assert_eq!(got[0], RebootItem::bare("pkg a"));
+        assert_eq!(got[1].role.as_deref(), Some("kernel"));
+        assert_eq!(got[1].site.as_deref(), Some("src/b.rs:9"));
+        // The first new line for a subject wins over a later one.
+        assert_eq!(got[2].role.as_deref(), Some("role x"));
+        // A new line with empty fields is not "old" but has nothing to say.
+        assert_eq!(got[3], RebootItem::bare("file /y"));
     }
 }

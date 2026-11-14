@@ -202,6 +202,13 @@ impl Stub {
         std::fs::read_to_string(self.dir.path().join("mark.at-reboot")).unwrap_or_default()
     }
 
+    /// The subjects of a mark text (the first tab field of each line).
+    fn subjects(mark: &str) -> Vec<String> {
+        mark.lines()
+            .map(|l| l.split('\t').next().unwrap().to_string())
+            .collect()
+    }
+
     /// The channels (by file name) whose input contains `mark`.
     fn chans(&self, mark: &str) -> Vec<String> {
         let mut v = vec![];
@@ -757,7 +764,13 @@ fn a_marked_change_is_marked_and_the_barrier_reboots_once_and_reopens_every_shel
     let a = stub.work().join("a").display().to_string();
 
     // The mark listed the change when the host went down; one reboot.
-    assert_eq!(stub.mark_at_reboot(), format!("file {a}\n"));
+    let mark = stub.mark_at_reboot();
+    assert_eq!(Stub::subjects(&mark), [format!("file {a}")]);
+    // The line records the op's role and its site (T118).
+    let f: Vec<&str> = mark.trim_end().split('\t').collect();
+    assert_eq!(f.len(), 3, "{mark:?}");
+    assert_eq!(f[1], "gpu_driver");
+    assert!(f[2].contains("executor_ssh.rs:"), "{mark:?}");
     assert_eq!(stub.reboots(), 1);
     assert_ne!(stub.boot_id(), "boot-1");
     assert!(out.contains("-> changed; needs reboot"), "{out}");
@@ -843,7 +856,10 @@ fn two_marked_ops_in_two_roles_cost_one_reboot() {
         stub.work().join("a").display().to_string(),
         stub.work().join("b").display().to_string(),
     );
-    assert_eq!(stub.mark_at_reboot(), format!("file {a}\nfile {b}\n"));
+    assert_eq!(
+        Stub::subjects(&stub.mark_at_reboot()),
+        [format!("file {a}"), format!("file {b}")]
+    );
     assert!(
         out.contains(&format!("reboot: pending (file {a}, file {b}) ==")),
         "{out}"
@@ -932,11 +948,11 @@ fn reboot_never_stops_at_a_pending_barrier() {
     let (r, out) = go_with(&pb, &stub, stub.rtransport(&[]), c);
     let rep = &r.hosts[0];
     let before = stub.work().join("before").display().to_string();
-    assert_eq!(
-        rep.status,
-        HostStatus::RebootPending(vec![format!("file {before}")]),
-        "{out}"
-    );
+    let HostStatus::RebootPending(stop) = &rep.status else {
+        panic!("{:?}\n{out}", rep.status)
+    };
+    assert_eq!(stop.items.len(), 1, "{out}");
+    assert_eq!(stop.items[0].subject, format!("file {before}"));
     assert!(!rep.status.is_success());
     assert_eq!(r.exit_code(), 1);
     // The op before the barrier is applied, the one after it did not run.
@@ -950,7 +966,7 @@ fn reboot_never_stops_at_a_pending_barrier() {
     assert_eq!(outcomes, [Outcome::Changed, Outcome::NotRun], "{out}");
     assert_eq!(stub.reboots(), 0);
     assert!(
-        out.contains("== bot@h [stops] reboot pending at barrier =="),
+        out.contains("== bot@h [stops] reboot pending at barrier: stopped, not rebooted =="),
         "{out}"
     );
     let text = r.render();
@@ -959,8 +975,8 @@ fn reboot_never_stops_at_a_pending_barrier() {
     assert!(r.table().contains("reboot pending"), "{}", r.table());
     // Only the mark is left on the host.
     assert_eq!(
-        std::fs::read_to_string(stub.run_dir().join("reboot-pending")).unwrap(),
-        format!("file {before}\n")
+        Stub::subjects(&std::fs::read_to_string(stub.run_dir().join("reboot-pending")).unwrap()),
+        [format!("file {before}")]
     );
     assert_eq!(survivors(&stub.pids()), Vec::<u32>::new());
 }
@@ -989,9 +1005,10 @@ fn a_host_that_never_comes_back_fails_after_the_deadline() {
         "{:?}",
         t0.elapsed()
     );
-    let HostStatus::Blocked(why) = &r.hosts[0].status else {
+    let HostStatus::Failed { tail: why, rc, .. } = &r.hosts[0].status else {
         panic!("{:?}\n{out}", r.hosts[0].status)
     };
+    assert_eq!(*rc, -1);
     assert!(
         why.starts_with("reboot: host did not come back within 1.5s"),
         "{why}"
@@ -1017,9 +1034,10 @@ fn a_host_that_answers_with_the_same_boot_id_has_not_rebooted() {
     };
     let t = stub.rtransport(&[("TP_STUB_SAME_BOOT", "1"), ("TP_STUB_DOWN", "0")]);
     let (r, out) = go_with(&pb, &stub, t, c);
-    let HostStatus::Blocked(why) = &r.hosts[0].status else {
+    let HostStatus::Failed { tail: why, rc, .. } = &r.hosts[0].status else {
         panic!("{:?}\n{out}", r.hosts[0].status)
     };
+    assert_eq!(*rc, -1);
     assert!(
         why.starts_with("reboot: host did not come back within 1.5s")
             && why.contains("boot id unchanged"),
@@ -1039,9 +1057,10 @@ fn a_failing_systemctl_reboot_fails_the_host_with_its_message() {
         stub.rtransport(&[("TP_STUB_REBOOT_FAIL", "1")]),
         fast(),
     );
-    let HostStatus::Blocked(why) = &r.hosts[0].status else {
+    let HostStatus::Failed { tail: why, rc, .. } = &r.hosts[0].status else {
         panic!("{:?}\n{out}", r.hosts[0].status)
     };
+    assert_eq!(*rc, -1);
     assert!(
         why.contains("systemctl reboot failed (rc 1): Failed to reboot: Access denied"),
         "{why}"
@@ -1070,17 +1089,26 @@ fn a_reboot_pending_at_the_end_is_reported_and_the_host_stays_a_success() {
     let k = stub.work().join("k").display().to_string();
     assert_eq!(rep.status, HostStatus::Changed, "{out}");
     assert_eq!(r.exit_code(), 0);
-    assert_eq!(rep.reboot_pending, [format!("file {k}")]);
+    assert_eq!(rep.reboot_pending.len(), 1);
+    assert_eq!(rep.reboot_pending[0].subject, format!("file {k}"));
+    assert_eq!(rep.reboot_pending[0].role.as_deref(), Some("kernel_update"));
     assert_eq!(stub.reboots(), 0);
     assert!(
-        out.contains(&format!(
-            "== bot@h [reboot] pending at the end of the run (file {k}) =="
-        )),
+        out.contains("== bot@h [reboot] reboot pending at the end of the run: =="),
+        "{out}"
+    );
+    assert!(
+        out.contains(&format!("   marked by: file {k}   role kernel_update, ")),
+        "{out}"
+    );
+    assert!(
+        out.contains("   to finish: reboot the host, or rerun with --reboot auto\n"),
         "{out}"
     );
     let text = r.render();
     assert!(
-        text.contains(&format!("bot@h: reboot pending (file {k})")),
+        text.contains("reboot pending at the end of the run: ==")
+            && text.contains("   to finish: reboot the host, or rerun with --reboot auto"),
         "{text}"
     );
     assert!(r.table().contains("reboot pending"), "{}", r.table());
@@ -1281,11 +1309,12 @@ fn a_mark_is_not_lost_when_a_later_op_of_the_window_fails() {
     );
     let a = stub.work().join("a").display().to_string();
     assert_eq!(
-        std::fs::read_to_string(stub.run_dir().join("reboot-pending")).unwrap(),
-        format!("file {a}\n")
+        Stub::subjects(&std::fs::read_to_string(stub.run_dir().join("reboot-pending")).unwrap()),
+        [format!("file {a}")]
     );
     // The failed host is still listed as needing a reboot.
-    assert_eq!(r.hosts[0].reboot_pending, [format!("file {a}")]);
+    assert_eq!(r.hosts[0].reboot_pending.len(), 1);
+    assert_eq!(r.hosts[0].reboot_pending[0].subject, format!("file {a}"));
     assert_eq!(stub.reboots(), 0);
 }
 
@@ -1323,4 +1352,179 @@ fn a_marked_op_in_a_login_shell_is_marked_through_the_root_shell() {
         "the user ran the op; the root shell was sent its mark"
     );
     assert_eq!(r.hosts[0].reboot_pending.len(), 1);
+}
+
+// ---- the reboot stop and the host that did not come back (T118) ----
+
+fn line_in_self(after: &str, needle: &str) -> usize {
+    let src = include_str!("executor_ssh.rs");
+    let start = src
+        .lines()
+        .position(|l| l.contains(after) && l.contains("fn "))
+        .unwrap();
+    src.lines()
+        .enumerate()
+        .skip(start)
+        .find(|(_, l)| l.contains(needle))
+        .map(|(i, _)| i + 1)
+        .unwrap()
+}
+
+#[test]
+fn reboot_never_stop_says_why_where_who_marked_and_how_to_finish() {
+    let stub = Stub::new();
+    let log = stub.dir.path().join("run.jsonl");
+    let pb = Playbook::new("stops", stops);
+    let c = RunControls {
+        reboot: RebootPolicy::Never,
+        ..fast()
+    };
+    let out = Rc::new(RefCell::new(String::new()));
+    let r = run_with(
+        &pb,
+        vec![HostSpec {
+            groups: Vec::new(),
+            name: "bot@h".into(),
+            target: Target::Ssh(stub.rtransport(&[])),
+            vars: Vars {
+                dir: stub.work(),
+                user: me(),
+            },
+        }],
+        RunOpts {
+            log: Some(log.clone()),
+            stdout: Stdout::Capture(out.clone()),
+        },
+        None,
+        c,
+    );
+    let out = out.borrow().clone();
+    let before = stub.work().join("before").display().to_string();
+    let barrier = line_in_self("fn stops", "h.reboot().if_pending()");
+    let op = line_in_self("fn stops", ".needs_reboot()");
+    assert_eq!(r.exit_code(), 1);
+    for want in [
+        "== bot@h [stops] reboot pending at barrier: stopped, not rebooted ==\n".to_string(),
+        "   why:       --reboot never was given\n".to_string(),
+        format!("executor_ssh.rs:{barrier} (playbook stops)\n"),
+        format!("   marked by: file {before}   role kernel_update, "),
+        format!("executor_ssh.rs:{op}\n"),
+        "   not run:   1 op after the barrier\n".to_string(),
+        "   to finish: rerun without --reboot never, or with --reboot auto, to reboot here\n"
+            .to_string(),
+        "              (or: reboot the machine yourself, then run again)\n".to_string(),
+    ] {
+        assert!(out.contains(&want), "missing {want:?} in\n{out}");
+    }
+    assert!(
+        r.render()
+            .contains("   why:       --reboot never was given")
+    );
+    let text = std::fs::read_to_string(&log).unwrap();
+    let e: serde_json::Value = text
+        .lines()
+        .map(|l| serde_json::from_str::<serde_json::Value>(l).unwrap())
+        .find(|e| e["ev"] == "reboot_stopped")
+        .unwrap();
+    assert_eq!(e["cause"], "never");
+    assert_eq!(e["role"], "stops");
+    assert!(
+        e["barrier_site"]
+            .as_str()
+            .unwrap()
+            .ends_with(&format!(":{barrier}"))
+    );
+    assert_eq!(e["items"][0]["role"], "kernel_update");
+}
+
+#[test]
+fn a_host_that_did_not_come_back_is_failed_at_the_barrier_with_rc_minus_1() {
+    let stub = Stub::new();
+    let pb = Playbook::new("stops", stops);
+    let c = RunControls {
+        reboot_wait: RebootWait {
+            deadline: std::time::Duration::from_millis(1500),
+            poll: std::time::Duration::from_millis(50),
+            down: std::time::Duration::from_secs(5),
+        },
+        ..Default::default()
+    };
+    let t = stub.rtransport(&[("TP_STUB_DOWN", "1000000")]);
+    let (r, out) = go_with(&pb, &stub, t, c);
+    let barrier = line_in_self("fn stops", "h.reboot().if_pending()");
+    let HostStatus::Failed {
+        role, op, rc, tail, ..
+    } = &r.hosts[0].status
+    else {
+        panic!("{:?}\n{out}", r.hosts[0].status)
+    };
+    assert_eq!((role.as_str(), *rc), ("stops", -1));
+    assert!(
+        op.starts_with("h.reboot().if_pending() at ")
+            && op.ends_with(&format!("executor_ssh.rs:{barrier}")),
+        "{op}"
+    );
+    assert!(
+        tail.starts_with("reboot: host did not come back within 1.5s ("),
+        "{tail}"
+    );
+    assert_eq!(r.hosts[0].status.label(), "failed");
+    assert_eq!(r.exit_code(), 1);
+    assert!(
+        out.contains("reboot: host did not come back within 1.5s"),
+        "{out}"
+    );
+    let table = r.table();
+    assert!(
+        table.contains("failed") && table.contains("(rc -1)"),
+        "{table}"
+    );
+}
+
+#[test]
+fn a_host_that_did_not_come_back_counts_for_max_fail_and_stops_the_next_host() {
+    let (a, b) = (Stub::new(), Stub::new());
+    let pb = Playbook::new("stops", stops);
+    let c = RunControls {
+        serial: Some(1),
+        max_fail: Some(0),
+        reboot_wait: RebootWait {
+            deadline: std::time::Duration::from_millis(1500),
+            poll: std::time::Duration::from_millis(50),
+            down: std::time::Duration::from_secs(5),
+        },
+        ..Default::default()
+    };
+    let host = |name: &str, s: &Stub, extra: &[(&str, &str)]| HostSpec {
+        groups: Vec::new(),
+        name: name.into(),
+        target: Target::Ssh(s.rtransport(extra)),
+        vars: Vars {
+            dir: s.work(),
+            user: me(),
+        },
+    };
+    let out = Rc::new(RefCell::new(String::new()));
+    let r = run_with(
+        &pb,
+        vec![
+            host("bot@a", &a, &[("TP_STUB_DOWN", "1000000")]),
+            host("bot@b", &b, &[]),
+        ],
+        RunOpts {
+            log: None,
+            stdout: Stdout::Capture(out.clone()),
+        },
+        None,
+        c,
+    );
+    let out = out.borrow().clone();
+    assert_eq!(r.hosts[0].status.label(), "failed", "{out}");
+    assert!(
+        matches!(r.hosts[1].status, HostStatus::NotStarted(_)),
+        "{:?}\n{out}",
+        r.hosts[1].status
+    );
+    assert_eq!(r.exit_code(), 1);
+    assert_eq!(b.reboots(), 0);
 }

@@ -33,7 +33,192 @@ pub enum HostStatus {
     /// listed needs it. Everything before the barrier is applied, nothing
     /// after it ran; the next run, after the reboot, goes past it. Not a
     /// success: the playbook did not complete.
-    RebootPending(Vec<String>),
+    RebootPending(RebootStop),
+}
+
+/// One thing a pending reboot is for: the op that marked the host. A mark
+/// an earlier run left in the old format has no role and no site.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RebootItem {
+    /// `pkg linux-generic`, `file /etc/default/grub`, `file P (secret)`.
+    pub subject: String,
+    /// The op's role, or the playbook's name outside any role.
+    pub role: Option<String>,
+    /// The op's `file:line`.
+    pub site: Option<String>,
+}
+
+impl RebootItem {
+    /// A subject whose run recorded nothing else (an old mark).
+    pub fn bare(subject: &str) -> RebootItem {
+        RebootItem {
+            subject: subject.to_string(),
+            role: None,
+            site: None,
+        }
+    }
+
+    /// Who marked, as one `marked by` line's tail.
+    fn by(&self) -> String {
+        match (&self.role, &self.site) {
+            (Some(r), Some(s)) => format!("role {r}, {s}"),
+            (Some(r), None) => format!("role {r}"),
+            (None, Some(s)) => s.clone(),
+            (None, None) => "marked by an earlier run; role and site not recorded".to_string(),
+        }
+    }
+
+    /// The event's shape: `{subject, role, site}`, null for what is unknown.
+    pub fn json(&self) -> serde_json::Value {
+        serde_json::json!({"subject":self.subject,"role":self.role,"site":self.site})
+    }
+}
+
+/// Why a host cannot reboot itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RebootCause {
+    /// `--reboot never` was given.
+    Never,
+    /// The `--local` transport: the machine is the operator's.
+    Local,
+    /// The docker transport: a container has no host to reboot.
+    Docker,
+}
+
+impl RebootCause {
+    /// The event's word.
+    pub fn label(self) -> &'static str {
+        match self {
+            RebootCause::Never => "never",
+            RebootCause::Local => "local",
+            RebootCause::Docker => "docker",
+        }
+    }
+
+    fn why(self) -> &'static str {
+        match self {
+            RebootCause::Never => "--reboot never was given",
+            RebootCause::Local => "the --local transport cannot reboot this machine",
+            RebootCause::Docker => "the docker transport cannot reboot a container",
+        }
+    }
+
+    /// The `to finish` lines of a stop at a barrier.
+    fn finish(self) -> Vec<&'static str> {
+        match self {
+            RebootCause::Never => vec![
+                "rerun without --reboot never, or with --reboot auto, to reboot here",
+                "(or: reboot the machine yourself, then run again)",
+            ],
+            RebootCause::Local => vec!["reboot this machine yourself, then run again"],
+            RebootCause::Docker => vec!["restart the container yourself, then run again"],
+        }
+    }
+
+    /// The `to finish` line at the end of a run.
+    fn end_finish(c: Option<RebootCause>) -> &'static str {
+        match c {
+            Some(RebootCause::Local) => "reboot this machine yourself, then run again",
+            Some(RebootCause::Docker) => "restart the container yourself, then run again",
+            _ => "reboot the host, or rerun with --reboot auto",
+        }
+    }
+}
+
+/// A run stopped at a reboot barrier it cannot cross.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RebootStop {
+    pub cause: RebootCause,
+    /// The role the barrier was traced in, or the playbook's name outside
+    /// any: the stream's bracket.
+    pub role: String,
+    pub playbook: String,
+    /// The `h.reboot().if_pending()` call's `file:line`.
+    pub barrier_site: Option<String>,
+    /// What the reboot is for.
+    pub items: Vec<RebootItem>,
+    /// Ops reported not run after the barrier.
+    pub not_run: usize,
+}
+
+/// `   label:     first` and the continuation lines under it.
+fn labelled(label: &str, lines: &[String]) -> Vec<String> {
+    lines
+        .iter()
+        .enumerate()
+        .map(|(i, l)| {
+            if i == 0 {
+                format!("   {:<11}{l}", format!("{label}:"))
+            } else {
+                format!("   {:<11}{l}", "")
+            }
+        })
+        .collect()
+}
+
+/// The `marked by` lines for `items`, subjects padded to one column.
+fn marked_by(items: &[RebootItem]) -> Vec<String> {
+    let w = items.iter().map(|i| i.subject.len()).max().unwrap_or(0) + 3;
+    let lines: Vec<String> = items
+        .iter()
+        .map(|i| format!("{:<w$}{}", i.subject, i.by()))
+        .collect();
+    labelled("marked by", &lines)
+}
+
+impl RebootStop {
+    /// The header and detail lines of the stop (stream and report).
+    pub fn lines(&self, host: &str) -> Vec<String> {
+        let mut v = vec![format!(
+            "== {host} [{}] reboot pending at barrier: stopped, not rebooted ==",
+            self.role
+        )];
+        v.extend(labelled("why", &[self.cause.why().to_string()]));
+        let at = match &self.barrier_site {
+            Some(s) => format!(" at {s}"),
+            None => String::new(),
+        };
+        v.extend(labelled(
+            "barrier",
+            &[format!(
+                "h.reboot().if_pending(){at} (playbook {})",
+                self.playbook
+            )],
+        ));
+        v.extend(marked_by(&self.items));
+        let n = self.not_run;
+        v.extend(labelled(
+            "not run",
+            &[format!(
+                "{n} op{} after the barrier",
+                if n == 1 { "" } else { "s" }
+            )],
+        ));
+        let f: Vec<String> = self.cause.finish().iter().map(|s| s.to_string()).collect();
+        v.extend(labelled("to finish", &f));
+        v
+    }
+}
+
+/// The end-of-run list: what the host still needs a reboot for. `finish`
+/// is false when the run is about to reboot the host itself.
+pub fn reboot_end_lines(
+    host: &str,
+    items: &[RebootItem],
+    cause: Option<RebootCause>,
+    finish: bool,
+) -> Vec<String> {
+    let mut v = vec![format!(
+        "== {host} [reboot] reboot pending at the end of the run: =="
+    )];
+    v.extend(marked_by(items));
+    if finish {
+        v.extend(labelled(
+            "to finish",
+            &[RebootCause::end_finish(cause).to_string()],
+        ));
+    }
+    v
 }
 
 impl HostStatus {
@@ -459,7 +644,11 @@ pub struct HostReport {
     /// What the host still needs a reboot for at the end of the run (the
     /// marks `.needs_reboot()` ops left, an earlier run's included). The
     /// host's status is not changed by it. Empty after a reboot.
-    pub reboot_pending: Vec<String>,
+    pub reboot_pending: Vec<RebootItem>,
+    /// Why the host cannot reboot itself, when it cannot (`Local`,
+    /// `Docker`; `None` over SSH): the end-of-run list words its way out
+    /// by it.
+    pub reboot_cause: Option<RebootCause>,
     /// Each reboot the run did, in order.
     pub reboots: Vec<crate::executor::RebootRecord>,
 }
@@ -487,6 +676,7 @@ impl HostReport {
             diffs: Vec::new(),
             check: None,
             reboot_pending: Vec::new(),
+            reboot_cause: None,
             reboots: Vec::new(),
         }
     }
@@ -721,23 +911,19 @@ impl Report {
                 HostStatus::NotStarted(why) => {
                     let _ = writeln!(out, "\n{}: not started: {why}", h.name);
                 }
-                HostStatus::RebootPending(list) => {
-                    let _ = writeln!(
-                        out,
-                        "\n{}: reboot pending at barrier ({})",
-                        h.name,
-                        list.join(", ")
-                    );
+                HostStatus::RebootPending(stop) => {
+                    out.push('\n');
+                    for l in stop.lines(&h.name) {
+                        let _ = writeln!(out, "{l}");
+                    }
                 }
                 _ => {}
             }
             if !h.reboot_pending.is_empty() {
-                let _ = writeln!(
-                    out,
-                    "{}: reboot pending ({})",
-                    h.name,
-                    h.reboot_pending.join(", ")
-                );
+                out.push('\n');
+                for l in reboot_end_lines(&h.name, &h.reboot_pending, h.reboot_cause, true) {
+                    let _ = writeln!(out, "{l}");
+                }
             }
             for r in &h.reboots {
                 let _ = writeln!(
