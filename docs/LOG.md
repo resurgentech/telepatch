@@ -2016,3 +2016,15 @@ are appended, never edited in; a hook refuses rewrites.
   hung on the EOF-lost stub until the test's 8 s bound. Gate E and
   check-sandbox green.
 - Commits: telepatch 3827fbd
+
+## 2026-11-14 — T139 Prove the main-cache line of `cache usage` on the VM
+
+- tp_basic undo_fs fetches a third served file (/var/lib/tp-fetch/main.bin,
+  256 KiB) into /opt/tp-undo-fs/main.bin, on the root filesystem, so it
+  lands in /var/cache/telepatch/sha256 with owners/undo_fs/<sum>.
+- test-vm.sh: the listing shows `maincache`/`mainowner`; the nonzero
+  main-cache usage line is required; the GAP branch is gone; run 2 wants
+  3 cached fetches; purge removes the main entry. Self-test 188 ok.
+- Plan snapshots: the one new op. Red: plans failed on HEAD's undo.rs.
+  Gate B and E's telepatch half green. VM run is T140's.
+- Commits: tp_basic d7b3914
