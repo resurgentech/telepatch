@@ -1875,3 +1875,19 @@ are appended, never edited in; a hook refuses rewrites.
   Red by FOREMAN against stashed src; green. Gate E and check-sandbox
   green; no snapshot moved.
 - Commits: telepatch abf7c9c
+
+## 2026-11-13 — T120 `h.as_user(u)` on the local transport
+
+- `LocalTransport::open` serves `Principal::User(u)`: the calling user
+  (`.user()` seam, else `id -un`) gets T114's `env -i … bash -l` with
+  T128's carry words and no sudo (shared `executor::start_login`);
+  another user gets `sudo -n -iu u bash`, no runuser. A refusal or a
+  missing sudo is `Limit::SudoRefused` with ssh's text adapted
+  (`LocalTransport::message()`). The controller-side sandbox refusal
+  covers the User path. Note: "one mechanism" paragraph.
+- Tests: tests/local_user.rs (16; red 14/16 rerun by FOREMAN, green),
+  shell_pool.rs and executor_ssh.rs adapted. No real sudo or second user.
+- tp_basic: test-only `local_user`/`local_user_nologin`, the
+  `test-vm.sh` case (written; runs in T104), self-test green.
+- Gate E and check-sandbox green; no snapshot moved.
+- Commits: telepatch 8f55549; tp_basic 81799b1
