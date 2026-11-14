@@ -1205,29 +1205,28 @@ fn reboot_auto_with_nothing_pending_does_not_reboot() {
 /// after the barrier must be stopped through a second shell of the new boot.
 fn timeouts(h: Host<Vars>) -> PlaybookFuture {
     Box::pin(async move {
-        sh!(h, "echo MARK_T_BEFORE; sleep 4.32")
+        let (before, after) = (long_sleep(3), long_sleep(4));
+        sh!(h, "echo MARK_T_BEFORE; sleep {before}")
             .timeout(std::time::Duration::from_secs(1))
             .allow_fail();
         h.file(&f(&h, "m")).content("m\n").needs_reboot();
         h.reboot().if_pending();
-        sh!(h, "echo MARK_T_AFTER; sleep 4.31").timeout(std::time::Duration::from_secs(1));
+        sh!(h, "echo MARK_T_AFTER; sleep {after}").timeout(std::time::Duration::from_secs(1));
         Ok(())
     })
 }
 
 #[test]
 fn a_timeout_after_the_barrier_is_still_killed_through_a_second_shell_of_the_new_boot() {
-    let _r1 = Reaper("sleep 4.32".into());
-    let _r2 = Reaper("sleep 4.31".into());
+    let _r1 = Reaper(format!("sleep {}$", long_sleep(3)));
+    let _r2 = Reaper(format!("sleep {}$", long_sleep(4)));
     let stub = Stub::new();
     let pb = Playbook::new("timeouts", timeouts);
     let t0 = std::time::Instant::now();
     let (r, out) = go_with(&pb, &stub, stub.rtransport(&[]), fast());
-    assert!(
-        t0.elapsed() < std::time::Duration::from_secs(8),
-        "{:?}",
-        t0.elapsed()
-    );
+    // Both ops sleep 300 s, so finishing at all proves both were killed;
+    // this bound only guards against a hang.
+    assert!(t0.elapsed() < HANG_GUARD, "{:?}", t0.elapsed());
     let HostStatus::Failed { op, .. } = &r.hosts[0].status else {
         panic!("{:?}\n{out}", r.hosts[0].status)
     };
@@ -1240,6 +1239,15 @@ fn a_timeout_after_the_barrier_is_still_killed_through_a_second_shell_of_the_new
     assert_ne!(killers[0], killers[1]);
     assert_eq!(stub.chans("MARK_T_AFTER").len(), 1);
     assert_eq!(survivors(&stub.pids()), Vec::<u32>::new());
+    // Each op's own sleep died with its group.
+    assert!(
+        !sleep_alive(&long_sleep(3)),
+        "the first op's sleep outlived the kill"
+    );
+    assert!(
+        !sleep_alive(&long_sleep(4)),
+        "the second op's sleep outlived the kill"
+    );
 }
 
 // ---- --check never reboots ----
