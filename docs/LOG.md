@@ -1860,3 +1860,18 @@ are appended, never edited in; a hook refuses rewrites.
   telepatch side is unproven on Rocky 9.
 - Gate B green.
 - Commits: tp_basic ccb71bd
+
+## 2026-11-13 — T118 Reboot reporting: a host that did not come back fails, and a stop says why
+
+- No new boot id by the deadline, or a failed `systemctl reboot`:
+  `Failed`, op `h.reboot().if_pending() at <site>`, rc -1, counted by
+  `--max-fail` (supersedes T102 A2).
+- Mark lines `subject\trole\tfile:line`; old tabless lines read as
+  "marked by an earlier run"; dedup by subject.
+- Barrier stop block (why / barrier / marked by / not run / to finish)
+  per cause never, local, docker; events gain `barrier_site`, `cause`,
+  item objects `{subject, role, site}`. End-of-run list matches.
+- Tests: executor_local.rs (5 new), executor_ssh.rs (3 new, old adapted).
+  Red by FOREMAN against stashed src; green. Gate E and check-sandbox
+  green; no snapshot moved.
+- Commits: telepatch abf7c9c
