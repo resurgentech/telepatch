@@ -1903,3 +1903,16 @@ are appended, never edited in; a hook refuses rewrites.
 - Red (old, loaded) 20/40 failed; green 0/40; loop 2000 runs, 0 failures;
   E 5/5 green; check-sandbox unchanged.
 - Commits: telepatch aba83ca
+
+## 2026-11-13 — T131 A package file follows the same staging rule
+
+- `Item.pkg_file` removed: an item lands on its first consumer's
+  filesystem in window order; a pkg-file consumer counts as the stage's.
+  The pkg op reads via the `f-<sum>` stage link, else the main cache
+  (`fetch::LOOKUP_PKG`). Note `d-fetch` updated.
+- Tests: tests/fetch.rs, 3 new (shared URL with a file op first, staged
+  on fsB with usage recorded there; pkg alone; pkg first). Red by
+  FOREMAN with src stashed (download on the stage, not fsB); green.
+- No snapshot holds a pkg-from-file script: none moved in either repo.
+  Gate E and check-sandbox green. T130 (held by XO) not built.
+- Commits: telepatch 559e2b2
