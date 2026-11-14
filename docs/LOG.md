@@ -1916,3 +1916,19 @@ are appended, never edited in; a hook refuses rewrites.
 - No snapshot holds a pkg-from-file script: none moved in either repo.
   Gate E and check-sandbox green. T130 (held by XO) not built.
 - Commits: telepatch 559e2b2
+
+## 2026-11-13 — T133 The edge cell on EL9: rockylinux9 passes, both sides
+
+- EL9 (RedHat, major 9) asks for `/usr/bin/curl` (curl-minimal provides
+  it; `curl` conflicts) and `/bin/mailx` (EL9's s-nail provides it;
+  nothing provides `mailx`), in the Ansible task and the role alike;
+  EL10, Fedora, Amazon keep `curl`/`mailx` (Q-E1 at its default).
+  Evidence from `dnf repoquery` in both EL9 images (one probe VM, deleted).
+- telepatch: `installs_downloader` also takes an absolute name whose file
+  name is curl/wget, so the EL9 window still splits; test in fetch.rs,
+  red then green; note updated.
+- tp_basic: plans.rs and check-edge red then green; snapshots edge
+  rockylinux9/almalinux9, names only. Gate B, E half, check-sandbox green.
+- Live: rockylinux9 PASS (149 s), almalinux9 PASS (237 s), each its own
+  1 GiB VM, second run CHANGED 0, slices identical; VMs deleted.
+- Commits: telepatch 6b8770b; tp_basic bac7591
