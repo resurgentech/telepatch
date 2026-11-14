@@ -1043,7 +1043,7 @@ mod tests {
     }
 }
 
-// ---- cache usage and purge over an inventory (T123) ----
+// ---- cache usage and purge over an inventory (T123, T136) ----
 
 /// A byte count as `MB` (below a GB) or `GB`, one decimal, 1024-based and
 /// truncated, as the end-of-run cache line prints it.
@@ -1056,92 +1056,25 @@ pub fn human_bytes(bytes: u64) -> String {
     format!("{}.{} {name}", tenths / 10, tenths % 10)
 }
 
-/// Epoch seconds as `YYYY-MM-DD HH:MM` (UTC).
-pub fn utc_minute(epoch: u64) -> String {
-    let days = (epoch / 86_400) as i64;
-    let secs = epoch % 86_400;
-    // Days since 1970-01-01 to a civil date (H. Hinnant's algorithm).
-    let z = days + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z.rem_euclid(146_097);
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let day = doy - (153 * mp + 2) / 5 + 1;
-    let month = if mp < 10 { mp + 3 } else { mp - 9 };
-    let year = yoe + era * 400 + i64::from(month <= 2);
-    format!(
-        "{year:04}-{month:02}-{day:02} {:02}:{:02}",
-        secs / 3600,
-        secs % 3600 / 60
-    )
-}
-
-fn items_of(n: usize) -> String {
+fn items_of(n: u64) -> String {
     format!("{n} {}", if n == 1 { "item" } else { "items" })
 }
 
-/// One cached file, as `cache usage` reads it.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CacheItem {
-    pub sum: String,
-    pub bytes: u64,
-    /// The record's last-used time; `None` when it has no line for the item.
-    pub last: Option<u64>,
-    pub owners: Vec<String>,
-}
-
-/// One registered cache directory on a host: what `cache usage` read in it
-/// (`items`), or what `cache purge` did there.
+/// One cache directory on a host. `cache usage`: `bytes` is its `du -sb`
+/// with the owner markers beside it. `cache purge`: `items` and `bytes` are
+/// what was removed (or, without `--yes`, would be).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CacheDir {
     pub path: String,
-    pub items: Vec<CacheItem>,
-    /// Purge: the items removed, `(sum, bytes)`.
-    pub removed: Vec<(String, u64)>,
-    /// Purge `--owner`: items that lost the owner and stay.
-    pub disowned: usize,
-}
-
-impl CacheDir {
-    pub fn bytes(&self) -> u64 {
-        self.items.iter().map(|i| i.bytes).sum()
-    }
-    fn removed_bytes(&self) -> u64 {
-        self.removed.iter().map(|r| r.1).sum()
-    }
-    /// The oldest and newest recorded last-used time.
-    fn span(&self) -> Option<(u64, u64)> {
-        let t: Vec<u64> = self.items.iter().filter_map(|i| i.last).collect();
-        Some((*t.iter().min()?, *t.iter().max()?))
-    }
-    /// `(owner, items, bytes)` per owner, sorted by owner name; an item with
-    /// two owners counts under each.
-    fn owners(&self) -> Vec<(String, usize, u64)> {
-        let mut m: std::collections::BTreeMap<&str, (usize, u64)> = Default::default();
-        for i in &self.items {
-            for o in &i.owners {
-                let e = m.entry(o).or_default();
-                e.0 += 1;
-                e.1 += i.bytes;
-            }
-        }
-        m.into_iter()
-            .map(|(o, (n, b))| (o.to_string(), n, b))
-            .collect()
-    }
-    fn unowned(&self) -> (usize, u64) {
-        let u = self.items.iter().filter(|i| i.owners.is_empty());
-        (u.clone().count(), u.map(|i| i.bytes).sum())
-    }
+    pub items: u64,
+    pub bytes: u64,
 }
 
 /// How `cache usage` or `cache purge` ended on one host.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CacheStatus {
     Ok,
-    /// Unreachable, refused sudo, in use by a running run, or a refusal
-    /// the script gave; the reason.
+    /// Unreachable, refused sudo, or a refusal the script gave; the reason.
     Failed(String),
 }
 
@@ -1151,6 +1084,9 @@ pub struct CacheHost {
     pub name: String,
     pub status: CacheStatus,
     pub dirs: Vec<CacheDir>,
+    /// `cache usage`: the bytes of the working directories (the stage and
+    /// every `.telepatch/tmp`).
+    pub working: u64,
     pub warnings: Vec<String>,
     /// Directories a purge removed.
     pub removed_dirs: Vec<String>,
@@ -1162,6 +1098,7 @@ impl CacheHost {
             name: name.to_string(),
             status: CacheStatus::Failed(why.into()),
             dirs: Vec::new(),
+            working: 0,
             warnings: Vec::new(),
             removed_dirs: Vec::new(),
         }
@@ -1174,41 +1111,21 @@ impl CacheHost {
         h.status = CacheStatus::Ok;
         for line in out.lines() {
             let f: Vec<&str> = line.split('\t').collect();
+            let n = |i: usize| f[i].parse().unwrap_or(0);
             match (f[0], f.len()) {
-                ("D", 2) => h.dirs.push(CacheDir {
+                ("D", 3) => h.dirs.push(CacheDir {
                     path: f[1].to_string(),
-                    ..Default::default()
+                    items: 0,
+                    bytes: n(2),
                 }),
-                ("I", 5) if !h.dirs.is_empty() => {
-                    let item = CacheItem {
-                        sum: f[1].to_string(),
-                        bytes: f[2].parse().unwrap_or(0),
-                        last: f[3].parse().ok(),
-                        owners: f[4]
-                            .split(',')
-                            .filter(|o| !o.is_empty())
-                            .map(String::from)
-                            .collect(),
-                    };
-                    h.dirs.last_mut().unwrap().items.push(item);
-                }
-                ("X", 3) if !h.dirs.is_empty() => h
-                    .dirs
-                    .last_mut()
-                    .unwrap()
-                    .removed
-                    .push((f[1].to_string(), f[2].parse().unwrap_or(0))),
-                ("U", 2) if !h.dirs.is_empty() => h.dirs.last_mut().unwrap().disowned += 1,
+                ("X", 4) => h.dirs.push(CacheDir {
+                    path: f[1].to_string(),
+                    items: n(2),
+                    bytes: n(3),
+                }),
+                ("K", 2) => h.working = n(1),
                 ("R", 2) => h.removed_dirs.push(f[1].to_string()),
                 ("W", 2) => h.warnings.push(f[1].to_string()),
-                ("E", 2) => {
-                    h.status = CacheStatus::Failed(f[1].to_string());
-                    return h;
-                }
-                ("L", 1) => {
-                    h.status = CacheStatus::Failed("in use by a running run".to_string());
-                    return h;
-                }
                 _ if line.trim().is_empty() => {}
                 _ => h.warnings.push(line.to_string()),
             }
@@ -1219,17 +1136,16 @@ impl CacheHost {
     pub fn is_ok(&self) -> bool {
         self.status == CacheStatus::Ok
     }
-    pub fn items(&self) -> usize {
-        self.dirs.iter().map(|d| d.items.len()).sum()
+    fn dir_bytes(&self) -> u64 {
+        self.dirs.iter().map(|d| d.bytes).sum()
     }
-    pub fn bytes(&self) -> u64 {
-        self.dirs.iter().map(CacheDir::bytes).sum()
+    fn dir_items(&self) -> u64 {
+        self.dirs.iter().map(|d| d.items).sum()
     }
-    pub fn removed_items(&self) -> usize {
-        self.dirs.iter().map(|d| d.removed.len()).sum()
-    }
-    pub fn removed_bytes(&self) -> u64 {
-        self.dirs.iter().map(CacheDir::removed_bytes).sum()
+    /// The host's `cache usage` total: its cache directories and its working
+    /// directories.
+    pub fn total_bytes(&self) -> u64 {
+        self.dir_bytes() + self.working
     }
 }
 
@@ -1247,6 +1163,13 @@ impl CacheReport {
 
     fn ok_hosts(&self) -> impl Iterator<Item = &CacheHost> {
         self.hosts.iter().filter(|h| h.is_ok())
+    }
+
+    fn hosts_of(&self) -> String {
+        match self.ok_hosts().count() {
+            1 => "1 host".to_string(),
+            n => format!("{n} hosts"),
+        }
     }
 
     fn failures(&self, o: &mut String) {
@@ -1271,7 +1194,14 @@ impl CacheReport {
         true
     }
 
-    /// The `cache usage` table.
+    fn warnings(h: &CacheHost, o: &mut String) {
+        for w in &h.warnings {
+            let _ = writeln!(o, "  warning: {w}");
+        }
+    }
+
+    /// The `cache usage` report: a line per cache directory, one `working`
+    /// line, a host total, then the inventory total.
     pub fn render_usage(&self) -> String {
         let mut o = String::new();
         for h in &self.hosts {
@@ -1279,168 +1209,109 @@ impl CacheReport {
                 continue;
             }
             for d in &h.dirs {
-                let mut line = format!(
-                    "  {}: {}, {}",
-                    d.path,
-                    items_of(d.items.len()),
-                    human_bytes(d.bytes())
-                );
-                if let Some((a, b)) = d.span() {
-                    let _ = write!(line, ", last used {} .. {}", utc_minute(a), utc_minute(b));
-                }
-                let _ = writeln!(o, "{line}");
-                for (name, n, b) in d.owners() {
-                    let _ = writeln!(o, "    owner {name}: {}, {}", items_of(n), human_bytes(b));
-                }
-                let (n, b) = d.unowned();
-                if n > 0 {
-                    let _ = writeln!(o, "    unowned: {}, {}", items_of(n), human_bytes(b));
-                }
+                let _ = writeln!(o, "  {}: {}", d.path, human_bytes(d.bytes));
             }
-            for w in &h.warnings {
-                let _ = writeln!(o, "  warning: {w}");
-            }
-            let _ = writeln!(
-                o,
-                "  host total: {}, {}",
-                items_of(h.items()),
-                human_bytes(h.bytes())
-            );
+            let _ = writeln!(o, "  working: {}", human_bytes(h.working));
+            Self::warnings(h, &mut o);
+            let _ = writeln!(o, "  host total: {}\n", human_bytes(h.total_bytes()));
         }
-        let (items, bytes) = self
-            .ok_hosts()
-            .fold((0, 0), |a, h| (a.0 + h.items(), a.1 + h.bytes()));
+        let total: u64 = self.ok_hosts().map(CacheHost::total_bytes).sum();
         let _ = writeln!(
             o,
-            "\nrun total: {}, {}, {}",
-            if self.ok_hosts().count() == 1 {
-                "1 host".to_string()
-            } else {
-                format!("{} hosts", self.ok_hosts().count())
-            },
-            items_of(items),
-            human_bytes(bytes)
+            "inventory total: {}, {}",
+            self.hosts_of(),
+            human_bytes(total)
         );
         self.failures(&mut o);
         o
     }
 
-    /// `cache usage --json`: one document, sizes in bytes, times in epoch
-    /// seconds (`null` when the record has none).
+    /// `cache usage --json`: one document, sizes in bytes, nothing else.
     pub fn usage_json(&self) -> serde_json::Value {
         use serde_json::json;
         let hosts: Vec<_> = self
             .hosts
             .iter()
-            .map(|h| match &h.status {
-                CacheStatus::Failed(w) => json!({"host": h.name, "status": "failed", "reason": w}),
-                CacheStatus::Ok => {
-                    let dirs: Vec<_> = h
-                        .dirs
-                        .iter()
-                        .map(|d| {
-                            let (un, ub) = d.unowned();
-                            json!({
-                                "dir": d.path,
-                                "items": d.items.len(),
-                                "bytes": d.bytes(),
-                                "oldest": d.span().map(|s| s.0),
-                                "newest": d.span().map(|s| s.1),
-                                "owners": d.owners().into_iter()
-                                    .map(|(o, n, b)| json!({"owner": o, "items": n, "bytes": b}))
-                                    .collect::<Vec<_>>(),
-                                "unowned": {"items": un, "bytes": ub},
-                            })
-                        })
-                        .collect();
-                    json!({
-                        "host": h.name, "status": "ok", "items": h.items(),
-                        "bytes": h.bytes(), "dirs": dirs, "warnings": h.warnings,
-                    })
+            .map(|h| {
+                let mut v = json!({
+                    "host": h.name,
+                    "caches": h.dirs.iter()
+                        .map(|d| json!({"dir": d.path, "bytes": d.bytes}))
+                        .collect::<Vec<_>>(),
+                    "working_bytes": h.working,
+                    "total_bytes": h.total_bytes(),
+                });
+                if let CacheStatus::Failed(w) = &h.status {
+                    v["error"] = json!(w);
                 }
+                v
             })
             .collect();
-        let (items, bytes) = self
-            .ok_hosts()
-            .fold((0, 0), |a, h| (a.0 + h.items(), a.1 + h.bytes()));
         json!({
             "hosts": hosts,
-            "total": {
-                "hosts": self.ok_hosts().count(),
-                "failed": self.hosts.iter().filter(|h| !h.is_ok()).count(),
-                "items": items,
-                "bytes": bytes,
-            },
+            "total_bytes": self.ok_hosts().map(CacheHost::total_bytes).sum::<u64>(),
         })
     }
 
-    /// `cache purge` without `--yes`: what `--yes` would remove, from a
-    /// usage read. With an owner, only the items that name it count: those
-    /// it alone owns are deleted, the rest lose it.
+    /// `cache purge` without `--yes`: what `--yes` would remove. Without an
+    /// owner it is from a usage read (each directory and its size); with one,
+    /// from the purge script's count (items deleted and their bytes).
     pub fn render_would_purge(&self, owner: Option<&str>) -> String {
         let mut o = String::from("cache purge: nothing changed; add --yes to remove\n\n");
-        let (mut items, mut bytes) = (0, 0);
+        let mut total = 0;
         for h in &self.hosts {
             if !Self::head(h, &mut o) {
                 continue;
             }
-            let (mut hi, mut hb) = (0, 0);
             for d in &h.dirs {
                 match owner {
                     None => {
-                        let _ = writeln!(
-                            o,
-                            "  {}: would remove {}, {}",
-                            d.path,
-                            items_of(d.items.len()),
-                            human_bytes(d.bytes())
-                        );
-                        hi += d.items.len();
-                        hb += d.bytes();
+                        let _ = writeln!(o, "  {}: would remove {}", d.path, human_bytes(d.bytes));
                     }
-                    Some(p) => {
-                        let named: Vec<&CacheItem> = d
-                            .items
-                            .iter()
-                            .filter(|i| i.owners.iter().any(|x| x == p))
-                            .collect();
-                        let gone: Vec<&&CacheItem> =
-                            named.iter().filter(|i| i.owners.len() == 1).collect();
-                        let gb: u64 = gone.iter().map(|i| i.bytes).sum();
+                    Some(_) => {
                         let _ = writeln!(
                             o,
-                            "  {}: would remove owner {p} from {}, delete {}, {}",
+                            "  {}: would delete {}, {}",
                             d.path,
-                            items_of(named.len()),
-                            items_of(gone.len()),
-                            human_bytes(gb)
+                            items_of(d.items),
+                            human_bytes(d.bytes)
                         );
-                        hi += gone.len();
-                        hb += gb;
                     }
                 }
             }
-            for w in &h.warnings {
-                let _ = writeln!(o, "  warning: {w}");
-            }
+            Self::warnings(h, &mut o);
             let _ = writeln!(
                 o,
-                "  host total: would remove {}, {}",
-                items_of(hi),
-                human_bytes(hb)
+                "  host total: would remove {}",
+                Self::sum(h, owner.is_some())
             );
-            items += hi;
-            bytes += hb;
+            total += h.dir_bytes();
         }
+        let items: u64 = self.ok_hosts().map(CacheHost::dir_items).sum();
         let _ = writeln!(
             o,
-            "\nwould remove {}, {} on {} ok host(s)",
-            items_of(items),
-            human_bytes(bytes),
+            "\nwould remove {} on {} ok host(s)",
+            match owner {
+                None => human_bytes(total),
+                Some(_) => format!("{}, {}", items_of(items), human_bytes(total)),
+            },
             self.ok_hosts().count()
         );
         self.failures(&mut o);
         o
+    }
+
+    /// A host's directories totalled, with the item count or without.
+    fn sum(h: &CacheHost, items: bool) -> String {
+        if items {
+            format!(
+                "{}, {}",
+                items_of(h.dir_items()),
+                human_bytes(h.dir_bytes())
+            )
+        } else {
+            human_bytes(h.dir_bytes())
+        }
     }
 
     /// What `cache purge --yes` did.
@@ -1451,44 +1322,24 @@ impl CacheReport {
                 continue;
             }
             for d in &h.dirs {
-                match owner {
-                    None => {
-                        let _ = writeln!(
-                            o,
-                            "  {}: removed {}, {}",
-                            d.path,
-                            items_of(d.removed.len()),
-                            human_bytes(d.removed_bytes())
-                        );
-                    }
-                    Some(p) => {
-                        let _ = writeln!(
-                            o,
-                            "  {}: removed owner {p} from {}, deleted {}, {}",
-                            d.path,
-                            items_of(d.disowned + d.removed.len()),
-                            items_of(d.removed.len()),
-                            human_bytes(d.removed_bytes())
-                        );
-                    }
-                }
+                let (items, size) = (items_of(d.items), human_bytes(d.bytes));
+                let _ = match owner {
+                    None => writeln!(o, "  {}: removed {items}, {size}", d.path),
+                    Some(p) => writeln!(
+                        o,
+                        "  {}: removed owner {p}, deleted {items}, {size}",
+                        d.path
+                    ),
+                };
             }
             for r in &h.removed_dirs {
                 let _ = writeln!(o, "  removed directory {r}");
             }
-            for w in &h.warnings {
-                let _ = writeln!(o, "  warning: {w}");
-            }
-            let _ = writeln!(
-                o,
-                "  host total: removed {}, {}",
-                items_of(h.removed_items()),
-                human_bytes(h.removed_bytes())
-            );
+            Self::warnings(h, &mut o);
+            let _ = writeln!(o, "  host total: removed {}", Self::sum(h, true));
         }
-        let (items, bytes) = self.ok_hosts().fold((0, 0), |a, h| {
-            (a.0 + h.removed_items(), a.1 + h.removed_bytes())
-        });
+        let items: u64 = self.ok_hosts().map(CacheHost::dir_items).sum();
+        let bytes: u64 = self.ok_hosts().map(CacheHost::dir_bytes).sum();
         let _ = writeln!(
             o,
             "\nremoved {}, {} on {} host(s)",

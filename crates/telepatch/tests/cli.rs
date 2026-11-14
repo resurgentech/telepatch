@@ -927,11 +927,12 @@ fn reboot_takes_auto_or_never_and_a_bad_value_is_a_usage_error() {
     assert!(out.contains("--reboot") && out.contains("--check"), "{out}");
 }
 
-// ---- cache usage / cache purge (T123) ----
+// ---- cache usage / cache purge (T123, T136) ----
 //
 // Every host is its own sandbox: the main cache is `<sb>/cache`, so the
-// registry is `<sb>/caches` and the run lock `<sb>/.lock`; `<sb>/fs` is the
-// one filesystem root (`TP_FS_ROOTS`).
+// registry is `<sb>/caches` and its owner markers are `<sb>/owners`; `<sb>/fs`
+// is the one filesystem root (`TP_FS_ROOTS`), `<sb>/fsX` a root that has no
+// cache but holds a dead run's undo data.
 
 mod cache {
     use super::*;
@@ -941,11 +942,6 @@ mod cache {
 
     pub fn sandbox_() -> Sandbox {
         telepatch::testing::sandbox()
-    }
-
-    /// A 64-character name with an upper-case hex digit in it.
-    pub fn upper() -> String {
-        format!("{:064X}", 0xabcu64)
     }
 
     pub fn hexn(n: u64) -> String {
@@ -959,15 +955,57 @@ mod cache {
         f.set_len(len).unwrap();
     }
 
-    /// A record by hand: `(sum, last used, owners)`.
-    pub fn record(dir: &Path, lines: &[(String, u64, &str)]) {
-        std::fs::create_dir_all(dir).unwrap();
-        let mut s = String::from("v1\n");
-        for (sum, t, o) in lines {
-            s.push_str(&format!("{sum}\t{t}\t{o}\n"));
-        }
-        std::fs::write(dir.join(".telepatch-usage"), s).unwrap();
-        std::fs::write(dir.join(".telepatch-usage.lock"), "").unwrap();
+    /// An owner marker `<owners>/<dir_name>/<sum>` (one byte, so a size
+    /// test sees it even where an empty directory has no size).
+    pub fn mark(owners: &Path, dir_name: &str, sum: &str) {
+        put(&owners.join(dir_name), sum, 1);
+    }
+
+    pub fn owners(sb: &Sandbox) -> PathBuf {
+        sb.path().join("owners")
+    }
+
+    pub fn fs_owners(sb: &Sandbox) -> PathBuf {
+        sb.fs.join(".telepatch/cache/owners")
+    }
+
+    /// `du -sbc` over the paths that exist: what the report must say.
+    pub fn du(paths: &[&Path]) -> u64 {
+        let ex: Vec<&Path> = paths.iter().copied().filter(|p| p.exists()).collect();
+        let o = std::process::Command::new("du")
+            .arg("-sbc")
+            .arg("--")
+            .args(&ex)
+            .output()
+            .unwrap();
+        String::from_utf8(o.stdout)
+            .unwrap()
+            .lines()
+            .last()
+            .unwrap()
+            .split_whitespace()
+            .next()
+            .unwrap()
+            .parse()
+            .unwrap()
+    }
+
+    pub fn main_bytes(sb: &Sandbox) -> u64 {
+        du(&[&sb.cache, &owners(sb)])
+    }
+    pub fn fs_bytes(sb: &Sandbox) -> u64 {
+        du(&[&fs_cache(sb), &fs_owners(sb)])
+    }
+    pub fn working_bytes(sb: &Sandbox) -> u64 {
+        du(&[
+            &sb.stage,
+            &sb.fs.join(".telepatch/tmp"),
+            &sb.path().join("fsX/.telepatch/tmp"),
+        ])
+    }
+
+    pub fn human(b: u64) -> String {
+        telepatch::report::human_bytes(b)
     }
 
     pub fn registry(sb: &Sandbox, dirs: &[&Path]) {
@@ -1048,51 +1086,35 @@ mod cache {
         )
     }
 
-    pub const A: u64 = 1_700_000_000;
-    pub const B: u64 = 1_700_100_000;
-
-    /// Host one: a main cache with two items and a record, a filesystem
-    /// cache with one unrecorded item, both registered.
+    /// Host one: a main cache with two items and markers, a filesystem cache
+    /// with one item and a marker, both registered; the stage holds a dead
+    /// run whose undo data is on `fsX`, a root with no cache.
     pub fn seed_one(sb: &Sandbox) {
         put(&sb.cache, &hexn(1), 1_572_864);
         put(&sb.cache, &hexn(2), 1000);
-        record(&sb.cache, &[(hexn(1), A, "site"), (hexn(2), B, "site,web")]);
+        mark(&owners(sb), "site", &hexn(1));
+        mark(&owners(sb), "site", &hexn(2));
+        mark(&owners(sb), "web", &hexn(2));
         put(&fs_cache(sb), &hexn(3), 2_097_152);
+        mark(&fs_owners(sb), "site", &hexn(3));
         registry(sb, &[&sb.cache, &fs_cache(sb)]);
+        put(&sb.fs.join(".telepatch/tmp/run1/undo/root/1"), "saved", 10);
+        put(
+            &sb.path().join("fsX/.telepatch/tmp/dead/undo/root/1"),
+            "u",
+            4096,
+        );
+        put(&sb.stage.join("dead"), "fsroots", 0);
+        std::fs::write(
+            sb.stage.join("dead/fsroots"),
+            format!("{}\n{}\n", sb.path().join("fsX").display(), sb.fs.display()),
+        )
+        .unwrap();
     }
 
-    /// Host two: one unrecorded item in the main cache, no registry.
+    /// Host two: one item in the main cache, no registry.
     pub fn seed_two(sb: &Sandbox) {
         put(&sb.cache, &hexn(4), 500);
-    }
-
-    pub struct Held(std::process::Child);
-    impl Drop for Held {
-        fn drop(&mut self) {
-            let _ = self.0.kill();
-            let _ = self.0.wait();
-        }
-    }
-
-    /// Hold the run lock (a shared `flock` on `<sb>/.lock`) in a child
-    /// process, as a run's root shell does, until the guard is dropped.
-    pub fn hold_run_lock(sb: &Sandbox) -> Held {
-        use std::io::BufRead;
-        let mut c = std::process::Command::new("bash")
-            .arg("-c")
-            .arg(r#"exec 7>>"$1"; flock -s -n 7 || exit 3; echo held; exec sleep 600"#)
-            .arg("sh")
-            .arg(sb.path().join(".lock"))
-            .stdout(std::process::Stdio::piped())
-            .spawn()
-            .unwrap();
-        let mut line = String::new();
-        std::io::BufReader::new(c.stdout.take().unwrap())
-            .read_line(&mut line)
-            .unwrap();
-        let h = Held(c);
-        assert_eq!(line.trim(), "held");
-        h
     }
 }
 use cache::*;
@@ -1100,7 +1122,7 @@ use std::path::Path;
 use telepatch::testing::Sandbox;
 
 #[test]
-fn cache_usage_over_two_stub_hosts_as_a_table() {
+fn cache_usage_over_two_stub_hosts_as_a_disk_space_report() {
     let d = tempfile::tempdir().unwrap();
     let inv = two_host_inventory(d.path());
     let sbs = [sandbox_(), sandbox_()];
@@ -1109,30 +1131,42 @@ fn cache_usage_over_two_stub_hosts_as_a_table() {
     let before = (tree(sbs[0].path()), tree(sbs[1].path()));
     let stub = Stub::new();
     let (out, code) = go_hosts(&stub, &sbs, &["cache", "usage", "--inventory", &inv]);
+    println!("--- cache usage ---\n{out}");
     assert_eq!(code, 0, "{out}");
-    let main = sbs[0].cache.display().to_string();
-    let fsc = fs_cache(&sbs[0]).display().to_string();
-    for want in [
-        "bot@one",
-        "bot@two",
-        &format!("{main}: 2 items, 1.5 MB"),
-        &format!("{fsc}: 1 item, 2.0 MB"),
-        "owner site: 2 items, 1.5 MB",
-        "owner web: 1 item, 0.0 MB",
-        "unowned: 1 item, 2.0 MB",
-        "last used 2023-11-14 22:13 .. 2023-11-16 02:00",
-        "host total: 3 items, 3.5 MB",
-        "host total: 1 item, 0.0 MB",
-        "run total: 2 hosts, 4 items, 3.5 MB",
-    ] {
-        assert!(out.contains(want), "missing {want:?} in:\n{out}");
-    }
-    // Read-only: nothing on either host changed, not even a lock file.
+    let (m0, f0, w0) = (
+        main_bytes(&sbs[0]),
+        fs_bytes(&sbs[0]),
+        working_bytes(&sbs[0]),
+    );
+    let (m1, w1) = (main_bytes(&sbs[1]), working_bytes(&sbs[1]));
+    assert!(m0 > du(&[&sbs[0].cache]), "markers are counted: {m0}");
+    assert!(
+        w0 > du(&[&sbs[0].stage, &sbs[0].fs.join(".telepatch/tmp")]),
+        "fsX's tmp is counted: {w0}"
+    );
+    let want = format!(
+        "host bot@one\n  {}: {}\n  {}: {}\n  working: {}\n  host total: {}\n\n\
+         host bot@two\n  {}: {}\n  working: {}\n  host total: {}\n\n\
+         inventory total: 2 hosts, {}\n",
+        sbs[0].cache.display(),
+        human(m0),
+        fs_cache(&sbs[0]).display(),
+        human(f0),
+        human(w0),
+        human(m0 + f0 + w0),
+        sbs[1].cache.display(),
+        human(m1),
+        human(w1),
+        human(m1 + w1),
+        human(m0 + f0 + w0 + m1 + w1),
+    );
+    assert_eq!(out, want);
+    // Read-only: nothing on either host changed.
     assert_eq!(before, (tree(sbs[0].path()), tree(sbs[1].path())));
 }
 
 #[test]
-fn cache_usage_json_is_one_document_in_bytes() {
+fn cache_usage_json_has_exactly_the_documented_keys_in_bytes() {
     let d = tempfile::tempdir().unwrap();
     let inv = two_host_inventory(d.path());
     let sbs = [sandbox_(), sandbox_()];
@@ -1144,50 +1178,50 @@ fn cache_usage_json_is_one_document_in_bytes() {
         &sbs,
         &["cache", "usage", "--inventory", &inv, "--json"],
     );
+    println!("--- cache usage --json ---\n{out}");
     assert_eq!(code, 0, "{out}");
     let v: serde_json::Value = serde_json::from_str(&out).unwrap_or_else(|e| panic!("{e}: {out}"));
+    let keys =
+        |v: &serde_json::Value| -> Vec<String> { v.as_object().unwrap().keys().cloned().collect() };
+    assert_eq!(keys(&v), ["hosts", "total_bytes"]);
     let hosts = v["hosts"].as_array().unwrap();
     assert_eq!(hosts.len(), 2);
-    assert_eq!(hosts[0]["host"], "bot@one");
-    assert_eq!(hosts[0]["status"], "ok");
-    assert_eq!(hosts[0]["items"], 3);
-    assert_eq!(hosts[0]["bytes"], 1_572_864 + 1000 + 2_097_152);
-    let dirs = hosts[0]["dirs"].as_array().unwrap();
-    assert_eq!(dirs.len(), 2);
-    assert_eq!(dirs[0]["dir"], sbs[0].cache.display().to_string());
-    assert_eq!(dirs[0]["items"], 2);
-    assert_eq!(dirs[0]["bytes"], 1_572_864 + 1000);
-    assert_eq!(dirs[0]["oldest"], A);
-    assert_eq!(dirs[0]["newest"], B);
-    let owners = dirs[0]["owners"].as_array().unwrap();
-    let site = owners.iter().find(|o| o["owner"] == "site").unwrap();
-    assert_eq!(
-        (&site["items"], &site["bytes"]),
-        (&2.into(), &(1_572_864 + 1000).into())
+    for h in hosts {
+        assert_eq!(keys(h), ["caches", "host", "total_bytes", "working_bytes"]);
+    }
+    let (m0, f0, w0) = (
+        main_bytes(&sbs[0]),
+        fs_bytes(&sbs[0]),
+        working_bytes(&sbs[0]),
     );
-    let web = owners.iter().find(|o| o["owner"] == "web").unwrap();
-    assert_eq!((&web["items"], &web["bytes"]), (&1.into(), &1000.into()));
-    assert_eq!(dirs[1]["unowned"]["items"], 1);
-    assert_eq!(dirs[1]["oldest"], serde_json::Value::Null);
-    assert_eq!(hosts[1]["bytes"], 500);
-    assert_eq!(v["total"]["hosts"], 2);
-    assert_eq!(v["total"]["items"], 4);
-    assert_eq!(v["total"]["bytes"], 1_572_864 + 1000 + 2_097_152 + 500);
+    let (m1, w1) = (main_bytes(&sbs[1]), working_bytes(&sbs[1]));
+    assert_eq!(hosts[0]["host"], "bot@one");
+    let c = hosts[0]["caches"].as_array().unwrap();
+    assert_eq!(c.len(), 2);
+    assert_eq!(keys(&c[0]), ["bytes", "dir"]);
+    assert_eq!(c[0]["dir"], sbs[0].cache.display().to_string());
+    assert_eq!(c[0]["bytes"], m0);
+    assert_eq!(c[1]["dir"], fs_cache(&sbs[0]).display().to_string());
+    assert_eq!(c[1]["bytes"], f0);
+    assert_eq!(hosts[0]["working_bytes"], w0);
+    assert_eq!(hosts[0]["total_bytes"], m0 + f0 + w0);
+    assert_eq!(hosts[1]["caches"].as_array().unwrap().len(), 1);
+    assert_eq!(hosts[1]["total_bytes"], m1 + w1);
+    assert_eq!(v["total_bytes"], m0 + f0 + w0 + m1 + w1);
 }
 
 #[test]
-fn cache_usage_unreachable_host_is_exit_1_and_listed_with_its_reason() {
+fn cache_usage_unreachable_host_is_exit_1_listed_and_has_an_error_in_json() {
     let d = tempfile::tempdir().unwrap();
     let inv = two_host_inventory(d.path());
     let sbs = [sandbox_(), sandbox_()];
     seed_one(&sbs[0]);
     let stub = Stub::new();
-    let n = std::cell::Cell::new(0usize);
-    let (out, code) = run_with_args(
-        &args(&["cache", "usage", "--inventory", &inv]),
-        &pbs(),
-        LocalTransport::new,
-        || {
+    let go = |extra: &[&str]| {
+        let n = std::cell::Cell::new(0usize);
+        let mut a = vec!["cache", "usage", "--inventory", &inv];
+        a.extend(extra);
+        run_with_args(&args(&a), &pbs(), LocalTransport::new, || {
             let i = n.get();
             n.set(i + 1);
             if i == 1 {
@@ -1195,75 +1229,152 @@ fn cache_usage_unreachable_host_is_exit_1_and_listed_with_its_reason() {
             } else {
                 stub.transport().sandboxed(&sbs[0])
             }
-        },
-    );
+        })
+    };
+    let (out, code) = go(&[]);
     assert_eq!(code, 1, "{out}");
-    assert!(out.contains("host total: 3 items"), "{out}");
+    assert!(out.contains("host bot@one\n"), "{out}");
+    assert!(out.contains("inventory total: 1 host, "), "{out}");
     let failed: Vec<&str> = out.lines().filter(|l| l.contains("bot@two")).collect();
     assert!(
         failed.iter().any(|l| l.contains("failed")),
         "bot@two not listed as failed:\n{out}"
     );
+    let (out, code) = go(&["--json"]);
+    assert_eq!(code, 1, "{out}");
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    let h = &v["hosts"][1];
+    assert_eq!(h["host"], "bot@two");
+    assert!(h["error"].as_str().is_some_and(|e| !e.is_empty()), "{out}");
+    assert_eq!(h["total_bytes"], 0);
+    assert!(v["hosts"][0].get("error").is_none(), "{out}");
 }
 
 #[test]
-fn cache_purge_without_yes_prints_what_it_would_remove_and_changes_nothing() {
+fn cache_usage_counts_a_dead_runs_undo_data_on_an_uncached_filesystem_once() {
     let sb = sandbox_();
     seed_one(&sb);
-    put(&sb.fs.join(".telepatch/tmp/run1"), "undo-data", 10);
+    let (out, code) = go_local(&sb, &["cache", "usage", "--local", "--json"]);
+    assert_eq!(code, 0, "{out}");
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    // fsroots names `fsX` and `fs` (already a cached root): each once.
+    assert_eq!(v["hosts"][0]["working_bytes"], working_bytes(&sb), "{out}");
+    let without = du(&[&sb.stage, &sb.fs.join(".telepatch/tmp")]);
+    assert!(
+        working_bytes(&sb) >= without + 4096,
+        "fsX's data (4096 bytes) is part of it"
+    );
+}
+
+#[test]
+fn cache_purge_without_yes_lists_directories_and_sizes_and_changes_nothing() {
+    let sb = sandbox_();
+    seed_one(&sb);
     let before = tree(sb.path());
     let (out, code) = go_local(&sb, &["cache", "purge", "--local"]);
+    println!("--- cache purge (no --yes) ---\n{out}");
     assert_eq!(code, 0, "{out}");
-    assert!(
-        out.contains("would remove") && out.contains("--yes"),
-        "{out}"
+    let want = format!(
+        "cache purge: nothing changed; add --yes to remove\n\n\
+         host local\n  {}: would remove {}\n  {}: would remove {}\n  host total: would remove {}\n\n\
+         would remove {} on 1 ok host(s)\n",
+        sb.cache.display(),
+        human(main_bytes(&sb)),
+        fs_cache(&sb).display(),
+        human(fs_bytes(&sb)),
+        human(main_bytes(&sb) + fs_bytes(&sb)),
+        human(main_bytes(&sb) + fs_bytes(&sb)),
     );
-    assert!(out.contains(&sb.cache.display().to_string()), "{out}");
-    assert!(out.contains("3 items"), "{out}");
+    assert_eq!(out, want);
     assert_eq!(before, tree(sb.path()));
 }
 
 #[test]
-fn cache_purge_yes_empties_every_registered_cache_and_leaves_tmp() {
+fn cache_purge_owner_without_yes_counts_the_items_it_would_delete() {
     let sb = sandbox_();
     seed_one(&sb);
-    // T106/T119's staging and undo data, a file of someone else's, a
-    // hex name that is a directory, a link and a near-miss name.
-    put(&sb.fs.join(".telepatch/tmp/run1/undo/root/1"), "saved", 10);
+    let before = tree(sb.path());
+    let (out, code) = go_local(&sb, &["cache", "purge", "--local", "--owner", "site"]);
+    println!("--- cache purge --owner site (no --yes) ---\n{out}");
+    assert_eq!(code, 0, "{out}");
+    // site alone owns item 1 (1.5 MB) and item 3 (2.0 MB); item 2 has web too.
+    assert!(
+        out.contains(&format!(
+            "{}: would delete 1 item, 1.5 MB",
+            sb.cache.display()
+        )),
+        "{out}"
+    );
+    assert!(
+        out.contains(&format!(
+            "{}: would delete 1 item, 2.0 MB",
+            fs_cache(&sb).display()
+        )),
+        "{out}"
+    );
+    assert!(out.contains("--yes"), "{out}");
+    assert_eq!(before, tree(sb.path()));
+}
+
+#[test]
+fn cache_purge_yes_empties_caches_and_owners_and_leaves_what_is_not_theirs() {
+    let sb = sandbox_();
+    seed_one(&sb);
+    // Legacy files of the build that kept a record, and its locks.
+    std::fs::write(sb.cache.join(".telepatch-usage"), "v1\n").unwrap();
+    std::fs::write(sb.cache.join(".telepatch-usage.lock"), "").unwrap();
+    std::fs::write(fs_cache(&sb).join(".telepatch-usage.tmp.1"), "").unwrap();
+    std::fs::write(sb.path().join(".lock"), "").unwrap();
+    std::fs::write(sb.path().join(".caches.lock"), "").unwrap();
+    // A file of someone else's, a hex name that is a directory, a link, an
+    // upper-case name and a short one.
     put(&sb.cache, "notes.txt", 7);
-    put(&sb.cache, &upper(), 7);
+    put(&sb.cache, &format!("{:064X}", 0xabcu64), 7);
     put(&sb.cache, &hexn(9)[1..], 7);
     std::fs::create_dir_all(sb.cache.join(hexn(8))).unwrap();
     put(&sb.cache.join(hexn(8)), "inner", 3);
     std::fs::write(sb.path().join("outside"), "keep me").unwrap();
     std::os::unix::fs::symlink(sb.path().join("outside"), sb.cache.join(hexn(7))).unwrap();
-    // Not registered: a per-filesystem cache of another root, and a hex
-    // file in the stage.
+    // Not registered: a cache-shaped directory of another root, a hex file in
+    // the stage, and a dead registry line.
     let other = sb.path().join("other/.telepatch/cache/sha256");
     put(&other, &hexn(5), 11);
+    mark(
+        &sb.path().join("other/.telepatch/cache/owners"),
+        "site",
+        &hexn(5),
+    );
     put(&sb.stage, &hexn(6), 12);
+    let reg = format!(
+        "{}\n{}\n{}/gone/.telepatch/cache/sha256\n",
+        sb.cache.display(),
+        fs_cache(&sb).display(),
+        sb.path().display()
+    );
+    std::fs::write(sb.path().join("caches"), &reg).unwrap();
     let keep = |sb: &Sandbox| {
         [
             tree(&sb.path().join("other")),
             tree(&sb.stage),
             tree(&sb.fs.join(".telepatch/tmp")),
+            tree(&sb.path().join("fsX")),
         ]
     };
     let kept = keep(&sb);
     let (out, code) = go_local(&sb, &["cache", "purge", "--local", "--yes"]);
+    println!("--- cache purge --yes ---\n{out}");
     assert_eq!(code, 0, "{out}");
-    assert!(out.contains("removed 3 items"), "{out}");
+    assert!(out.contains("removed 2 items"), "{out}");
     assert_eq!(keep(&sb), kept, "{out}");
-    // The main cache keeps what is not a regular 64-hex file.
     let mut left = vec![
         hexn(7),
         hexn(8),
         "notes.txt".to_string(),
-        upper(),
+        format!("{:064X}", 0xabcu64),
         hexn(9)[1..].to_string(),
     ];
     left.sort();
-    assert_eq!(names(&sb.cache), left);
+    assert_eq!(names(&sb.cache), left, "legacy files and 2 items are gone");
     assert_eq!(
         std::fs::read_to_string(sb.path().join("outside")).unwrap(),
         "keep me"
@@ -1274,26 +1385,32 @@ fn cache_purge_yes_empties_every_registered_cache_and_leaves_tmp() {
             .len(),
         3
     );
+    assert!(!owners(&sb).exists(), "the owners tree is gone");
+    assert!(!sb.path().join(".lock").exists() && !sb.path().join(".caches.lock").exists());
     // The filesystem cache is gone, `.telepatch` stays because of `tmp`.
     assert!(!sb.fs.join(".telepatch/cache").exists(), "{out}");
     assert!(sb.fs.join(".telepatch/tmp/run1/undo/root/1/saved").exists());
-    // The registry keeps only the main cache.
+    // The registry is left as it is: dead lines are skipped.
     assert_eq!(
         std::fs::read_to_string(sb.path().join("caches")).unwrap(),
-        format!("{}\n", sb.cache.display())
+        reg
     );
-    // Usage now shows nothing recorded or fetched beyond what stayed.
+    // Usage afterwards: only directories and working data.
     let (out, code) = go_local(&sb, &["cache", "usage", "--local", "--json"]);
     assert_eq!(code, 0, "{out}");
     let v: serde_json::Value = serde_json::from_str(&out).unwrap();
-    assert_eq!(v["total"]["items"], 0);
-    assert_eq!(v["total"]["bytes"], 0);
+    assert_eq!(
+        v["hosts"][0]["caches"].as_array().unwrap().len(),
+        1,
+        "{out}"
+    );
 }
 
 #[test]
 fn cache_purge_removes_the_whole_empty_telepatch_tree_but_not_a_used_one() {
     let sb = sandbox_();
     seed_one(&sb);
+    std::fs::remove_dir_all(sb.fs.join(".telepatch/tmp")).unwrap();
     let (out, code) = go_local(&sb, &["cache", "purge", "--local", "--yes"]);
     assert_eq!(code, 0, "{out}");
     assert!(!sb.fs.join(".telepatch").exists(), "{out}");
@@ -1312,11 +1429,15 @@ fn cache_purge_refuses_a_registry_line_outside_the_sandbox() {
     let sb = sandbox_();
     seed_one(&sb);
     // A cache-shaped directory in a tempdir of its own: only `tp_sbx` stops
-    // it. Its item, record and lock must be byte-identical afterwards.
+    // it. Its item and its markers must be byte-identical afterwards.
     let elsewhere = tempfile::tempdir().unwrap();
     let outside = elsewhere.path().join(".telepatch/cache/sha256");
     put(&outside, &hexn(20), 100);
-    record(&outside, &[(hexn(20), A, "site")]);
+    mark(
+        &elsewhere.path().join(".telepatch/cache/owners"),
+        "site",
+        &hexn(20),
+    );
     registry(&sb, &[&sb.cache, &fs_cache(&sb), &outside]);
     let before = tree(elsewhere.path());
     let (out, code) = go_local(&sb, &["cache", "purge", "--local", "--yes"]);
@@ -1324,13 +1445,7 @@ fn cache_purge_refuses_a_registry_line_outside_the_sandbox() {
     assert!(out.contains(&outside.display().to_string()), "{out}");
     assert_eq!(code, 0, "{out}");
     assert_eq!(tree(elsewhere.path()), before, "{out}");
-    // The sandbox's own were purged; the refused line stays registered.
     assert_eq!(names(&sb.cache), Vec::<String>::new());
-    assert!(
-        std::fs::read_to_string(sb.path().join("caches"))
-            .unwrap()
-            .contains(&outside.display().to_string())
-    );
     // Usage and the owner form refuse it too.
     for a in [
         &["cache", "usage", "--local"][..],
@@ -1358,82 +1473,78 @@ fn cache_purge_ignores_registry_lines_that_are_not_cache_directories() {
         ],
     );
     let before = (tree(&sb.stage), tree(&sb.path().join("etc")));
-    let (out, code) = go_local(&sb, &["cache", "purge", "--local", "--yes"]);
-    assert_eq!(code, 0, "{out}");
-    assert!(out.contains("not a telepatch cache directory"), "{out}");
-    assert_eq!((tree(&sb.stage), tree(&sb.path().join("etc"))), before);
+    for a in [
+        &["cache", "purge", "--local", "--yes"][..],
+        &["cache", "purge", "--local", "--yes", "--owner", "site"][..],
+    ] {
+        let (out, code) = go_local(&sb, a);
+        assert_eq!(code, 0, "{out}");
+        assert!(out.contains("not a telepatch cache directory"), "{out}");
+        assert_eq!((tree(&sb.stage), tree(&sb.path().join("etc"))), before);
+    }
     assert_eq!(names(&sb.cache), Vec::<String>::new());
 }
 
 #[test]
-fn cache_purge_is_refused_while_a_run_holds_the_lock() {
+fn cache_purge_does_not_need_flock_on_the_host() {
     let sb = sandbox_();
     seed_one(&sb);
-    {
-        let _run = hold_run_lock(&sb);
-        let before = tree(sb.path());
-        let (out, code) = go_local(&sb, &["cache", "purge", "--local", "--yes"]);
-        assert_eq!(code, 1, "{out}");
-        assert!(out.contains("in use by a running run"), "{out}");
-        assert_eq!(before, tree(sb.path()), "{out}");
-        // Usage takes no lock: it still reads.
-        let (out, code) = go_local(&sb, &["cache", "usage", "--local"]);
-        assert_eq!(code, 0, "{out}");
+    let farm = sb.path().join("farm");
+    std::fs::create_dir_all(&farm).unwrap();
+    for e in std::fs::read_dir("/usr/bin").unwrap().flatten() {
+        if e.file_name() != "flock" {
+            let _ = std::os::unix::fs::symlink(e.path(), farm.join(e.file_name()));
+        }
     }
-    // The run is over (child killed and reaped): the purge goes through.
-    let (out, code) = go_local(&sb, &["cache", "purge", "--local", "--yes"]);
+    let path = farm.display().to_string();
+    let probe = std::process::Command::new("bash")
+        .args(["-c", "command -v flock"])
+        .env("PATH", &path)
+        .status()
+        .unwrap();
+    assert!(!probe.success(), "flock is still on the test PATH");
+    let (out, code) = run_with_args(
+        &args(&["cache", "purge", "--local", "--yes"]),
+        &pbs(),
+        || {
+            LocalTransport::new()
+                .uid(0)
+                .sandboxed(&sb)
+                .env("PATH", &path)
+        },
+        SshTransport::new,
+    );
     assert_eq!(code, 0, "{out}");
+    assert!(!out.contains("flock"), "{out}");
     assert_eq!(names(&sb.cache), Vec::<String>::new());
+    assert!(!owners(&sb).exists());
 }
 
 #[test]
-fn cache_purge_owner_removes_the_owner_and_deletes_only_what_nobody_owns() {
+fn cache_purge_owner_deletes_only_items_that_owner_alone_had() {
     let sb = sandbox_();
     for n in 1..=5 {
         put(&sb.cache, &hexn(n), 100 * n);
     }
-    // 1 site; 2 site+web; 3 web; 4 no owner; 5 not in the record at all.
-    record(
-        &sb.cache,
-        &[
-            (hexn(1), A, "site"),
-            (hexn(2), B, "site,web"),
-            (hexn(3), A, "web"),
-            (hexn(4), B, ""),
-        ],
-    );
+    // 1 site; 2 site+web; 3 web; 4 no owner; 5 not marked at all.
+    mark(&owners(&sb), "site", &hexn(1));
+    mark(&owners(&sb), "site", &hexn(2));
+    mark(&owners(&sb), "web", &hexn(2));
+    mark(&owners(&sb), "web", &hexn(3));
     registry(&sb, &[&sb.cache]);
-    let rec = sb.cache.join(".telepatch-usage");
-    let before = tree(sb.path());
-    let (out, code) = go_local(&sb, &["cache", "purge", "--local", "--owner", "site"]);
-    assert_eq!(code, 0, "{out}");
-    assert!(out.contains("would"), "{out}");
-    assert_eq!(before, tree(sb.path()), "{out}");
     let (out, code) = go_local(
         &sb,
         &["cache", "purge", "--local", "--yes", "--owner", "site"],
     );
+    println!("--- cache purge --yes --owner site ---\n{out}");
     assert_eq!(code, 0, "{out}");
+    assert_eq!(names(&sb.cache), [hexn(2), hexn(3), hexn(4), hexn(5)]);
     assert_eq!(
-        names(&sb.cache),
-        [
-            ".telepatch-usage".to_string(),
-            ".telepatch-usage.lock".to_string(),
-            hexn(2),
-            hexn(3),
-            hexn(4),
-            hexn(5)
-        ]
+        names(&owners(&sb)),
+        ["web"],
+        "site's directory is empty and gone"
     );
-    assert_eq!(
-        std::fs::read_to_string(&rec).unwrap(),
-        format!(
-            "v1\n{}\t{B}\tweb\n{}\t{A}\tweb\n{}\t{B}\t\n",
-            hexn(2),
-            hexn(3),
-            hexn(4)
-        )
-    );
+    assert_eq!(names(&owners(&sb).join("web")), [hexn(2), hexn(3)]);
     // The registry is not touched by the owner form.
     assert_eq!(
         std::fs::read_to_string(sb.path().join("caches")).unwrap(),
@@ -1445,15 +1556,79 @@ fn cache_purge_owner_removes_the_owner_and_deletes_only_what_nobody_owns() {
         &["cache", "purge", "--local", "--yes", "--owner", "web"],
     );
     assert_eq!(code, 0, "{out}");
+    assert_eq!(names(&sb.cache), [hexn(4), hexn(5)]);
+    assert!(names(&owners(&sb)).is_empty());
+}
+
+#[test]
+fn cache_purge_owner_with_a_slash_removes_only_its_encoded_directory() {
+    let sb = sandbox_();
+    for n in 1..=4 {
+        put(&sb.cache, &hexn(n), 100);
+    }
+    put(&fs_cache(&sb), &hexn(5), 100);
+    let o = owners(&sb);
+    // dev_base: 1 alone; 2 with rust. rust: 2, 3. The owner named
+    // `container%2Fdev_base` (directory `container%252Fdev_base`): 4.
+    mark(&o, "container%2Fdev_base", &hexn(1));
+    mark(&o, "container%2Fdev_base", &hexn(2));
+    mark(&o, "container%2Frust", &hexn(2));
+    mark(&o, "container%2Frust", &hexn(3));
+    mark(&o, "container%252Fdev_base", &hexn(4));
+    mark(&fs_owners(&sb), "container%2Fdev_base", &hexn(5));
+    registry(&sb, &[&sb.cache, &fs_cache(&sb)]);
+    let (out, code) = go_local(
+        &sb,
+        &[
+            "cache",
+            "purge",
+            "--local",
+            "--yes",
+            "--owner",
+            "container/dev_base",
+        ],
+    );
+    println!("--- cache purge --yes --owner container/dev_base ---\n{out}");
+    assert_eq!(code, 0, "{out}");
+    assert_eq!(names(&sb.cache), [hexn(2), hexn(3), hexn(4)]);
+    assert_eq!(names(&fs_cache(&sb)), Vec::<String>::new());
+    assert_eq!(names(&o), ["container%252Fdev_base", "container%2Frust"]);
+    assert_eq!(names(&o.join("container%2Frust")), [hexn(2), hexn(3)]);
+    assert_eq!(names(&o.join("container%252Fdev_base")), [hexn(4)]);
+    assert!(!fs_owners(&sb).join("container%2Fdev_base").exists());
+}
+
+#[test]
+fn cache_purge_owner_removes_a_marker_link_only_and_leaves_stray_names() {
+    let sb = sandbox_();
+    put(&sb.cache, &hexn(1), 10);
+    put(&sb.cache, &hexn(2), 10);
+    std::fs::write(sb.path().join("outside"), "keep me").unwrap();
+    let od = owners(&sb).join("site");
+    std::fs::create_dir_all(&od).unwrap();
+    // 1's marker is a link; 2 is a link (not a regular file) with a marker.
+    std::os::unix::fs::symlink(sb.path().join("outside"), od.join(hexn(1))).unwrap();
+    mark(&owners(&sb), "site", &hexn(2));
+    std::fs::remove_file(sb.cache.join(hexn(2))).unwrap();
+    std::os::unix::fs::symlink(sb.path().join("outside"), sb.cache.join(hexn(2))).unwrap();
+    put(&od, "README", 1);
+    put(&od, &hexn(3)[1..], 1);
+    registry(&sb, &[&sb.cache]);
+    let (out, code) = go_local(
+        &sb,
+        &["cache", "purge", "--local", "--yes", "--owner", "site"],
+    );
+    assert_eq!(code, 0, "{out}");
     assert_eq!(
         names(&sb.cache),
-        [
-            ".telepatch-usage".to_string(),
-            ".telepatch-usage.lock".to_string(),
-            hexn(4),
-            hexn(5)
-        ]
+        [hexn(2)],
+        "the link item stays: only regular files go"
     );
+    assert_eq!(
+        std::fs::read_to_string(sb.path().join("outside")).unwrap(),
+        "keep me"
+    );
+    assert_eq!(names(&od), [hexn(3)[1..].to_string(), "README".to_string()]);
 }
 
 #[test]
@@ -1564,22 +1739,6 @@ fn cache_targets_are_exclusive_like_run_and_purge_needs_a_valid_owner() {
         let (out, code) = go(a);
         assert_eq!(code, 2, "{a:?}: {out}");
     }
-}
-
-#[test]
-fn cache_usage_with_an_unreadable_record_warns_and_owner_purge_leaves_it_alone() {
-    let sb = sandbox_();
-    put(&sb.cache, &hexn(1), 100);
-    std::fs::write(sb.cache.join(".telepatch-usage"), "garbage\n").unwrap();
-    let before = tree(&sb.cache);
-    let (out, code) = go_local(&sb, &["cache", "usage", "--local"]);
-    assert_eq!(code, 0, "{out}");
-    assert!(out.contains("is unreadable"), "{out}");
-    assert!(out.contains("1 item"), "{out}");
-    let (out, code) = go_local(&sb, &["cache", "purge", "--local", "--yes", "--owner", "x"]);
-    assert_eq!(code, 0, "{out}");
-    assert!(out.contains("nothing changed there"), "{out}");
-    assert_eq!(before, tree(&sb.cache));
 }
 
 #[test]

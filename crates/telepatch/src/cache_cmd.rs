@@ -1,4 +1,4 @@
-//! `cache usage` and `cache purge` over a set of hosts (T123): one root
+//! `cache usage` and `cache purge` over a set of hosts (T123, T136): one root
 //! shell per host, one script per host ([`crate::ops::fetch::cache_usage_script`]
 //! and [`crate::ops::fetch::cache_purge_script`]) sent as a probe, its
 //! output read into a [`CacheReport`]. Declared inside [`crate::executor`]
@@ -14,10 +14,11 @@ use crate::report::{CacheHost, CacheReport};
 /// What to do on every host.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CacheAction {
-    /// Read the registry, the records and the files. No lock, no change.
+    /// Measure the cache and working directories. No change.
     Usage,
-    /// Remove the caches (`owner`: only that owner's share).
-    Purge { owner: Option<String> },
+    /// Remove the caches (`owner`: only items that playbook alone owns);
+    /// without `yes` only count what would go.
+    Purge { owner: Option<String>, yes: bool },
 }
 
 /// Run `action` on every host (`(name, target)`) and return the report in
@@ -46,7 +47,9 @@ pub fn run_cache(
     });
     let script = Rc::new(match &action {
         CacheAction::Usage => crate::ops::fetch::cache_usage_script(),
-        CacheAction::Purge { owner } => crate::ops::fetch::cache_purge_script(owner.as_deref()),
+        CacheAction::Purge { owner, yes } => {
+            crate::ops::fetch::cache_purge_script(owner.as_deref(), *yes)
+        }
     });
     let permits = Rc::new(tokio::sync::Semaphore::new(
         serial.unwrap_or(usize::MAX >> 4),

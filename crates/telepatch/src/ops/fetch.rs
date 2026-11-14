@@ -463,15 +463,13 @@ tp_end() {
 }
 "#;
 
-/// What `cache usage` and `cache purge` share (T123), after [`TP_HEX`] and
-/// [`TP_SHAPE`]: `tp_regdirs MAIN REGISTRY` fills `dirs` with
-/// the registry's lines and the main cache, each through `tp_shape` and
-/// without repeats (a `W` line for a line that is no cache directory);
-/// `tp_recload RECORD` reads a usage record into `tp_rl` (last used), `tp_ro`
-/// (owners) and `tp_rs` (its sums in order): 0 read, 1 unreadable, 2 none.
-/// Output lines are `TAG TAB fields`, read by `executor::cache_cmd`.
-const CACHE_CMD: &str = r#"declare -A tp_rl tp_ro
-declare -a tp_rs dirs
+/// What `cache usage` and `cache purge` share, after [`TP_HEX`] and
+/// [`TP_SHAPE`]: `tp_regdirs MAIN REGISTRY` fills `dirs` with the registry's
+/// lines and the main cache, each through `tp_shape` and without repeats (a
+/// `W` line for a line that is no cache directory); `tp_du PATH...` prints
+/// the `du -sb` total of the paths. Output lines are `TAG TAB fields`, read by
+/// `report::CacheHost::parse`.
+const CACHE_CMD: &str = r#"declare -a dirs
 tp_regdirs() {
   local cm=$1 rg=$2 line seen nl=$'\n'
   local -a cand=()
@@ -493,33 +491,19 @@ tp_regdirs() {
     dirs+=("$line")
   done
 }
-tp_recload() {
-  local rec=$1 line n=0 s t o rest
-  tp_rl=(); tp_ro=(); tp_rs=()
-  [ -e "$rec" ] || [ -L "$rec" ] || return 2
-  [ -f "$rec" ] && [ ! -L "$rec" ] || return 1
-  while IFS= read -r line || [ -n "$line" ]; do
-    n=$((n+1))
-    if [ "$n" -eq 1 ]; then [ "$line" = v1 ] || return 1; continue; fi
-    case $line in *$'\t'*$'\t'*) ;; *) return 1;; esac
-    s=${line%%$'\t'*}; rest=${line#*$'\t'}; t=${rest%%$'\t'*}; o=${rest#*$'\t'}
-    tp_hex "$s" || return 1
-    case $t in ''|*[!0123456789]*) return 1;; esac
-    [ ${#t} -le 12 ] || return 1
-    case $o in *$'\t'*) return 1;; esac
-    tp_rl[$s]=$t; tp_ro[$s]=$o; tp_rs+=("$s")
-  done < "$rec" 2>/dev/null || return 1
-  [ "$n" -ge 1 ] || return 1
-  return 0
-}
+tp_du() { local n; n=$(du -sbc -- "$@" 2>/dev/null | tail -n 1); n=${n%%[!0-9]*}; echo "${n:-0}"; }
 cm=${TP_FETCH_CACHE:-/var/cache/telepatch/sha256}; cm=${cm%/}; cp=${cm%/*}; rg=$cp/caches
+if m=$(tp_sbx "$rg" 2>&1); then tp_regdirs "$cm" "$rg"; else printf 'W\t%s\n' "$m"; tp_regdirs "$cm" /dev/null/none; fi
 "#;
 
-/// The `cache usage` script (T123): one probe on the root shell, read-only
-/// and without a lock. For the registry's directories and the main cache it
-/// prints `D<TAB>dir`, then `I<TAB>sum<TAB>bytes<TAB>last<TAB>owners` for each
-/// regular 64-hex file (`last` is empty when the record has no line for it)
-/// and `W<TAB>text` for a warning. Every path goes through `tp_sbx` first.
+/// The `cache usage` script: one probe on the root shell, read-only. It
+/// prints `D<TAB>dir<TAB>bytes` for each cache directory (the registry's and
+/// the main cache, existing ones), the bytes being `du -sb` of the directory
+/// and of the `owners` directory beside it; `K<TAB>bytes` for the working
+/// directories telepatch owns (the stage, and `.telepatch/tmp` of every root a
+/// registered per-filesystem cache or a `<stage>/*/fsroots` names, each
+/// counted once); and `W<TAB>text` for a warning. Every path goes through
+/// `tp_sbx` first.
 pub fn cache_usage_script() -> String {
     let mut s = String::from("(\n");
     s.push_str(crate::sandbox::SBX);
@@ -527,27 +511,39 @@ pub fn cache_usage_script() -> String {
     s.push_str(TP_SHAPE);
     s.push_str(CACHE_CMD);
     s.push_str(
-        r#"tp_rd() {
-  local d=$1 f s sz m rc
-  m=$(tp_sbx "$d" "$d/.telepatch-usage" 2>&1) || { printf 'W\t%s\n' "$m"; return 0; }
-  [ -d "$d" ] || return 0
-  printf 'D\t%s\n' "$d"
-  tp_recload "$d/.telepatch-usage"; rc=$?
-  if [ "$rc" -eq 1 ]; then
-    tp_rl=(); tp_ro=()
-    printf 'W\t%s\n' "usage record in $d is unreadable: last-used times and owners are not shown"
-  fi
-  for f in "$d"/*; do
-    s=${f##*/}
-    tp_hex "$s" || continue
-    [ -f "$f" ] && [ ! -L "$f" ] || continue
-    sz=$(stat -c %s -- "$f" 2>/dev/null || echo 0)
-    printf 'I\t%s\t%s\t%s\t%s\n' "$s" "$sz" "${tp_rl[$s]-}" "${tp_ro[$s]-}"
-  done
-  return 0
+        r#"declare -A tp_wk
+tp_wl=()
+tp_addroot() {
+  local w
+  case $1 in /*) ;; *) return 0;; esac
+  case $1 in */..|*/../*|*/.|*/./*) return 0;; esac
+  w=${1%/}/.telepatch/tmp
+  [ -z "${tp_wk[$w]-}" ] || return 0
+  tp_wk[$w]=1; tp_wl+=("$w")
 }
-if m=$(tp_sbx "$rg" 2>&1); then tp_regdirs "$cm" "$rg"; else printf 'W\t%s\n' "$m"; tp_regdirs "$cm" /dev/null/none; fi
+tp_rd() {
+  local d=$1 od=${1%/*}/owners m
+  m=$(tp_sbx "$d" "$od" 2>&1) || { printf 'W\t%s\n' "$m"; return 0; }
+  case $d in */.telepatch/cache/sha256) tp_addroot "${d%/.telepatch/cache/sha256}";; esac
+  [ -d "$d" ] || return 0
+  if [ -d "$od" ]; then printf 'D\t%s\t%s\n' "$d" "$(tp_du "$d" "$od")"; else printf 'D\t%s\t%s\n' "$d" "$(tp_du "$d")"; fi
+}
 for d in "${dirs[@]}"; do tp_rd "$d"; done
+st=${TP_FETCH_STAGE:-/var/tmp/telepatch}
+if m=$(tp_sbx "$st" 2>&1); then
+  tp_wl+=("$st")
+  for f in "$st"/*/fsroots; do
+    [ -f "$f" ] && [ ! -L "$f" ] || continue
+    while IFS= read -r r || [ -n "$r" ]; do tp_addroot "$r"; done < "$f"
+  done
+else printf 'W\t%s\n' "$m"; fi
+wb=0
+for w in "${tp_wl[@]}"; do
+  m=$(tp_sbx "$w" 2>&1) || { printf 'W\t%s\n' "$m"; continue; }
+  [ -d "$w" ] || continue
+  wb=$((wb + $(tp_du "$w")))
+done
+printf 'K\t%s\n' "$wb"
 true
 )
 "#,
@@ -555,86 +551,70 @@ true
     s
 }
 
-/// The `cache purge --yes` script (T123), one probe on the root shell.
-/// `owner` is `--owner`. It takes the run lock (`<main>/../.lock`)
-/// exclusively without waiting; a held one prints `L` and nothing is touched.
-/// Output as [`cache_usage_script`], plus `X<TAB>sum<TAB>bytes` for each
-/// item removed, `U<TAB>sum` for an item that lost the owner and stays,
-/// `R<TAB>path` for a directory removed, `E<TAB>text` for a host-level
-/// refusal.
+/// The `cache purge` script, one probe on the root shell, with no lock and
+/// no record. `owner` is `--owner` (a playbook name; the owner directory is
+/// [`owner_dir`] of it, passed as one quoted word); `yes` false only counts.
+/// For each cache directory it prints `X<TAB>dir<TAB>items<TAB>bytes` (the
+/// items removed, or with `yes` false the items it would remove), `R<TAB>path`
+/// for a directory removed and `W<TAB>text` for a warning. Every path goes
+/// through `tp_sbx` first.
 ///
-/// Without an owner, in every registered directory it removes the regular
-/// 64-hex files, the record and its lock, then (a per-filesystem cache only)
+/// Without an owner, in each directory it removes every regular (not a link)
+/// 64-hex file, the whole `owners` directory beside it, and any legacy
+/// record file (T121); then, for a per-filesystem cache only,
 /// `rmdir`s `.telepatch/cache/sha256`, `.telepatch/cache` and `.telepatch`,
-/// each only if empty, so `.telepatch/tmp` keeps `.telepatch`; the registry
-/// is rewritten to the main cache and the lines `tp_sbx` refused. With an
-/// owner it rewrites each record without that owner and deletes the items
-/// left with none (after the record is written); items with no owner or no
-/// record line are not touched, and nothing else is.
-pub fn cache_purge_script(owner: Option<&str>) -> String {
+/// each only if empty, so `.telepatch/tmp` keeps `.telepatch`. It never
+/// touches the working directories or the registry, and removes T121's two
+/// lock files beside the main cache. With an owner it removes `owners/<dir>`
+/// (the markers, links as links) and deletes each regular item that had that
+/// marker and has no other `owners/*/<sum>` left.
+pub fn cache_purge_script(owner: Option<&str>, yes: bool) -> String {
     let mut s = String::from("(\n");
     s.push_str(crate::sandbox::SBX);
     s.push_str(TP_HEX);
     s.push_str(TP_SHAPE);
     s.push_str(CACHE_CMD);
     s.push_str("tp_o=");
-    s.push_str(&quote(owner.unwrap_or("")));
-    s.push('\n');
+    s.push_str(&quote(&owner.map(owner_dir).unwrap_or_default()));
+    s.push_str(if yes { "\ntp_y=1\n" } else { "\ntp_y=0\n" });
     s.push_str(
-        r#"rk=$cp/.caches.lock; ru=$cp/.lock
-tp_odel() {
-  local x r=
-  local -a a
-  IFS=, read -ra a <<<"$1"
-  for x in "${a[@]}"; do [ "$x" = "$2" ] || r=${r:+$r,}$x; done
-  printf '%s' "$r"
-}
-tp_rm() {
-  local f=$1 sz
-  [ -f "$f" ] && [ ! -L "$f" ] || return 0
-  sz=$(stat -c %s -- "$f" 2>/dev/null || echo 0)
-  if rm -f -- "$f" 2>/dev/null && [ ! -e "$f" ]; then printf 'X\t%s\t%s\n' "${f##*/}" "$sz"; fi
-}
-tp_pown() {
-  local d=$1 rec=$1/.telepatch-usage tmp=$1/.telepatch-usage.tmp.$$ s o rc changed=0
-  local -a del=() upd=()
-  tp_recload "$rec"; rc=$?
-  [ "$rc" -ne 2 ] || return 0
-  if [ "$rc" -ne 0 ]; then printf 'W\t%s\n' "usage record in $d is unreadable: nothing changed there"; return 0; fi
-  {
-    printf 'v1\n'
-    for s in "${tp_rs[@]}"; do
-      o=${tp_ro[$s]}
-      case ",$o," in
-        *",$tp_o,"*)
-          changed=1
-          o=$(tp_odel "$o" "$tp_o")
-          if [ -z "$o" ]; then del+=("$s"); continue; fi
-          upd+=("$s");;
-      esac
-      printf '%s\t%s\t%s\n' "$s" "${tp_rl[$s]}" "$o"
-    done
-  } > "$tmp" 2>/dev/null || { rm -f -- "$tmp"; printf 'W\t%s\n' "cannot write $tmp: nothing changed there"; return 0; }
-  if [ "$changed" = 0 ]; then rm -f -- "$tmp"; return 0; fi
-  mv -f -- "$tmp" "$rec" 2>/dev/null || { rm -f -- "$tmp"; printf 'W\t%s\n' "cannot replace $rec: nothing changed there"; return 0; }
-  for s in "${upd[@]}"; do printf 'U\t%s\n' "$s"; done
-  for s in "${del[@]}"; do tp_rm "$d/$s"; done
+        r#"tp_rm() {
+  local sz
+  [ -f "$1" ] && [ ! -L "$1" ] || return 0
+  sz=$(stat -c %s -- "$1" 2>/dev/null || echo 0)
+  if [ "$tp_y" = 1 ]; then rm -f -- "$1" 2>/dev/null && [ ! -e "$1" ] || return 0; fi
+  cnt=$((cnt+1)); bytes=$((bytes+sz))
 }
 tp_pd() {
-  local d=$1 f s m c t
-  m=$(tp_sbx "$d" "$d/.telepatch-usage" "$d/.telepatch-usage.lock" 2>&1) || { printf 'W\t%s\n' "$m"; return 2; }
-  [ -d "$d" ] || return 1
-  printf 'D\t%s\n' "$d"
-  if [ -n "$tp_o" ]; then tp_pown "$d"; return 0; fi
+  local d=$1 od=${1%/*}/owners f s x m c t cnt=0 bytes=0 left
+  m=$(tp_sbx "$d" "$od" 2>&1) || { printf 'W\t%s\n' "$m"; return 0; }
+  [ -d "$d" ] && [ ! -L "$d" ] || return 0
+  if [ -n "$tp_o" ]; then
+    if [ -d "$od/$tp_o" ] && [ ! -L "$od" ] && [ ! -L "$od/$tp_o" ]; then
+      for x in "$od/$tp_o"/*; do
+        s=${x##*/}
+        tp_hex "$s" && { [ -f "$x" ] || [ -L "$x" ]; } || continue
+        left=0
+        for f in "$od"/*/"$s"; do
+          [ "$f" != "$x" ] && [ ! -L "${f%/*}" ] && { [ -e "$f" ] || [ -L "$f" ]; } && { left=1; break; }
+        done
+        if [ "$tp_y" = 1 ]; then rm -f -- "$x" 2>/dev/null; fi
+        if [ "$left" = 0 ]; then tp_rm "$d/$s"; fi
+      done
+      if [ "$tp_y" = 1 ]; then rmdir -- "$od/$tp_o" 2>/dev/null; fi
+    fi
+    printf 'X\t%s\t%s\t%s\n' "$d" "$cnt" "$bytes"
+    return 0
+  fi
   for f in "$d"/*; do
-    s=${f##*/}
-    tp_hex "$s" || continue
-    tp_rm "$f"
+    tp_hex "${f##*/}" && tp_rm "$f"
   done
-  for f in "$d/.telepatch-usage" "$d/.telepatch-usage.lock"; do
-    if [ -f "$f" ] || [ -L "$f" ]; then rm -f -- "$f" 2>/dev/null; fi
-  done
-  if [ "$d" != "$cm" ]; then
+  if [ "$tp_y" = 1 ]; then
+    rm -f -- "$d/.telepatch-usage" "$d"/.telepatch-usage.* 2>/dev/null
+    rm -rf --one-file-system -- "$od" 2>/dev/null
+  fi
+  printf 'X\t%s\t%s\t%s\n' "$d" "$cnt" "$bytes"
+  if [ "$tp_y" = 1 ] && [ "$d" != "$cm" ]; then
     c=${d%/sha256}; t=${c%/cache}
     m=$(tp_sbx "$c" "$t" 2>&1) || { printf 'W\t%s\n' "$m"; return 0; }
     rmdir -- "$d" 2>/dev/null && printf 'R\t%s\n' "$d"
@@ -643,26 +623,8 @@ tp_pd() {
   fi
   return 0
 }
-[ -d "$cp" ] || exit 0
-command -v flock >/dev/null 2>&1 || { printf 'E\tflock is not on the host: cannot tell whether a run is in progress\n'; exit 0; }
-m=$(tp_sbx "$cp" "$ru" "$rg" "$rk" "$rg.tmp.$$" 2>&1) || { printf 'E\t%s\n' "$m"; exit 0; }
-{ exec 7>>"$ru"; } 2>/dev/null || { printf 'E\tcannot open %s\n' "$ru"; exit 0; }
-flock -x -n 7 || { printf 'L\n'; exit 0; }
-{ exec 8>>"$rk"; } 2>/dev/null || { printf 'E\tcannot open %s\n' "$rk"; exit 0; }
-flock -x -w 30 8 || { printf 'E\tthe cache registry is locked\n'; exit 0; }
-tp_regdirs "$cm" "$rg"
-keep=()
-for d in "${dirs[@]}"; do
-  tp_pd "$d"; rc=$?
-  if [ "$rc" -eq 2 ]; then keep+=("$d"); fi
-done
-if [ -z "$tp_o" ] && [ -f "$rg" ]; then
-  {
-    if [ -d "$cm" ]; then printf '%s\n' "$cm"; fi
-    for d in "${keep[@]}"; do [ "$d" = "$cm" ] || printf '%s\n' "$d"; done
-    true
-  } > "$rg.tmp.$$" 2>/dev/null && mv -f -- "$rg.tmp.$$" "$rg" 2>/dev/null || { rm -f -- "$rg.tmp.$$"; printf 'W\t%s\n' "cache registry $rg not written"; }
-fi
+for d in "${dirs[@]}"; do tp_pd "$d"; done
+if [ "$tp_y" = 1 ] && [ -z "$tp_o" ] && tp_sbx "$cp/.caches.lock" "$cp/.lock"; then rm -f -- "$cp/.caches.lock" "$cp/.lock" 2>/dev/null; fi
 true
 )
 "#,

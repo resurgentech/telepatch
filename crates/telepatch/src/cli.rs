@@ -175,8 +175,9 @@ enum Cmd {
 
 #[derive(Subcommand)]
 enum CacheCmd {
-    /// Per host and directory: items, size, owners, last-used times.
-    /// Read-only, takes no lock.
+    /// Per host: the size on disk of each cache directory (owner markers
+    /// included), of the working directories (the stage and every
+    /// `.telepatch/tmp`) on one `working` line, and a total. Read-only.
     Usage {
         #[command(flatten)]
         targets: CacheTargets,
@@ -184,18 +185,19 @@ enum CacheCmd {
         #[arg(long)]
         json: bool,
     },
-    /// Remove every cached item, the usage records and the empty
-    /// `.telepatch` directories of a host. Refused while a run is in
-    /// progress there. Without `--yes` it prints what it would remove.
+    /// Remove every cached item, the owner markers and the empty
+    /// `.telepatch` directories of a host; never the working directories.
+    /// A run in progress is not detected: its op fails and a rerun
+    /// downloads again. Without `--yes` it prints what it would remove.
     Purge {
         #[command(flatten)]
         targets: CacheTargets,
         /// Remove for real.
         #[arg(long)]
         yes: bool,
-        /// Only this playbook's share: take it from the items' owners, and
-        /// delete an item only when no owner is left (an item with no
-        /// recorded owner is left alone).
+        /// Only this playbook's share: remove its owner markers and delete
+        /// each item that no other playbook marks (an item with no owner is
+        /// left alone).
         #[arg(long, value_name = "PLAYBOOK")]
         owner: Option<String>,
     },
@@ -400,9 +402,10 @@ fn dispatch<V: DeserializeOwned + Default + 'static>(
                 Err(m) => return err(m),
             };
             // Without `--yes` a purge only reads, then says what `--yes` removes.
-            let action = if purge && yes {
+            let action = if purge && (yes || owner.is_some()) {
                 CacheAction::Purge {
                     owner: owner.clone(),
+                    yes,
                 }
             } else {
                 CacheAction::Usage
