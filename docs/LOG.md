@@ -1846,3 +1846,17 @@ are appended, never edited in; a hook refuses rewrites.
   roles_registered.rs. Red then green (FOREMAN rerun red). Gate E and
   check-sandbox green; no snapshot moved.
 - Commits: telepatch 30611ac; tp_basic affd0a3
+
+## 2026-11-13 — T117 Rocky 9 test image: `rockylinux/rockylinux:9`
+
+- tp_basic `scripts/test-edge.sh` `edge_image` (the live map; not in the
+  step's Touches), the matrix self-test map and README.md move to
+  `rockylinux/rockylinux:9`. Self-test red (map) then green.
+- Live: `just docker-vm test-edge-cell rockylinux9` on veritech04, one
+  1 GiB VM, deleted and verified gone. FAIL on the Ansible side at the
+  edge Red Hat package task: `No package mailx available` and `curl`
+  vs the image's `curl-minimal`. Both are EL9-wide, so the old image
+  fails the same way (inferred; no old-image cell was ever run). The
+  telepatch side is unproven on Rocky 9.
+- Gate B green.
+- Commits: tp_basic ccb71bd
