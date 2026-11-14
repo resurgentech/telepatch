@@ -2028,3 +2028,21 @@ are appended, never edited in; a hook refuses rewrites.
 - Plan snapshots: the one new op. Red: plans failed on HEAD's undo.rs.
   Gate B and E's telepatch half green. VM run is T140's.
 - Commits: tp_basic d7b3914
+
+## 2026-11-14 — T140 Close out T104 (T104 closed)
+
+- Reruns on veritech04, 1 GiB tp-* VMs, one at a time:
+  - docker VM tp-docker-20261114-064252: `test-live-unit` 2/2 (35 s, no
+    hang), `test-live-openbao` 1/1 (20 s); T138 bound never hit; peak
+    403 MiB (+23 swap).
+  - `test-vm ubuntu2404 undo_fs`: attempt 1 failed on a stale
+    build/tp-basic (no `just musl`); attempt 2 tp-undo-fs-20261114t065023z
+    PASS 47 ok, no GAP: `/var/cache/telepatch/sha256: 0.2 MB`, owner
+    marker, 3 cached on run 2, purge to 0.0 MB. Peak 205 MiB.
+- Note and README mark the Goal 8 and 9 rows built; rollback (running the
+  undo log), mid-run reconnect and PTY stay designed.
+- veritech04 vt-* set unchanged, no tp-* left, pool tp only
+  ubuntu2404.qcow2; workstation real paths identical.
+- T104 closed with T138–T140: reports 2026-11-14-T104-goals-8-9-proofs.md
+  and 2026-11-14-T140-close-out-T104.md. T104 and T140 pruned.
+- Commits: telepatch b0d3901
